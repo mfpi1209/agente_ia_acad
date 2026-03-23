@@ -57,12 +57,10 @@ def _run_migrations_background():
 
 def _create_indexes():
     """Cria indexes com autocommit (necessário para não travar em transação)."""
-    cfg = {k: v for k, v in DB_CONFIG.items() if k != 'options'}
-    cfg['connect_timeout'] = 10
-    conn = psycopg2.connect(**cfg)
+    conn = psycopg2.connect(**DB_CONFIG)
     conn.set_session(autocommit=True)
     cur = conn.cursor()
-    cur.execute("SET statement_timeout = '300s'")
+    cur.execute("SET statement_timeout = 0")
 
     indexes = [
         ("idx_kb_tema", "knowledge_base", "tema"),
@@ -180,6 +178,7 @@ Seu nome é "Assistente Virtual Cruzeiro do Sul". Você NÃO é um atendente hum
 def get_db():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
+        conn.cursor().execute("SET statement_timeout = 0")
     except Exception as e:
         print(f"[API] ERRO ao conectar DB: {e}", flush=True)
         raise
@@ -570,20 +569,37 @@ async def get_stats():
     try:
         with get_db() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT count(*) FROM knowledge_base")
-            total = cur.fetchone()[0]
-            cur.execute("SELECT count(*) FROM knowledge_base WHERE embedding IS NOT NULL")
-            with_emb = cur.fetchone()[0]
-            cur.execute("SELECT tema, count(*) FROM knowledge_base WHERE tema IS NOT NULL GROUP BY tema ORDER BY count(*) DESC")
-            temas = [{'tema': r[0], 'count': r[1]} for r in cur.fetchall()]
-            cur.execute("SELECT count(*) FROM knowledge_base WHERE tema IS NULL OR tema = ''")
-            sem_tema = cur.fetchone()[0]
-            cur.execute("SELECT count(*) FROM ia_interaction_log")
-            interactions = cur.fetchone()[0]
-            cur.execute("SELECT acao, count(*) FROM ia_interaction_log GROUP BY acao ORDER BY count(*) DESC")
-            actions = [{'action': r[0], 'count': r[1]} for r in cur.fetchall()]
-            cur.execute("SELECT avg(confianca) FROM ia_interaction_log WHERE confianca IS NOT NULL")
-            avg_conf = cur.fetchone()[0] or 0
+            cur.execute("SELECT reltuples::bigint FROM pg_class WHERE relname = 'knowledge_base'")
+            row = cur.fetchone()
+            total = max(row[0], 0) if row else 0
+            cur.execute("SELECT reltuples::bigint FROM pg_class WHERE relname = 'ia_interaction_log'")
+            row = cur.fetchone()
+            interactions = max(row[0], 0) if row else 0
+            with_emb = 0
+            temas = []
+            sem_tema = 0
+            actions = []
+            avg_conf = 0
+            try:
+                cur.execute("SELECT count(*) FROM knowledge_base WHERE embedding IS NOT NULL")
+                with_emb = cur.fetchone()[0]
+            except Exception:
+                pass
+            try:
+                cur.execute("SELECT tema, count(*) FROM knowledge_base WHERE tema IS NOT NULL GROUP BY tema ORDER BY count(*) DESC LIMIT 50")
+                temas = [{'tema': r[0], 'count': r[1]} for r in cur.fetchall()]
+            except Exception:
+                pass
+            try:
+                cur.execute("SELECT acao, count(*) FROM ia_interaction_log GROUP BY acao ORDER BY count(*) DESC")
+                actions = [{'action': r[0], 'count': r[1]} for r in cur.fetchall()]
+            except Exception:
+                pass
+            try:
+                cur.execute("SELECT avg(confianca) FROM ia_interaction_log WHERE confianca IS NOT NULL")
+                avg_conf = cur.fetchone()[0] or 0
+            except Exception:
+                pass
             return {
                 'total_qa': total, 'with_embedding': with_emb, 'without_embedding': total - with_emb,
                 'temas': temas, 'sem_tema': sem_tema, 'total_interactions': interactions,
@@ -631,15 +647,20 @@ async def list_qa(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le
         order = {'recent': 'created_at DESC', 'oldest': 'created_at ASC', 'tema': 'tema ASC, created_at DESC'}[sort]
         with get_db() as conn:
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cur.execute(f"SELECT count(*) as cnt FROM knowledge_base {where}", params)
-            total = cur.fetchone()['cnt']
+            if conditions:
+                cur.execute(f"SELECT count(*) as cnt FROM knowledge_base {where}", params)
+                total = cur.fetchone()['cnt']
+            else:
+                cur.execute("SELECT reltuples::bigint FROM pg_class WHERE relname = 'knowledge_base'")
+                row = cur.fetchone()
+                total = max(row['reltuples'], 0) if row else 0
             cur.execute(f"""SELECT id, conversation_id, pergunta_aluno, resposta_atendente, tema,
                        embedding IS NOT NULL as has_embedding, whatsapp_buttons, media_attachments, created_at FROM knowledge_base {where}
                        ORDER BY {order} LIMIT %s OFFSET %s""", params + [per_page, offset])
             items = cur.fetchall()
             for item in items:
                 if item['created_at']: item['created_at'] = item['created_at'].isoformat()
-            return {'items': items, 'total': total, 'page': page, 'per_page': per_page, 'pages': (total + per_page - 1) // per_page}
+            return {'items': items, 'total': total, 'page': page, 'per_page': per_page, 'pages': max((total + per_page - 1) // per_page, 1)}
     except Exception as e:
         print(f"[API] ERRO em /api/qa: {e}", flush=True)
         return {'items': [], 'total': 0, 'page': 1, 'per_page': per_page, 'pages': 0, 'error': str(e)}
