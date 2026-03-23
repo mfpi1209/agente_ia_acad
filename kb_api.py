@@ -252,134 +252,85 @@ def _seed_default_menus(cur):
 
 
 def run_migrations():
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS prompt_versions (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                system_prompt TEXT NOT NULL,
-                is_active BOOLEAN DEFAULT FALSE,
-                model TEXT DEFAULT 'gpt-4o-mini',
-                temperature FLOAT DEFAULT 0.2,
-                max_tokens INT DEFAULT 400,
-                notes TEXT DEFAULT '',
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS chat_evaluations (
-                id SERIAL PRIMARY KEY,
-                pergunta TEXT NOT NULL,
-                resposta_ia TEXT,
-                confianca FLOAT,
-                avaliacao TEXT NOT NULL,
-                resposta_corrigida TEXT,
-                prompt_version_id INT,
-                model TEXT,
-                latency_ms INT,
-                tokens_used INT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            DO $$ BEGIN
-                ALTER TABLE knowledge_base ADD COLUMN whatsapp_buttons TEXT DEFAULT NULL;
-            EXCEPTION WHEN duplicate_column THEN NULL;
-            END $$
-        """)
-        cur.execute("""
-            DO $$ BEGIN
-                ALTER TABLE ia_interaction_log ALTER COLUMN acao TYPE VARCHAR(100);
-            EXCEPTION WHEN OTHERS THEN NULL;
-            END $$
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS student_memory (
-                id SERIAL PRIMARY KEY,
-                phone VARCHAR(20) UNIQUE NOT NULL,
-                lead_id VARCHAR(100),
-                student_name TEXT,
-                cpf VARCHAR(14),
-                last_topic TEXT,
-                last_summary TEXT,
-                interaction_count INT DEFAULT 0,
-                sentiment_history TEXT DEFAULT '',
-                preferences JSONB DEFAULT '{}',
-                notes TEXT DEFAULT '',
-                first_contact_at TIMESTAMP DEFAULT NOW(),
-                last_contact_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS interaction_summary (
-                id SERIAL PRIMARY KEY,
-                phone VARCHAR(20),
-                lead_id VARCHAR(100),
-                student_name TEXT,
-                tema VARCHAR(50),
-                subtema VARCHAR(100),
-                sentimento VARCHAR(20),
-                resolvido VARCHAR(20),
-                nps_implicito INT,
-                resumo TEXT,
-                mensagens_count INT DEFAULT 0,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS agent_alerts (
-                id SERIAL PRIMARY KEY,
-                title VARCHAR(200) NOT NULL,
-                message TEXT NOT NULL,
-                category VARCHAR(50) DEFAULT 'geral',
-                active BOOLEAN DEFAULT TRUE,
-                priority INT DEFAULT 0,
-                starts_at TIMESTAMP DEFAULT NOW(),
-                expires_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            DO $$ BEGIN
-                ALTER TABLE agent_alerts ADD COLUMN display_mode VARCHAR(20) DEFAULT 'context';
-            EXCEPTION WHEN duplicate_column THEN NULL;
-            END $$
-        """)
-        cur.execute("""
-            DO $$ BEGIN
-                ALTER TABLE knowledge_base ADD COLUMN media_attachments TEXT DEFAULT NULL;
-            EXCEPTION WHEN duplicate_column THEN NULL;
-            END $$
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS agent_menus (
-                id SERIAL PRIMARY KEY,
-                parent_id INT REFERENCES agent_menus(id) ON DELETE CASCADE,
-                level VARCHAR(10) NOT NULL,
-                menu_key VARCHAR(100) NOT NULL,
-                label VARCHAR(100) NOT NULL,
-                response_text TEXT,
-                rag_question TEXT,
-                sort_order INT DEFAULT 0,
-                active BOOLEAN DEFAULT true,
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
+    conn = psycopg2.connect(**DB_CONFIG)
+    conn.set_session(autocommit=True)
+    cur = conn.cursor()
+    cur.execute("SET statement_timeout = 0")
+
+    ddl_statements = [
+        ("prompt_versions", """CREATE TABLE IF NOT EXISTS prompt_versions (
+            id SERIAL PRIMARY KEY, name TEXT NOT NULL, system_prompt TEXT NOT NULL,
+            is_active BOOLEAN DEFAULT FALSE, model TEXT DEFAULT 'gpt-4o-mini',
+            temperature FLOAT DEFAULT 0.2, max_tokens INT DEFAULT 400,
+            notes TEXT DEFAULT '', created_at TIMESTAMP DEFAULT NOW())"""),
+        ("chat_evaluations", """CREATE TABLE IF NOT EXISTS chat_evaluations (
+            id SERIAL PRIMARY KEY, pergunta TEXT NOT NULL, resposta_ia TEXT,
+            confianca FLOAT, avaliacao TEXT NOT NULL, resposta_corrigida TEXT,
+            prompt_version_id INT, model TEXT, latency_ms INT, tokens_used INT,
+            created_at TIMESTAMP DEFAULT NOW())"""),
+        ("kb_whatsapp_buttons", """DO $$ BEGIN
+            ALTER TABLE knowledge_base ADD COLUMN whatsapp_buttons TEXT DEFAULT NULL;
+            EXCEPTION WHEN duplicate_column THEN NULL; END $$"""),
+        ("kb_media_attachments", """DO $$ BEGIN
+            ALTER TABLE knowledge_base ADD COLUMN media_attachments TEXT DEFAULT NULL;
+            EXCEPTION WHEN duplicate_column THEN NULL; END $$"""),
+        ("student_memory", """CREATE TABLE IF NOT EXISTS student_memory (
+            id SERIAL PRIMARY KEY, phone VARCHAR(20) UNIQUE NOT NULL,
+            lead_id VARCHAR(100), student_name TEXT, cpf VARCHAR(14),
+            last_topic TEXT, last_summary TEXT, interaction_count INT DEFAULT 0,
+            sentiment_history TEXT DEFAULT '', preferences JSONB DEFAULT '{}',
+            notes TEXT DEFAULT '', first_contact_at TIMESTAMP DEFAULT NOW(),
+            last_contact_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())"""),
+        ("interaction_summary", """CREATE TABLE IF NOT EXISTS interaction_summary (
+            id SERIAL PRIMARY KEY, phone VARCHAR(20), lead_id VARCHAR(100),
+            student_name TEXT, tema VARCHAR(50), subtema VARCHAR(100),
+            sentimento VARCHAR(20), resolvido VARCHAR(20), nps_implicito INT,
+            resumo TEXT, mensagens_count INT DEFAULT 0, created_at TIMESTAMP DEFAULT NOW())"""),
+        ("agent_alerts", """CREATE TABLE IF NOT EXISTS agent_alerts (
+            id SERIAL PRIMARY KEY, title VARCHAR(200) NOT NULL, message TEXT NOT NULL,
+            category VARCHAR(50) DEFAULT 'geral', active BOOLEAN DEFAULT TRUE,
+            priority INT DEFAULT 0, starts_at TIMESTAMP DEFAULT NOW(),
+            expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW())"""),
+        ("alerts_display_mode", """DO $$ BEGIN
+            ALTER TABLE agent_alerts ADD COLUMN display_mode VARCHAR(20) DEFAULT 'context';
+            EXCEPTION WHEN duplicate_column THEN NULL; END $$"""),
+        ("agent_menus", """CREATE TABLE IF NOT EXISTS agent_menus (
+            id SERIAL PRIMARY KEY, parent_id INT REFERENCES agent_menus(id) ON DELETE CASCADE,
+            level VARCHAR(10) NOT NULL, menu_key VARCHAR(100) NOT NULL,
+            label VARCHAR(100) NOT NULL, response_text TEXT, rag_question TEXT,
+            sort_order INT DEFAULT 0, active BOOLEAN DEFAULT true,
+            created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())"""),
+    ]
+
+    for name, sql in ddl_statements:
+        try:
+            cur.execute(sql)
+            print(f"[MIGRATION] {name} OK", flush=True)
+        except Exception as e:
+            print(f"[MIGRATION] {name} FALHOU: {e}", flush=True)
+
+    try:
         cur.execute("SELECT count(*) FROM agent_menus")
         if cur.fetchone()[0] == 0:
             _seed_default_menus(cur)
+            print("[MIGRATION] Menus seed OK", flush=True)
+    except Exception as e:
+        print(f"[MIGRATION] Menus seed FALHOU: {e}", flush=True)
+
+    try:
         cur.execute("SELECT count(*) FROM prompt_versions")
         if cur.fetchone()[0] == 0:
             cur.execute("""
                 INSERT INTO prompt_versions (name, system_prompt, is_active, model, temperature, max_tokens, notes)
                 VALUES (%s, %s, true, 'gpt-4o-mini', 0.2, 400, 'Prompt inicial v1')
             """, ('Prompt v1 - Original', DEFAULT_PROMPT))
+            print("[MIGRATION] Prompt seed OK", flush=True)
+    except Exception as e:
+        print(f"[MIGRATION] Prompt seed FALHOU: {e}", flush=True)
 
-        conn.commit()
-        print("[MIGRATION] Tables OK", flush=True)
+    cur.close()
+    conn.close()
+    print("[MIGRATION] Tables OK", flush=True)
 
 
 
