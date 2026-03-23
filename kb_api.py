@@ -70,8 +70,11 @@ DB_CONFIG = {
     'port': int(os.environ.get('DB_PORT', 5432)),
     'user': os.environ.get('DB_USER', 'postgres'),
     'password': os.environ.get('DB_PASSWORD', ''),
-    'dbname': os.environ.get('DB_NAME', 'log_conversa')
+    'dbname': os.environ.get('DB_NAME', 'log_conversa'),
+    'connect_timeout': 5,
+    'options': '-c statement_timeout=10000',
 }
+print(f"[API] DB_CONFIG: host={DB_CONFIG['host']}, port={DB_CONFIG['port']}, user={DB_CONFIG['user']}, dbname={DB_CONFIG['dbname']}", flush=True)
 ADMIN_USER = os.environ.get('ADMIN_USER', 'admin')
 ADMIN_PASS = os.environ.get('ADMIN_PASS', '')
 AUTH_ENABLED = os.environ.get('AUTH_ENABLED', 'false').lower() == 'true'
@@ -136,7 +139,11 @@ Seu nome é "Assistente Virtual Cruzeiro do Sul". Você NÃO é um atendente hum
 
 @contextmanager
 def get_db():
-    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+    except Exception as e:
+        print(f"[API] ERRO ao conectar DB: {e}", flush=True)
+        raise
     try:
         yield conn
     finally:
@@ -495,14 +502,19 @@ class TestRequest(BaseModel):
 
 @app.get("/api/health")
 async def health_check():
+    import traceback
     try:
+        print("[API] health_check: tentando conectar ao DB...", flush=True)
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute("SELECT 1")
             cur.close()
+        print("[API] health_check: DB OK", flush=True)
         return {"status": "ok", "db": "connected"}
     except Exception as e:
-        return {"status": "error", "db": str(e)}
+        tb = traceback.format_exc()
+        print(f"[API] health_check ERRO: {e}\n{tb}", flush=True)
+        return JSONResponse(status_code=500, content={"status": "error", "db": str(e), "detail": tb})
 
 
 @app.get("/")

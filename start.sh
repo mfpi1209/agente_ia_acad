@@ -12,13 +12,32 @@ echo "META_TOKEN=${META_TOKEN:+DEFINIDO (${#META_TOKEN} chars)}"
 
 # Aguardar DB ficar acessível (até 30s)
 echo "Testando conexão com DB ($DB_HOST:$DB_PORT)..."
+DB_CONNECTED=0
 for i in $(seq 1 15); do
-    if python -c "import psycopg2; psycopg2.connect(host='$DB_HOST', port=$DB_PORT, user='$DB_USER', password='$DB_PASSWORD', dbname='$DB_NAME'); print('DB OK')" 2>/dev/null; then
+    DB_RESULT=$(python -c "
+import psycopg2
+try:
+    conn = psycopg2.connect(host='$DB_HOST', port=${DB_PORT:-5432}, user='$DB_USER', password='$DB_PASSWORD', dbname='$DB_NAME', connect_timeout=5)
+    cur = conn.cursor()
+    cur.execute('SELECT version()')
+    ver = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    print(f'OK: {ver}')
+except Exception as e:
+    print(f'ERRO: {e}')
+" 2>&1)
+    echo "  Tentativa $i/15: $DB_RESULT"
+    if echo "$DB_RESULT" | grep -q "^OK:"; then
+        DB_CONNECTED=1
         break
     fi
-    echo "  Aguardando DB... ($i/15)"
     sleep 2
 done
+
+if [ "$DB_CONNECTED" = "0" ]; then
+    echo "AVISO: DB não conectou após 30s! A API vai iniciar mas endpoints podem falhar."
+fi
 
 python agente_ao_vivo_v4.py &
 AGENT_PID=$!
@@ -31,10 +50,13 @@ API_PID=$!
 echo "API Cockpit iniciada (PID $API_PID)"
 
 sleep 5
-if curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
-    echo "API health check: OK"
+echo "Executando health check da API..."
+HEALTH_RESULT=$(curl -s --max-time 10 http://localhost:8000/api/health 2>&1)
+HEALTH_CODE=$?
+if [ "$HEALTH_CODE" = "0" ]; then
+    echo "API health check: $HEALTH_RESULT"
 else
-    echo "API health check: FALHOU (verificando se processo existe...)"
+    echo "API health check FALHOU (curl exit=$HEALTH_CODE): $HEALTH_RESULT"
     if kill -0 $API_PID 2>/dev/null; then
         echo "  Processo $API_PID está vivo, pode estar iniciando ainda"
     else
