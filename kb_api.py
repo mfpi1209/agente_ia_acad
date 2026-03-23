@@ -39,12 +39,24 @@ MAX_UPLOAD_SIZE = 16 * 1024 * 1024
 
 @asynccontextmanager
 async def lifespan(app):
-    try:
-        print("[API] Executando migrations...", flush=True)
-        run_migrations()
-        print("[API] Migrations OK", flush=True)
-    except Exception as e:
-        print(f"[API] ERRO nas migrations (ignorando): {e}", flush=True)
+    skip = os.environ.get('SKIP_MIGRATIONS', 'false').lower() == 'true'
+    if skip:
+        print("[API] Migrations puladas (SKIP_MIGRATIONS=true)", flush=True)
+    else:
+        try:
+            print("[API] Executando migrations...", flush=True)
+            conn = psycopg2.connect(**DB_CONFIG)
+            conn.set_session(autocommit=True)
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+            conn.close()
+            print("[API] DB acessível, rodando migrations...", flush=True)
+            run_migrations()
+            print("[API] Migrations OK", flush=True)
+        except Exception as e:
+            print(f"[API] ERRO nas migrations (ignorando): {e}", flush=True)
+    print("[API] Startup completo", flush=True)
     yield
 
 app = FastAPI(title="Cockpit IA - Cruzeiro do Sul", lifespan=lifespan)
