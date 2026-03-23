@@ -44,14 +44,14 @@ async def lifespan(app):
         print("[API] Migrations puladas (SKIP_MIGRATIONS=true)", flush=True)
     else:
         try:
-            print("[API] Executando migrations...", flush=True)
-            conn = psycopg2.connect(**DB_CONFIG)
+            print("[API] Testando DB...", flush=True)
+            conn = psycopg2.connect(**{**DB_CONFIG, 'options': '-c statement_timeout=30000'})
             conn.set_session(autocommit=True)
             cur = conn.cursor()
             cur.execute("SELECT 1")
             cur.close()
             conn.close()
-            print("[API] DB acessível, rodando migrations...", flush=True)
+            print("[API] DB acessível, rodando migrations + indexes...", flush=True)
             run_migrations()
             print("[API] Migrations OK", flush=True)
         except Exception as e:
@@ -72,7 +72,7 @@ DB_CONFIG = {
     'password': os.environ.get('DB_PASSWORD', ''),
     'dbname': os.environ.get('DB_NAME', 'log_conversa'),
     'connect_timeout': 5,
-    'options': '-c statement_timeout=10000',
+    'options': '-c statement_timeout=60000',
 }
 print(f"[API] DB_CONFIG: host={DB_CONFIG['host']}, port={DB_CONFIG['port']}, user={DB_CONFIG['user']}, dbname={DB_CONFIG['dbname']}", flush=True)
 ADMIN_USER = os.environ.get('ADMIN_USER', 'admin')
@@ -339,7 +339,27 @@ def run_migrations():
                 INSERT INTO prompt_versions (name, system_prompt, is_active, model, temperature, max_tokens, notes)
                 VALUES (%s, %s, true, 'gpt-4o-mini', 0.2, 400, 'Prompt inicial v1')
             """, ('Prompt v1 - Original', DEFAULT_PROMPT))
+
+        indexes = [
+            ("idx_kb_tema", "knowledge_base", "tema"),
+            ("idx_kb_embedding_not_null", "knowledge_base", "((embedding IS NOT NULL))"),
+            ("idx_kb_conversation_id", "knowledge_base", "conversation_id"),
+            ("idx_il_acao", "ia_interaction_log", "acao"),
+            ("idx_il_confianca", "ia_interaction_log", "confianca"),
+            ("idx_il_created_at", "ia_interaction_log", "created_at"),
+            ("idx_il_conversation_id", "ia_interaction_log", "conversation_id"),
+            ("idx_ce_avaliacao", "chat_evaluations", "avaliacao"),
+            ("idx_ce_created_at", "chat_evaluations", "created_at"),
+            ("idx_ce_prompt_version", "chat_evaluations", "prompt_version_id"),
+        ]
+        for idx_name, table, cols in indexes:
+            try:
+                cur.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} ({cols})")
+            except Exception as e:
+                print(f"[MIGRATION] Index {idx_name} falhou: {e}", flush=True)
+
         conn.commit()
+        print("[MIGRATION] Indexes criados/verificados", flush=True)
 
 
 
@@ -526,26 +546,35 @@ async def serve_frontend():
 
 @app.get("/api/stats")
 async def get_stats():
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT count(*) FROM knowledge_base")
-        total = cur.fetchone()[0]
-        cur.execute("SELECT count(*) FROM knowledge_base WHERE embedding IS NOT NULL")
-        with_emb = cur.fetchone()[0]
-        cur.execute("SELECT tema, count(*) FROM knowledge_base WHERE tema IS NOT NULL GROUP BY tema ORDER BY count(*) DESC")
-        temas = [{'tema': r[0], 'count': r[1]} for r in cur.fetchall()]
-        cur.execute("SELECT count(*) FROM knowledge_base WHERE tema IS NULL OR tema = ''")
-        sem_tema = cur.fetchone()[0]
-        cur.execute("SELECT count(*) FROM ia_interaction_log")
-        interactions = cur.fetchone()[0]
-        cur.execute("SELECT acao, count(*) FROM ia_interaction_log GROUP BY acao ORDER BY count(*) DESC")
-        actions = [{'action': r[0], 'count': r[1]} for r in cur.fetchall()]
-        cur.execute("SELECT avg(confianca) FROM ia_interaction_log WHERE confianca IS NOT NULL")
-        avg_conf = cur.fetchone()[0] or 0
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT count(*) FROM knowledge_base")
+            total = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM knowledge_base WHERE embedding IS NOT NULL")
+            with_emb = cur.fetchone()[0]
+            cur.execute("SELECT tema, count(*) FROM knowledge_base WHERE tema IS NOT NULL GROUP BY tema ORDER BY count(*) DESC")
+            temas = [{'tema': r[0], 'count': r[1]} for r in cur.fetchall()]
+            cur.execute("SELECT count(*) FROM knowledge_base WHERE tema IS NULL OR tema = ''")
+            sem_tema = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM ia_interaction_log")
+            interactions = cur.fetchone()[0]
+            cur.execute("SELECT acao, count(*) FROM ia_interaction_log GROUP BY acao ORDER BY count(*) DESC")
+            actions = [{'action': r[0], 'count': r[1]} for r in cur.fetchall()]
+            cur.execute("SELECT avg(confianca) FROM ia_interaction_log WHERE confianca IS NOT NULL")
+            avg_conf = cur.fetchone()[0] or 0
+            return {
+                'total_qa': total, 'with_embedding': with_emb, 'without_embedding': total - with_emb,
+                'temas': temas, 'sem_tema': sem_tema, 'total_interactions': interactions,
+                'interactions_by_action': actions, 'avg_confidence': round(float(avg_conf), 3)
+            }
+    except Exception as e:
+        print(f"[API] ERRO em /api/stats: {e}", flush=True)
         return {
-            'total_qa': total, 'with_embedding': with_emb, 'without_embedding': total - with_emb,
-            'temas': temas, 'sem_tema': sem_tema, 'total_interactions': interactions,
-            'interactions_by_action': actions, 'avg_confidence': round(float(avg_conf), 3)
+            'total_qa': 0, 'with_embedding': 0, 'without_embedding': 0,
+            'temas': [], 'sem_tema': 0, 'total_interactions': 0,
+            'interactions_by_action': [], 'avg_confidence': 0,
+            'error': str(e)
         }
 
 
@@ -1267,73 +1296,77 @@ async def list_evaluations(page: int = Query(1, ge=1), per_page: int = Query(20,
 
 @app.get("/api/analytics")
 async def get_analytics():
-    with get_db() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    empty = {
+        'eval_stats': {}, 'timeline': [], 'tema_failures': [],
+        'top_escalations': [], 'total_tokens': 0, 'estimated_cost_usd': 0,
+        'prompt_comparison': [],
+    }
+    try:
+        with get_db() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-        # Eval stats
-        cur.execute("SELECT avaliacao, count(*) as cnt FROM chat_evaluations GROUP BY avaliacao")
-        eval_stats = {r['avaliacao']: r['cnt'] for r in cur.fetchall()}
+            cur.execute("SELECT avaliacao, count(*) as cnt FROM chat_evaluations GROUP BY avaliacao")
+            eval_stats = {r['avaliacao']: r['cnt'] for r in cur.fetchall()}
 
-        # Confidence timeline (by day)
-        cur.execute("""
-            SELECT date_trunc('day', created_at)::date as day, avg(confianca) as avg_conf, count(*) as cnt
-            FROM ia_interaction_log WHERE confianca IS NOT NULL
-            GROUP BY day ORDER BY day DESC LIMIT 30
-        """)
-        timeline = [{'day': str(r['day']), 'avg_conf': round(float(r['avg_conf']), 3), 'count': r['cnt']} for r in cur.fetchall()]
+            cur.execute("""
+                SELECT date_trunc('day', created_at)::date as day, avg(confianca) as avg_conf, count(*) as cnt
+                FROM ia_interaction_log WHERE confianca IS NOT NULL
+                GROUP BY day ORDER BY day DESC LIMIT 30
+            """)
+            timeline = [{'day': str(r['day']), 'avg_conf': round(float(r['avg_conf']), 3), 'count': r['cnt']} for r in cur.fetchall()]
 
-        # Tema failures (low confidence by tema)
-        cur.execute("""
-            SELECT kb.tema, count(*) as total,
-                   count(*) FILTER (WHERE il.confianca < 0.5) as low_conf
-            FROM ia_interaction_log il
-            LEFT JOIN knowledge_base kb ON kb.conversation_id = il.conversation_id
-            WHERE kb.tema IS NOT NULL
-            GROUP BY kb.tema ORDER BY low_conf DESC LIMIT 15
-        """)
-        tema_failures = [{'tema': r['tema'], 'total': r['total'], 'low_conf': r['low_conf']} for r in cur.fetchall()]
+            cur.execute("""
+                SELECT kb.tema, count(*) as total,
+                       count(*) FILTER (WHERE il.confianca < 0.5) as low_conf
+                FROM ia_interaction_log il
+                LEFT JOIN knowledge_base kb ON kb.conversation_id = il.conversation_id
+                WHERE kb.tema IS NOT NULL
+                GROUP BY kb.tema ORDER BY low_conf DESC LIMIT 15
+            """)
+            tema_failures = [{'tema': r['tema'], 'total': r['total'], 'low_conf': r['low_conf']} for r in cur.fetchall()]
 
-        # Top escalations
-        cur.execute("""
-            SELECT pergunta_recebida, confianca, acao, created_at
-            FROM ia_interaction_log
-            WHERE acao LIKE 'escalate%%'
-            ORDER BY created_at DESC LIMIT 10
-        """)
-        escalations = []
-        for r in cur.fetchall():
-            escalations.append({
-                'pergunta': r['pergunta_recebida'][:150] if r['pergunta_recebida'] else '',
-                'confianca': float(r['confianca']) if r['confianca'] else 0,
-                'acao': r['acao'],
-                'created_at': r['created_at'].isoformat() if r['created_at'] else ''
-            })
+            cur.execute("""
+                SELECT pergunta_recebida, confianca, acao, created_at
+                FROM ia_interaction_log
+                WHERE acao LIKE 'escalate%%'
+                ORDER BY created_at DESC LIMIT 10
+            """)
+            escalations = []
+            for r in cur.fetchall():
+                escalations.append({
+                    'pergunta': r['pergunta_recebida'][:150] if r['pergunta_recebida'] else '',
+                    'confianca': float(r['confianca']) if r['confianca'] else 0,
+                    'acao': r['acao'],
+                    'created_at': r['created_at'].isoformat() if r['created_at'] else ''
+                })
 
-        # Cost estimate from evaluations
-        cur.execute("SELECT sum(tokens_used) as total_tokens, count(*) as cnt FROM chat_evaluations WHERE tokens_used > 0")
-        cost_row = cur.fetchone()
-        total_tokens = cost_row['total_tokens'] or 0
-        est_cost = (total_tokens * 0.60) / 1_000_000  # assume gpt-4o-mini output pricing
+            cur.execute("SELECT sum(tokens_used) as total_tokens, count(*) as cnt FROM chat_evaluations WHERE tokens_used > 0")
+            cost_row = cur.fetchone()
+            total_tokens = cost_row['total_tokens'] or 0
+            est_cost = (total_tokens * 0.60) / 1_000_000
 
-        # Prompt comparison
-        cur.execute("""
-            SELECT prompt_version_id, model, avg(confianca) as avg_conf, count(*) as cnt
-            FROM chat_evaluations WHERE prompt_version_id IS NOT NULL
-            GROUP BY prompt_version_id, model
-        """)
-        prompt_comparison = [{'prompt_id': r['prompt_version_id'], 'model': r['model'],
-                             'avg_conf': round(float(r['avg_conf']), 3) if r['avg_conf'] else 0,
-                             'count': r['cnt']} for r in cur.fetchall()]
+            cur.execute("""
+                SELECT prompt_version_id, model, avg(confianca) as avg_conf, count(*) as cnt
+                FROM chat_evaluations WHERE prompt_version_id IS NOT NULL
+                GROUP BY prompt_version_id, model
+            """)
+            prompt_comparison = [{'prompt_id': r['prompt_version_id'], 'model': r['model'],
+                                 'avg_conf': round(float(r['avg_conf']), 3) if r['avg_conf'] else 0,
+                                 'count': r['cnt']} for r in cur.fetchall()]
 
-        return {
-            'eval_stats': eval_stats,
-            'timeline': timeline,
-            'tema_failures': tema_failures,
-            'top_escalations': escalations,
-            'total_tokens': total_tokens,
-            'estimated_cost_usd': round(est_cost, 4),
-            'prompt_comparison': prompt_comparison,
-        }
+            return {
+                'eval_stats': eval_stats,
+                'timeline': timeline,
+                'tema_failures': tema_failures,
+                'top_escalations': escalations,
+                'total_tokens': total_tokens,
+                'estimated_cost_usd': round(est_cost, 4),
+                'prompt_comparison': prompt_comparison,
+            }
+    except Exception as e:
+        print(f"[API] ERRO em /api/analytics: {e}", flush=True)
+        empty['error'] = str(e)
+        return empty
 
 
 # --- Routes: Interactions ---
