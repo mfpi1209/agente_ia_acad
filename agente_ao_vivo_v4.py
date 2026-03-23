@@ -495,11 +495,10 @@ def maybe_reload():
                     os.remove(lock_path)
                 except OSError:
                     pass
-                subprocess.Popen(
-                    [sys.executable] + sys.argv,
-                    cwd=os.getcwd(),
-                    creationflags=subprocess.CREATE_NEW_CONSOLE
-                )
+                popen_kwargs = {'cwd': os.getcwd()}
+                if os.name == 'nt':
+                    popen_kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
+                subprocess.Popen([sys.executable] + sys.argv, **popen_kwargs)
                 sys.exit(0)
             _last_restart_flag = restart_val
 
@@ -1997,35 +1996,50 @@ def main():
 
     cycle = 0
 
-    lock_path = 'c:/Distribuicao_Academico/agent.lock'
+    lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'agent.lock')
     my_pid = os.getpid()
+
+    def _kill_pid(pid):
+        try:
+            if os.name == 'nt':
+                subprocess.run(['taskkill', '/PID', str(pid), '/F'],
+                               capture_output=True, timeout=5)
+            else:
+                os.kill(pid, 9)
+            p(f"  Processo anterior (PID {pid}) encerrado.")
+        except Exception:
+            pass
+
     try:
-        result = subprocess.run(
-            ['wmic', 'process', 'where',
-             f"commandline like '%agente_ao_vivo_v4%' and processid != '{my_pid}'",
-             'get', 'processid'],
-            capture_output=True, text=True, timeout=5
-        )
-        for line in result.stdout.strip().split('\n'):
-            line = line.strip()
-            if line.isdigit():
-                old_pid = int(line)
-                try:
-                    subprocess.run(['taskkill', '/PID', str(old_pid), '/F'],
-                                   capture_output=True, timeout=5)
-                    p(f"  Processo anterior (PID {old_pid}) encerrado.")
-                except Exception:
-                    pass
+        if os.name == 'nt':
+            result = subprocess.run(
+                ['wmic', 'process', 'where',
+                 f"commandline like '%agente_ao_vivo_v4%' and processid != '{my_pid}'",
+                 'get', 'processid'],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.strip().split('\n'):
+                line = line.strip()
+                if line.isdigit():
+                    _kill_pid(int(line))
+        else:
+            result = subprocess.run(
+                ['pgrep', '-f', 'agente_ao_vivo_v4'],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.strip().split('\n'):
+                line = line.strip()
+                if line.isdigit() and int(line) != my_pid:
+                    _kill_pid(int(line))
     except Exception:
         pass
+
     if os.path.exists(lock_path):
         try:
             with open(lock_path) as f:
                 old_pid = int(f.read().strip())
             if old_pid != my_pid:
-                subprocess.run(['taskkill', '/PID', str(old_pid), '/F'],
-                               capture_output=True, timeout=5)
-                p(f"  Lock anterior (PID {old_pid}) encerrado.")
+                _kill_pid(old_pid)
         except (ProcessLookupError, ValueError, OSError):
             pass
     with open(lock_path, 'w') as f:
