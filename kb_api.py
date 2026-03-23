@@ -10,6 +10,7 @@ import time
 import json
 import hashlib
 import secrets
+import threading
 import psycopg2
 import psycopg2.extras
 import requests as http_requests
@@ -37,25 +38,64 @@ ALLOWED_MEDIA_TYPES = {
 MAX_UPLOAD_SIZE = 16 * 1024 * 1024
 
 
+def _run_migrations_background():
+    """Roda migrations + indexes em background para não bloquear o startup."""
+    try:
+        print("[API/BG] Iniciando migrations...", flush=True)
+        run_migrations()
+        print("[API/BG] Migrations OK", flush=True)
+    except Exception as e:
+        print(f"[API/BG] ERRO nas migrations: {e}", flush=True)
+
+    try:
+        print("[API/BG] Criando indexes...", flush=True)
+        _create_indexes()
+        print("[API/BG] Indexes OK", flush=True)
+    except Exception as e:
+        print(f"[API/BG] ERRO nos indexes: {e}", flush=True)
+
+
+def _create_indexes():
+    """Cria indexes com autocommit (necessário para não travar em transação)."""
+    cfg = {k: v for k, v in DB_CONFIG.items() if k != 'options'}
+    cfg['connect_timeout'] = 10
+    conn = psycopg2.connect(**cfg)
+    conn.set_session(autocommit=True)
+    cur = conn.cursor()
+    cur.execute("SET statement_timeout = '300s'")
+
+    indexes = [
+        ("idx_kb_tema", "knowledge_base", "tema"),
+        ("idx_kb_conversation_id", "knowledge_base", "conversation_id"),
+        ("idx_il_acao", "ia_interaction_log", "acao"),
+        ("idx_il_confianca", "ia_interaction_log", "confianca"),
+        ("idx_il_created_at", "ia_interaction_log", "created_at"),
+        ("idx_il_conversation_id", "ia_interaction_log", "conversation_id"),
+        ("idx_ce_avaliacao", "chat_evaluations", "avaliacao"),
+        ("idx_ce_created_at", "chat_evaluations", "created_at"),
+        ("idx_ce_prompt_version", "chat_evaluations", "prompt_version_id"),
+    ]
+    for idx_name, table, cols in indexes:
+        try:
+            cur.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} ({cols})")
+            print(f"[API/BG]   Index {idx_name} OK", flush=True)
+        except Exception as e:
+            print(f"[API/BG]   Index {idx_name} FALHOU: {e}", flush=True)
+            conn.rollback()
+
+    cur.close()
+    conn.close()
+
+
 @asynccontextmanager
 async def lifespan(app):
     skip = os.environ.get('SKIP_MIGRATIONS', 'false').lower() == 'true'
     if skip:
         print("[API] Migrations puladas (SKIP_MIGRATIONS=true)", flush=True)
     else:
-        try:
-            print("[API] Testando DB...", flush=True)
-            conn = psycopg2.connect(**{**DB_CONFIG, 'options': '-c statement_timeout=30000'})
-            conn.set_session(autocommit=True)
-            cur = conn.cursor()
-            cur.execute("SELECT 1")
-            cur.close()
-            conn.close()
-            print("[API] DB acessível, rodando migrations + indexes...", flush=True)
-            run_migrations()
-            print("[API] Migrations OK", flush=True)
-        except Exception as e:
-            print(f"[API] ERRO nas migrations (ignorando): {e}", flush=True)
+        t = threading.Thread(target=_run_migrations_background, daemon=True)
+        t.start()
+        print("[API] Migrations iniciadas em background", flush=True)
     print("[API] Startup completo", flush=True)
     yield
 
@@ -340,26 +380,8 @@ def run_migrations():
                 VALUES (%s, %s, true, 'gpt-4o-mini', 0.2, 400, 'Prompt inicial v1')
             """, ('Prompt v1 - Original', DEFAULT_PROMPT))
 
-        indexes = [
-            ("idx_kb_tema", "knowledge_base", "tema"),
-            ("idx_kb_embedding_not_null", "knowledge_base", "((embedding IS NOT NULL))"),
-            ("idx_kb_conversation_id", "knowledge_base", "conversation_id"),
-            ("idx_il_acao", "ia_interaction_log", "acao"),
-            ("idx_il_confianca", "ia_interaction_log", "confianca"),
-            ("idx_il_created_at", "ia_interaction_log", "created_at"),
-            ("idx_il_conversation_id", "ia_interaction_log", "conversation_id"),
-            ("idx_ce_avaliacao", "chat_evaluations", "avaliacao"),
-            ("idx_ce_created_at", "chat_evaluations", "created_at"),
-            ("idx_ce_prompt_version", "chat_evaluations", "prompt_version_id"),
-        ]
-        for idx_name, table, cols in indexes:
-            try:
-                cur.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} ({cols})")
-            except Exception as e:
-                print(f"[MIGRATION] Index {idx_name} falhou: {e}", flush=True)
-
         conn.commit()
-        print("[MIGRATION] Indexes criados/verificados", flush=True)
+        print("[MIGRATION] Tables OK", flush=True)
 
 
 
