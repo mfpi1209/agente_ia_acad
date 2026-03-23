@@ -39,7 +39,12 @@ MAX_UPLOAD_SIZE = 16 * 1024 * 1024
 
 @asynccontextmanager
 async def lifespan(app):
-    run_migrations()
+    try:
+        print("[API] Executando migrations...", flush=True)
+        run_migrations()
+        print("[API] Migrations OK", flush=True)
+    except Exception as e:
+        print(f"[API] ERRO nas migrations (ignorando): {e}", flush=True)
     yield
 
 app = FastAPI(title="Cockpit IA - Cruzeiro do Sul", lifespan=lifespan)
@@ -475,6 +480,18 @@ class TestRequest(BaseModel):
 
 
 # --- Routes: Static ---
+
+@app.get("/api/health")
+async def health_check():
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+        return {"status": "ok", "db": "connected"}
+    except Exception as e:
+        return {"status": "error", "db": str(e)}
+
 
 @app.get("/")
 async def serve_frontend():

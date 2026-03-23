@@ -26,9 +26,21 @@ echo "Agente iniciado (PID $AGENT_PID)"
 
 sleep 3
 
-uvicorn kb_api:app --host 0.0.0.0 --port 8000 &
+uvicorn kb_api:app --host 0.0.0.0 --port 8000 --log-level info &
 API_PID=$!
 echo "API Cockpit iniciada (PID $API_PID)"
+
+sleep 5
+if curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
+    echo "API health check: OK"
+else
+    echo "API health check: FALHOU (verificando se processo existe...)"
+    if kill -0 $API_PID 2>/dev/null; then
+        echo "  Processo $API_PID está vivo, pode estar iniciando ainda"
+    else
+        echo "  Processo $API_PID morreu!"
+    fi
+fi
 
 trap "kill $AGENT_PID $API_PID 2>/dev/null; exit 0" SIGTERM SIGINT
 
