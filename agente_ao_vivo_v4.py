@@ -518,7 +518,8 @@ def maybe_reload():
 # ===================== STATE =====================
 
 processed_msg_ids = set()
-_recent_sent_bodies = {}  # {body_hash: timestamp} - dedup por conteúdo
+_recent_sent_bodies = {}  # {body_hash: timestamp} - dedup envios do bot
+_recent_processed_inputs = {}  # {body_hash: timestamp} - dedup inputs do aluno
 conversation_greeted = set()
 active_conv_id = None
 student_profile = None
@@ -1246,21 +1247,39 @@ def meta_typing_on():
     return False
 
 
-def _track_sent_body(text):
-    """Registra body enviado para dedup por conteúdo (expira em 120s)."""
-    h = hashlib.md5(text.strip().lower().encode()).hexdigest()
+def _body_hash(text):
+    return hashlib.md5(text.strip().lower().encode()).hexdigest()
+
+
+def _cleanup_cache(cache, max_age=120):
     now = time.time()
-    _recent_sent_bodies[h] = now
-    expired = [k for k, v in _recent_sent_bodies.items() if now - v > 120]
+    expired = [k for k, v in cache.items() if now - v > max_age]
     for k in expired:
-        del _recent_sent_bodies[k]
+        del cache[k]
+
+
+def _track_sent_body(text):
+    """Registra body enviado para dedup por conteúdo."""
+    _recent_sent_bodies[_body_hash(text)] = time.time()
+    _cleanup_cache(_recent_sent_bodies)
 
 
 def _is_echo_of_sent(text):
     """Verifica se texto é eco de algo que o bot enviou recentemente."""
-    h = hashlib.md5(text.strip().lower().encode()).hexdigest()
-    ts = _recent_sent_bodies.get(h)
+    ts = _recent_sent_bodies.get(_body_hash(text))
     return ts is not None and (time.time() - ts) < 120
+
+
+def _track_processed_input(text):
+    """Registra input do aluno processado."""
+    _recent_processed_inputs[_body_hash(text)] = time.time()
+    _cleanup_cache(_recent_processed_inputs, max_age=60)
+
+
+def _is_duplicate_input(text):
+    """Verifica se mesmo input já foi processado nos últimos 60s."""
+    ts = _recent_processed_inputs.get(_body_hash(text))
+    return ts is not None and (time.time() - ts) < 60
 
 
 def send_and_track(conv_id, text, buttons=None):
@@ -1412,6 +1431,10 @@ def get_new_client_message(conv_id):
             continue
         if _is_echo_of_sent(body):
             p(f"  SKIP echo: \"{body[:60]}\"")
+            processed_msg_ids.add(mid)
+            continue
+        if _is_duplicate_input(body):
+            p(f"  SKIP dup-input: \"{body[:60]}\"")
             processed_msg_ids.add(mid)
             continue
         return mid, body, is_button_click
@@ -1625,6 +1648,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
     global active_conv_id, student_profile, conversation_messages, last_response_time
     global followup_stage, waiting_for_client, inactivity_start
     processed_msg_ids.add(msg_id)
+    _track_processed_input(msg_body)
     followup_stage = 0
     waiting_for_client = False
     inactivity_start = 0
@@ -1634,6 +1658,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
     p(f"{'='*55}")
     p(f"  NOVA MSG: \"{question[:120]}\"")
     p(f"  Tipo: {'BOTAO' if is_button_click else 'TEXTO'}")
+    p(f"  MsgID: {msg_id[:30]}")
     p(f"{'='*55}")
 
     if active_conv_id is None:
