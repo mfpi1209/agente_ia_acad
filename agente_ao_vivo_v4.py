@@ -13,6 +13,7 @@ import io
 import os
 import re
 import time
+import hashlib
 from datetime import datetime
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -517,6 +518,7 @@ def maybe_reload():
 # ===================== STATE =====================
 
 processed_msg_ids = set()
+_recent_sent_bodies = {}  # {body_hash: timestamp} - dedup por conteúdo
 conversation_greeted = set()
 active_conv_id = None
 student_profile = None
@@ -1083,14 +1085,14 @@ COCKPIT_BASE_URL = os.environ.get('COCKPIT_BASE_URL', 'http://localhost:8000')
 
 META_TOKEN = os.environ.get('META_TOKEN', '')
 META_PHONE_ID = os.environ.get('META_PHONE_ID', '883452561518366')
-META_URL = f'https://graph.facebook.com/v21.0/{META_PHONE_ID}/messages'
+META_URL = f'https://graph.facebook.com/v25.0/{META_PHONE_ID}/messages'
 META_H_GRAPH = {'Authorization': f'Bearer {META_TOKEN}', 'Content-Type': 'application/json'}
 
 
 def _upload_media_to_meta(file_path, mime_type):
     """Faz upload de arquivo local para a Meta API e retorna o media_id."""
     try:
-        upload_url = f'https://graph.facebook.com/v21.0/{META_PHONE_ID}/media'
+        upload_url = f'https://graph.facebook.com/v25.0/{META_PHONE_ID}/media'
         with open(file_path, 'rb') as f:
             r = requests.post(upload_url,
                 headers={'Authorization': f'Bearer {META_TOKEN}'},
@@ -1221,10 +1223,9 @@ def fetch_wamid(phone):
     return None
 
 
-def meta_typing_on(phone=None):
+def meta_typing_on():
     """Envia typing indicator via Meta Graph API usando wamid do PostgreSQL."""
-    ph = phone or PHONE_TO_MONITOR
-    wamid = fetch_wamid(ph)
+    wamid = fetch_wamid(PHONE_TO_MONITOR)
     if not wamid:
         return False
     try:
@@ -1245,6 +1246,23 @@ def meta_typing_on(phone=None):
     return False
 
 
+def _track_sent_body(text):
+    """Registra body enviado para dedup por conteúdo (expira em 120s)."""
+    h = hashlib.md5(text.strip().lower().encode()).hexdigest()
+    now = time.time()
+    _recent_sent_bodies[h] = now
+    expired = [k for k, v in _recent_sent_bodies.items() if now - v > 120]
+    for k in expired:
+        del _recent_sent_bodies[k]
+
+
+def _is_echo_of_sent(text):
+    """Verifica se texto é eco de algo que o bot enviou recentemente."""
+    h = hashlib.md5(text.strip().lower().encode()).hexdigest()
+    ts = _recent_sent_bodies.get(h)
+    return ts is not None and (time.time() - ts) < 120
+
+
 def send_and_track(conv_id, text, buttons=None):
     """Reforça typing antes de enviar + pequeno delay humanizado."""
     global last_response_time
@@ -1259,6 +1277,7 @@ def send_and_track(conv_id, text, buttons=None):
     status, resp = send_message_crm(conv_id, text, buttons)
     if status in (200, 201) and isinstance(resp, dict):
         processed_msg_ids.add(resp.get('id', ''))
+    _track_sent_body(text)
     last_response_time = time.time()
     if buttons:
         p(f"    Enviado com {len(buttons)} botoes")
@@ -1389,6 +1408,10 @@ def get_new_client_message(conv_id):
             continue
         if is_bot_message(body):
             p(f"  SKIP bot: \"{body[:60]}\"")
+            processed_msg_ids.add(mid)
+            continue
+        if _is_echo_of_sent(body):
+            p(f"  SKIP echo: \"{body[:60]}\"")
             processed_msg_ids.add(mid)
             continue
         return mid, body, is_button_click
@@ -1654,7 +1677,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
             greeting_alert_text = build_greeting_alerts()
             if greeting_alert_text:
                 msg += greeting_alert_text
-            meta_typing_on(msg)
+            meta_typing_on()
             send_and_track(conv_id, msg, buttons=GREETING_BUTTONS)
             conversation_messages.append({'role': 'bot', 'text': msg})
             log_to_db(conv_id, question, msg, 1.0, 'greeting_repeat')
@@ -1697,7 +1720,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
     # === RESOLVEU ===
     if any(w in q_lower for w in RESOLVED_WORDS) or (q_lower in ('sim', 'si') and not is_first):
         msg = f"Que bom que pude ajudar{name_suffix}! Se precisar de algo no futuro, estou à disposição. Até mais! 😊"
-        meta_typing_on(msg)
+        meta_typing_on()
         send_and_track(conv_id, msg)
         conversation_messages.append({'role': 'bot', 'text': msg})
         log_to_db(conv_id, question, msg, 1.0, 'resolved')
@@ -1722,7 +1745,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
     )
     if close_match and not is_first:
         msg = CLOSING_RESPONSE_TPL.format(name_suffix=name_suffix)
-        meta_typing_on(msg)
+        meta_typing_on()
         send_and_track(conv_id, msg)
         conversation_messages.append({'role': 'bot', 'text': msg})
         log_to_db(conv_id, question, msg, 1.0, 'closing')
@@ -1741,7 +1764,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
 
     # === ESCALAÇÃO EXPLÍCITA ===
     if any(w in q_lower for w in ESCALATE_WORDS):
-        meta_typing_on(ESCALATION_MSG)
+        meta_typing_on()
         send_and_track(conv_id, ESCALATION_MSG)
         conversation_messages.append({'role': 'bot', 'text': ESCALATION_MSG})
         log_to_db(conv_id, question, ESCALATION_MSG, 1.0, 'escalate_request')
@@ -1765,7 +1788,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
             msg = f"Claro, {student_profile['first_name']}! Como posso te ajudar?"
         else:
             msg = "Claro! Como posso te ajudar?"
-        meta_typing_on(msg)
+        meta_typing_on()
         send_and_track(conv_id, msg, buttons=MAIN_MENU_BUTTONS)
         conversation_messages.append({'role': 'bot', 'text': msg})
         log_to_db(conv_id, question, msg, 1.0, 'menu')
@@ -1775,7 +1798,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
     # === ESCALAÇÃO IMEDIATA (CPF/RGM) ===
     should_escalate, reason = is_escalation_trigger(question)
     if should_escalate:
-        meta_typing_on(ESCALATION_MSG)
+        meta_typing_on()
         send_and_track(conv_id, ESCALATION_MSG)
         conversation_messages.append({'role': 'bot', 'text': ESCALATION_MSG})
         log_to_db(conv_id, question, ESCALATION_MSG, 0.1, 'escalate_cpf')
@@ -1800,7 +1823,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
     for direct_key, direct_text in SUBMENU_DIRECT_RESPONSE.items():
         if _matches(direct_key, stripped):
             p(f"  Button click -> resposta direta: '{direct_key}'")
-            meta_typing_on(direct_text)
+            meta_typing_on()
             send_and_track(conv_id, direct_text, buttons=['Voltar ao menu', 'Falar com atendente'])
             conversation_messages.append({'role': 'bot', 'text': direct_text})
             log_to_db(conv_id, question, direct_text, 1.0, 'direct_response')
@@ -1823,7 +1846,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
         for l3_key, l3_data in SUBMENU_L3.items():
             if _matches(l3_key, stripped):
                 p(f"  Submenu L2 -> L3: {l3_key}")
-                meta_typing_on(l3_data['text'])
+                meta_typing_on()
                 send_and_track(conv_id, l3_data['text'], buttons=l3_data['buttons'])
                 conversation_messages.append({'role': 'bot', 'text': l3_data['text']})
                 log_to_db(conv_id, question, l3_data['text'], 1.0, 'submenu_l3')
@@ -1835,7 +1858,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
             if _matches(menu_key, stripped):
                 sub = SUBMENU[submenu_key]
                 p(f"  Menu -> submenu L2: {submenu_key}")
-                meta_typing_on(sub['text'])
+                meta_typing_on()
                 send_and_track(conv_id, sub['text'], buttons=sub['buttons'])
                 conversation_messages.append({'role': 'bot', 'text': sub['text']})
                 log_to_db(conv_id, question, sub['text'], 1.0, 'submenu')
@@ -1846,7 +1869,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
     if len(stripped) <= 3 and search_query == question:
         p(f"  Msg muito curta sem match, mostrando menu")
         msg = "Não entendi 🤔 Selecione uma opção:"
-        meta_typing_on(msg)
+        meta_typing_on()
         send_and_track(conv_id, msg, buttons=MAIN_MENU_BUTTONS)
         conversation_messages.append({'role': 'bot', 'text': msg})
         log_to_db(conv_id, question, msg, 0.0, 'fallback_short')
@@ -1859,7 +1882,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
 
     if top_score < 0.65:
         msg = "Hmm, não encontrei uma resposta exata para isso. Posso te ajudar de outra forma?"
-        meta_typing_on(msg)
+        meta_typing_on()
         send_and_track(conv_id, msg, buttons=['Tentar de novo', 'Falar com atendente', 'Ver opções'])
         conversation_messages.append({'role': 'bot', 'text': msg})
         log_to_db(conv_id, question, msg, top_score, 'escalate_low_sim')
