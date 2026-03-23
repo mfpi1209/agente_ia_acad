@@ -111,8 +111,7 @@ DB_CONFIG = {
     'user': os.environ.get('DB_USER', 'postgres'),
     'password': os.environ.get('DB_PASSWORD', ''),
     'dbname': os.environ.get('DB_NAME', 'log_conversa'),
-    'connect_timeout': 5,
-    'options': '-c statement_timeout=60000',
+    'connect_timeout': 10,
 }
 print(f"[API] DB_CONFIG: host={DB_CONFIG['host']}, port={DB_CONFIG['port']}, user={DB_CONFIG['user']}, dbname={DB_CONFIG['dbname']}", flush=True)
 ADMIN_USER = os.environ.get('ADMIN_USER', 'admin')
@@ -620,26 +619,30 @@ async def get_models():
 async def list_qa(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100),
                   tema: Optional[str] = None, search: Optional[str] = None,
                   sort: str = Query('recent', pattern='^(recent|oldest|tema)$')):
-    offset = (page - 1) * per_page
-    conditions, params = [], []
-    if tema:
-        conditions.append("tema = %s"); params.append(tema)
-    if search:
-        conditions.append("(pergunta_aluno ILIKE %s OR resposta_atendente ILIKE %s)")
-        params.extend([f'%{search}%', f'%{search}%'])
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    order = {'recent': 'created_at DESC', 'oldest': 'created_at ASC', 'tema': 'tema ASC, created_at DESC'}[sort]
-    with get_db() as conn:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(f"SELECT count(*) as cnt FROM knowledge_base {where}", params)
-        total = cur.fetchone()['cnt']
-        cur.execute(f"""SELECT id, conversation_id, pergunta_aluno, resposta_atendente, tema,
-                   embedding IS NOT NULL as has_embedding, whatsapp_buttons, media_attachments, created_at FROM knowledge_base {where}
-                   ORDER BY {order} LIMIT %s OFFSET %s""", params + [per_page, offset])
-        items = cur.fetchall()
-        for item in items:
-            if item['created_at']: item['created_at'] = item['created_at'].isoformat()
-        return {'items': items, 'total': total, 'page': page, 'per_page': per_page, 'pages': (total + per_page - 1) // per_page}
+    try:
+        offset = (page - 1) * per_page
+        conditions, params = [], []
+        if tema:
+            conditions.append("tema = %s"); params.append(tema)
+        if search:
+            conditions.append("(pergunta_aluno ILIKE %s OR resposta_atendente ILIKE %s)")
+            params.extend([f'%{search}%', f'%{search}%'])
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        order = {'recent': 'created_at DESC', 'oldest': 'created_at ASC', 'tema': 'tema ASC, created_at DESC'}[sort]
+        with get_db() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(f"SELECT count(*) as cnt FROM knowledge_base {where}", params)
+            total = cur.fetchone()['cnt']
+            cur.execute(f"""SELECT id, conversation_id, pergunta_aluno, resposta_atendente, tema,
+                       embedding IS NOT NULL as has_embedding, whatsapp_buttons, media_attachments, created_at FROM knowledge_base {where}
+                       ORDER BY {order} LIMIT %s OFFSET %s""", params + [per_page, offset])
+            items = cur.fetchall()
+            for item in items:
+                if item['created_at']: item['created_at'] = item['created_at'].isoformat()
+            return {'items': items, 'total': total, 'page': page, 'per_page': per_page, 'pages': (total + per_page - 1) // per_page}
+    except Exception as e:
+        print(f"[API] ERRO em /api/qa: {e}", flush=True)
+        return {'items': [], 'total': 0, 'page': 1, 'per_page': per_page, 'pages': 0, 'error': str(e)}
 
 
 @app.get("/api/qa/{qa_id}")
