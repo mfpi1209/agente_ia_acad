@@ -2049,6 +2049,7 @@ import httpx
 from collections import OrderedDict
 
 N8N_WEBHOOK_URL = 'https://n8n-new-n8n.ca31ey.easypanel.host/webhook/583eb17d-3455-4d64-ab68-67996fdb30af/webhook'
+CALL_HANDLER_WEBHOOK_URL = os.environ.get('CALL_HANDLER_WEBHOOK_URL', 'https://banco-whats-calling.6tqx2r.easypanel.host/webhook/calls')
 META_VERIFY_TOKEN = os.environ.get('META_VERIFY_TOKEN', 'tokenmetaacad2026')
 
 _wamid_cache = OrderedDict()
@@ -2092,14 +2093,39 @@ async def meta_webhook_verify(request: Request):
         return JSONResponse(content=r.text, status_code=r.status_code)
 
 
+def _has_calls_event(payload: dict) -> bool:
+    """Verifica se o payload contém eventos de chamada."""
+    try:
+        for entry in payload.get('entry', []):
+            for change in entry.get('changes', []):
+                if change.get('field') == 'calls':
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 @app.post("/webhook/meta")
 async def meta_webhook_receive(request: Request):
-    """Recebe webhook da Meta, extrai wamid, grava no PostgreSQL, repassa para n8n."""
+    """Recebe webhook da Meta, roteia calls para call_handler e messages para n8n."""
     body = await request.body()
     try:
         payload = json.loads(body)
     except Exception:
         payload = {}
+
+    if _has_calls_event(payload):
+        print(f"[WEBHOOK PROXY] Evento de CHAMADA detectado, encaminhando para call_handler", flush=True)
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                await client.post(
+                    CALL_HANDLER_WEBHOOK_URL,
+                    content=body,
+                    headers={'Content-Type': 'application/json'}
+                )
+        except Exception as e:
+            print(f"[WEBHOOK PROXY] Erro ao encaminhar chamada: {e}", flush=True)
+        return JSONResponse(content={"status": "ok"}, status_code=200)
 
     _extract_wamids(payload)
 
