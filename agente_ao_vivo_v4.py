@@ -518,8 +518,6 @@ def maybe_reload():
 # ===================== STATE =====================
 
 processed_msg_ids = set()
-_recent_sent_bodies = {}  # {body_hash: timestamp} - dedup envios do bot
-_recent_processed_inputs = {}  # {body_hash: timestamp} - dedup inputs do aluno
 conversation_greeted = set()
 active_conv_id = None
 student_profile = None
@@ -1247,39 +1245,104 @@ def meta_typing_on():
     return False
 
 
-def _body_hash(text):
-    return hashlib.md5(text.strip().lower().encode()).hexdigest()
+def _ensure_dedup_table():
+    """Cria tabela de dedup se não existir."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS msg_dedup (
+                msg_id TEXT PRIMARY KEY,
+                body_hash TEXT,
+                processed_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_dedup_body ON msg_dedup (body_hash, processed_at)")
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        p(f"  dedup table error: {e}")
+
+_ensure_dedup_table()
 
 
-def _cleanup_cache(cache, max_age=120):
-    now = time.time()
-    expired = [k for k, v in cache.items() if now - v > max_age]
-    for k in expired:
-        del cache[k]
+def _db_claim_message(msg_id, body):
+    """Tenta reivindicar mensagem no DB. Retorna True se conseguiu (primeira vez)."""
+    body_hash = hashlib.md5(body.strip().lower().encode()).hexdigest()
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO msg_dedup (msg_id, body_hash) VALUES (%s, %s) ON CONFLICT (msg_id) DO NOTHING RETURNING msg_id",
+            (msg_id, body_hash)
+        )
+        claimed = cur.fetchone() is not None
+        if not claimed:
+            p(f"  DEDUP-DB: msg_id {msg_id[:20]} já processado por outro processo")
+        conn.commit()
+        cur.close()
+        conn.close()
+        return claimed
+    except Exception as e:
+        p(f"  dedup claim error: {e}")
+        return True
+
+
+def _db_is_duplicate_body(body, window_seconds=45):
+    """Verifica se mesmo body foi processado nos últimos N segundos."""
+    body_hash = hashlib.md5(body.strip().lower().encode()).hexdigest()
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM msg_dedup WHERE body_hash = %s AND processed_at > NOW() - INTERVAL '%s seconds' LIMIT 1",
+            (body_hash, window_seconds)
+        )
+        exists = cur.fetchone() is not None
+        cur.close()
+        conn.close()
+        if exists:
+            p(f"  DEDUP-DB: body duplicado nos últimos {window_seconds}s")
+        return exists
+    except Exception as e:
+        p(f"  dedup body check error: {e}")
+        return False
+
+
+def _db_cleanup_dedup():
+    """Remove entradas antigas da tabela de dedup (>1h)."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM msg_dedup WHERE processed_at < NOW() - INTERVAL '1 hour'")
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
 
 
 def _track_sent_body(text):
-    """Registra body enviado para dedup por conteúdo."""
-    _recent_sent_bodies[_body_hash(text)] = time.time()
-    _cleanup_cache(_recent_sent_bodies)
+    """Registra body enviado no DB para dedup."""
+    body_hash = hashlib.md5(text.strip().lower().encode()).hexdigest()
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO msg_dedup (msg_id, body_hash) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (f'sent_{body_hash}_{int(time.time())}', body_hash)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
 
 
 def _is_echo_of_sent(text):
-    """Verifica se texto é eco de algo que o bot enviou recentemente."""
-    ts = _recent_sent_bodies.get(_body_hash(text))
-    return ts is not None and (time.time() - ts) < 120
-
-
-def _track_processed_input(text):
-    """Registra input do aluno processado."""
-    _recent_processed_inputs[_body_hash(text)] = time.time()
-    _cleanup_cache(_recent_processed_inputs, max_age=60)
-
-
-def _is_duplicate_input(text):
-    """Verifica se mesmo input já foi processado nos últimos 60s."""
-    ts = _recent_processed_inputs.get(_body_hash(text))
-    return ts is not None and (time.time() - ts) < 60
+    """Verifica se texto é eco de algo enviado pelo bot recentemente."""
+    return _db_is_duplicate_body(text, window_seconds=120)
 
 
 def send_and_track(conv_id, text, buttons=None):
@@ -1433,8 +1496,11 @@ def get_new_client_message(conv_id):
             p(f"  SKIP echo: \"{body[:60]}\"")
             processed_msg_ids.add(mid)
             continue
-        if _is_duplicate_input(body):
-            p(f"  SKIP dup-input: \"{body[:60]}\"")
+        if not _db_claim_message(mid, body):
+            processed_msg_ids.add(mid)
+            continue
+        if _db_is_duplicate_body(body, window_seconds=45):
+            p(f"  SKIP dup-body: \"{body[:60]}\"")
             processed_msg_ids.add(mid)
             continue
         return mid, body, is_button_click
@@ -1648,7 +1714,6 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
     global active_conv_id, student_profile, conversation_messages, last_response_time
     global followup_stage, waiting_for_client, inactivity_start
     processed_msg_ids.add(msg_id)
-    _track_processed_input(msg_body)
     followup_stage = 0
     waiting_for_client = False
     inactivity_start = 0
@@ -2160,6 +2225,8 @@ def main():
             if cycle % 10 == 0:
                 fu_info = f" | followup={followup_stage}" if waiting_for_client else ""
                 p(f"  ...ativo ({cycle * POLL_INTERVAL}s | {len(processed_msg_ids)} msgs | conv={conv_id[:12]}{fu_info})")
+            if cycle % 120 == 0:
+                _db_cleanup_dedup()
 
         except KeyboardInterrupt:
             p("\n  Agente encerrado.")
