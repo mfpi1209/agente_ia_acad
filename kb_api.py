@@ -160,10 +160,13 @@ Seu nome é "Assistente Virtual Cruzeiro do Sul". Você NÃO é um atendente hum
 ### MÉDIO (0.5-0.7) → Responda E ofereça atendente
 ### BAIXO (0.0-0.4) → Escale para humano
 
-## FORMATO:
-- Máximo 2 parágrafos. Direto ao ponto.
-- Use *negrito* (formatação WhatsApp). Máximo 1 emoji.
-- Última linha OBRIGATÓRIA: [CONFIANCA:X.X]
+## COMO RESPONDER:
+- Dê uma resposta COMPLETA e ÚTIL: inclua o passo a passo ou orientação prática que o aluno precisa para resolver.
+- Não seja vago. Se as referências têm detalhes (links, caminhos no portal, prazos), INCLUA.
+- Separe em blocos curtos (2-3 frases por bloco) usando quebras de linha para facilitar leitura.
+- Use *negrito* para termos-chave (formatação WhatsApp). Máximo 1 emoji por bloco.
+- Mantenha entre 3 e 6 frases no total. Nem telegráfico, nem textão.
+- Última linha OBRIGATÓRIA (oculta para o aluno): [CONFIANCA:X.X]
 
 ## CONVERSAS DE REFERÊNCIA:
 {references}
@@ -427,7 +430,7 @@ def get_active_prompt():
         row = cur.fetchone()
         if row:
             return row
-    return {'id': 0, 'system_prompt': DEFAULT_PROMPT, 'model': 'gpt-4o-mini', 'temperature': 0.2, 'max_tokens': 400}
+    return {'id': 0, 'system_prompt': DEFAULT_PROMPT, 'model': 'gpt-4o-mini', 'temperature': 0.3, 'max_tokens': 600}
 
 
 # --- Models ---
@@ -882,7 +885,7 @@ L2_TO_L3_KEYS = {
 
 def generate_flow_buttons(pergunta: str, confianca: float, history: list = None):
     q = pergunta.lower().strip().rstrip('!?.,').strip()
-    stripped = q.replace('🔑 ', '').replace('💰 ', '').replace('📚 ', '').replace('📄 ', '').replace('🔄 ', '').replace('👤 ', '').replace('🧾 ', '').replace('💳 ', '').replace('🤝 ', '').replace('💸 ', '').replace('🆕 ', '').replace('📱 ', '').replace('🖥️ ', '').replace('📅 ', '').replace('📖 ', '').replace('📝 ', '').replace('📚 ', '').replace('📋 ', '').replace('📎 ', '').lower().strip()
+    stripped = q.replace('🔑 ', '').replace('💰 ', '').replace('📚 ', '').replace('📄 ', '').replace('🔄 ', '').replace('👤 ', '').replace('🧾 ', '').replace('💳 ', '').replace('🤝 ', '').replace('💸 ', '').replace('🆕 ', '').replace('📱 ', '').replace('🖥️ ', '').replace('📅 ', '').replace('📖 ', '').replace('📝 ', '').replace('📚 ', '').replace('📋 ', '').replace('📎 ', '').replace('💬 ', '').replace('✅ ', '').replace('💬', '').replace('✅', '').lower().strip()
 
     # Greeting detection
     words = q.split()
@@ -890,28 +893,25 @@ def generate_flow_buttons(pergunta: str, confianca: float, history: list = None)
     if is_greet and (not history or len(history) <= 1):
         return GREETING_MENU
 
-    # Main menu -> sub-menu (level 2)
-    for menu_key, submenu_key in MAIN_MENU_KEYS.items():
-        if menu_key in stripped:
-            return SUBMENU[submenu_key]
-
-    # Level 2 -> Level 3 sub-menu (only if NOT a specific L3 button click)
-    is_l3_click = False
-    all_l3_btns = {}
-    for cat in SUBMENU_L3.values():
+    # Pre-check: if text matches a leaf button (SUBMENU_TO_QUESTION), let RAG handle it
+    for cat in list(SUBMENU.values()) + list(SUBMENU_L3.values()):
         for b in cat.get('buttons', []) + cat.get('buttons2', []):
             if b['id'] in SUBMENU_TO_QUESTION:
                 clean = b['title'].lower()
                 for em in '🔑💰📚📄🔄👤🧾💳🤝💸🆕📱🖥️📅📖📝📋📎💲🏷️📈🔒💠⚠️📧🌐📨📊⏰':
                     clean = clean.replace(em + ' ', '').replace(em, '')
-                if clean.strip() in stripped:
-                    is_l3_click = True
-                    break
+                if clean.strip() and clean.strip() in stripped:
+                    return None
 
-    if not is_l3_click:
-        for l2_key, l3_key in L2_TO_L3_KEYS.items():
-            if l2_key in stripped and l3_key in SUBMENU_L3:
-                return SUBMENU_L3[l3_key]
+    # Main menu -> sub-menu (level 2)
+    for menu_key, submenu_key in MAIN_MENU_KEYS.items():
+        if menu_key in stripped:
+            return SUBMENU[submenu_key]
+
+    # Level 2 -> Level 3 sub-menu
+    for l2_key, l3_key in L2_TO_L3_KEYS.items():
+        if l2_key in stripped and l3_key in SUBMENU_L3:
+            return SUBMENU_L3[l3_key]
 
     # "Sim, resolveu" / resolved
     if any(w in q for w in RESOLVED_WORDS) or (q in ('sim', 'si', 'sím') and history and len(history) >= 2):
@@ -935,17 +935,31 @@ def generate_flow_buttons(pergunta: str, confianca: float, history: list = None)
         }
 
     # "Não, obrigado" / closing
-    close_match = any(w in q for w in CLOSING_WORDS) or q in ('não obrigado', 'nao obrigado', 'encerrar', 'não', 'nao')
+    close_match = any(w in q for w in CLOSING_WORDS) or q in ('não obrigado', 'nao obrigado', 'encerrar', 'não', 'nao',
+                                                               'não preciso', 'nao preciso', 'pode encerrar', 'fechar')
     if close_match and history and len(history) >= 2:
+        already_closed = any('Obrigado pelo contato' in h.get('text', '') or 'Até logo' in h.get('text', '') for h in history if h.get('role') == 'bot')
+        if already_closed:
+            return {
+                'type': 'flow_close',
+                'text': 'Até logo! Quando precisar, é só chamar. 😊',
+                'buttons': []
+            }
         return {
             'type': 'flow_close',
             'text': 'Obrigado pelo contato! Qualquer dúvida é só nos chamar novamente. Até mais! 😊',
             'buttons': []
         }
 
-    # "Outra dúvida" / restart
-    if q in ('tenho outra dúvida', 'outra dúvida', 'outra duvida', 'tenho outra duvida', 'outra'):
-        return GREETING_MENU
+    # "Outra dúvida" / restart — vai direto pro menu de categorias
+    outra_phrases = ('outra dúvida', 'outra duvida', 'tenho outra', 'outra pergunta', 'mais uma duvida', 'mais uma dúvida')
+    if any(p in stripped for p in outra_phrases) or stripped in ('outra', 'menu', 'opcoes', 'opções'):
+        return {
+            'type': 'flow_menu',
+            'text': 'Escolha o assunto abaixo 👇',
+            'buttons': GREETING_MENU['buttons'],
+            'buttons2': GREETING_MENU['buttons2'],
+        }
 
     # After AI response - add follow-up buttons based on confidence
     if confianca >= 0.7:
@@ -2209,14 +2223,11 @@ async def store_wamid_endpoint(req: WamidStoreRequest):
 # ===================== AGENT CONFIG =====================
 
 AGENT_CONFIG_DEFAULTS = {
-    "followup_1_delay": 120,
+    "followup_1_delay": 300,
     "followup_1_msg": "Oi{name}! Ainda está por aí? Se tiver mais alguma dúvida, é só falar 😊",
     "followup_1_buttons": ["Tenho outra dúvida", "Não, obrigado!"],
-    "followup_2_delay": 240,
-    "followup_2_msg": "Tudo bem{name}! Vou precisar encerrar nosso atendimento em breve. Se precisar de algo, é só mandar uma mensagem! 😉",
-    "followup_2_buttons": ["Ainda estou aqui!", "Pode encerrar"],
-    "close_delay": 540,
-    "close_msg": "Encerrando o atendimento por enquanto{name}. Foi um prazer te ajudar! Quando precisar, é só chamar. Até mais! 👋",
+    "close_delay": 600,
+    "close_msg": "Como não tivemos retorno, vou finalizar o contato por aqui para te deixar seguir com seus compromissos. Estaremos à disposição caso precise retomar o assunto depois! ✨",
     "close_buttons": [],
     "poll_interval": 3,
     "confidence_threshold": 0.5,

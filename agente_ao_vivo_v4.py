@@ -282,14 +282,11 @@ Se não receber o e-mail, verifica a caixa de spam. Qualquer coisa, me avisa aqu
 
 # ===================== FOLLOW-UP & ENCERRAMENTO (defaults, sobrescritos pelo banco) =====================
 
-FOLLOWUP_1_DELAY = 120
-FOLLOWUP_2_DELAY = 240
-CLOSE_DELAY      = 540
+FOLLOWUP_1_DELAY = 300
+CLOSE_DELAY      = 600
 FOLLOWUP_1_MSG     = "Oi{name}! Ainda está por aí? Se tiver mais alguma dúvida, é só falar 😊"
 FOLLOWUP_1_BUTTONS = ['Tenho outra dúvida', 'Não, obrigado!']
-FOLLOWUP_2_MSG     = "Tudo bem{name}! Vou precisar encerrar nosso atendimento em breve. Se precisar de algo, é só mandar uma mensagem! 😉"
-FOLLOWUP_2_BUTTONS = ['Ainda estou aqui!', 'Pode encerrar']
-CLOSE_INACTIVITY_MSG     = "Encerrando o atendimento por enquanto{name}. Foi um prazer te ajudar! Quando precisar, é só chamar. Até mais! 👋"
+CLOSE_INACTIVITY_MSG     = "Como não tivemos retorno, vou finalizar o contato por aqui para te deixar seguir com seus compromissos. Estaremos à disposição caso precise retomar o assunto depois! ✨"
 CLOSE_INACTIVITY_BUTTONS = None
 
 # ===================== SAUDAÇÕES (defaults, sobrescritos pelo banco) =====================
@@ -303,19 +300,16 @@ GREETING_BUTTONS = ['Acesso Portal/App', 'Financeiro', 'Aulas e Conteúdo', 'Doc
 
 def load_agent_config_from_db():
     """Carrega configs da tabela agent_config no PostgreSQL, sobrescrevendo defaults."""
-    global FOLLOWUP_1_DELAY, FOLLOWUP_2_DELAY, CLOSE_DELAY
-    global FOLLOWUP_1_MSG, FOLLOWUP_1_BUTTONS, FOLLOWUP_2_MSG, FOLLOWUP_2_BUTTONS
+    global FOLLOWUP_1_DELAY, CLOSE_DELAY
+    global FOLLOWUP_1_MSG, FOLLOWUP_1_BUTTONS
     global CLOSE_INACTIVITY_MSG, CLOSE_INACTIVITY_BUTTONS
     global POLL_INTERVAL, CONFIDENCE_THRESHOLD, RESPONSE_COOLDOWN
     global GREETING_RETURNING, GREETING_RETURNING_NO_TOPIC, GREETING_NEW, GREETING_ANONYMOUS, GREETING_BUTTONS
     mapping = {
         'followup_1_delay': ('FOLLOWUP_1_DELAY', int),
-        'followup_2_delay': ('FOLLOWUP_2_DELAY', int),
         'close_delay': ('CLOSE_DELAY', int),
         'followup_1_msg': ('FOLLOWUP_1_MSG', str),
         'followup_1_buttons': ('FOLLOWUP_1_BUTTONS', list),
-        'followup_2_msg': ('FOLLOWUP_2_MSG', str),
-        'followup_2_buttons': ('FOLLOWUP_2_BUTTONS', list),
         'close_msg': ('CLOSE_INACTIVITY_MSG', str),
         'close_buttons': ('CLOSE_INACTIVITY_BUTTONS', list),
         'poll_interval': ('POLL_INTERVAL', int),
@@ -2096,7 +2090,7 @@ def main():
     p("  AGENTE IA v4 - Identificacao + Memoria + Empatia + Tab")
     p(f"  Monitorando: {PHONE_TO_MONITOR}")
     p(f"  Polling: {POLL_INTERVAL}s | Threshold: {CONFIDENCE_THRESHOLD}")
-    p(f"  Follow-ups: {FOLLOWUP_1_DELAY}s / {FOLLOWUP_2_DELAY}s / Close: {CLOSE_DELAY}s")
+    p(f"  Follow-up: {FOLLOWUP_1_DELAY}s / Close: {CLOSE_DELAY}s")
     p(f"  Comandos: #testar (ativar), #sair (voltar), #help (todos)")
     p("=" * 60)
 
@@ -2194,14 +2188,7 @@ def main():
                     log_to_db(active_conv_id, '(inatividade)', msg1, 1.0, 'followup_1')
                     followup_stage = 1
 
-                elif followup_stage == 1 and elapsed >= FOLLOWUP_2_DELAY:
-                    msg2 = FOLLOWUP_2_MSG.format(name=name_fmt)
-                    p(f"  [FOLLOWUP-2] {int(elapsed)}s sem resposta")
-                    send_message_crm(active_conv_id, msg2, buttons=FOLLOWUP_2_BUTTONS)
-                    log_to_db(active_conv_id, '(inatividade)', msg2, 1.0, 'followup_2')
-                    followup_stage = 2
-
-                elif followup_stage == 2 and elapsed >= CLOSE_DELAY:
+                elif followup_stage == 1 and elapsed >= CLOSE_DELAY:
                     close_msg = CLOSE_INACTIVITY_MSG.format(name=name_fmt)
                     p(f"  [AUTO-CLOSE] {int(elapsed)}s sem resposta -> encerrando")
                     if conversation_messages:
