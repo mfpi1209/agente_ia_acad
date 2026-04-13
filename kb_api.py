@@ -355,8 +355,15 @@ def check_auth(credentials: Optional[HTTPBasicCredentials] = Depends(security)):
 
 def generate_embedding(text: str) -> list[float]:
     client = OpenAI(api_key=OPENAI_API_KEY)
-    resp = client.embeddings.create(input=text[:2000], model='text-embedding-3-small', dimensions=256)
-    return resp.data[0].embedding
+    for attempt in range(3):
+        try:
+            resp = client.embeddings.create(input=text[:2000], model='text-embedding-3-small', dimensions=256)
+            return resp.data[0].embedding
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1 * (attempt + 1))
+                continue
+            raise
 
 
 def rag_search(question: str, top_k: int = 5):
@@ -395,11 +402,21 @@ def call_llm(question: str, system_prompt: str, model: str = 'gpt-4o-mini',
             messages.append({'role': role, 'content': h.get('text', '')})
     messages.append({'role': 'user', 'content': question})
     t0 = time.time()
-    chat = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        max_tokens=max_tokens, temperature=temperature
-    )
+    last_err = None
+    for attempt in range(3):
+        try:
+            chat = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens, temperature=temperature
+            )
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(1 * (attempt + 1))
+                continue
+            raise
     latency = int((time.time() - t0) * 1000)
     resp_text = chat.choices[0].message.content
     usage = chat.usage
@@ -994,158 +1011,176 @@ def generate_flow_buttons(pergunta: str, confianca: float, history: list = None)
 async def test_question(data: TestRequest):
     if not data.pergunta.strip(): raise HTTPException(400, "Pergunta é obrigatória")
 
-    q = data.pergunta.strip()
-    q_lower = q.lower().rstrip('!?.,').strip()
+    try:
+        q = data.pergunta.strip()
+        q_lower = q.lower().rstrip('!?.,').strip()
 
-    # --- Pre-check: Flow-only responses (no LLM needed) ---
-    pre_flow = generate_flow_buttons(q, 1.0, data.history)
+        # --- Pre-check: Flow-only responses (no LLM needed) ---
+        pre_flow = generate_flow_buttons(q, 1.0, data.history)
 
-    if pre_flow and pre_flow.get('type') in ('flow_resolved', 'flow_close', 'flow_escalate', 'flow_submenu'):
-        return {
-            'resposta': pre_flow['text'],
-            'confianca': 1.0,
-            'latency_ms': 0,
-            'tokens_prompt': 0, 'tokens_completion': 0, 'tokens_total': 0,
-            'cost_usd': 0,
-            'model': 'flow',
-            'whatsapp_buttons': None,
-            'flow_buttons': pre_flow,
-            'referencias': []
-        }
+        if pre_flow and pre_flow.get('type') in ('flow_resolved', 'flow_close', 'flow_escalate', 'flow_submenu'):
+            return {
+                'resposta': pre_flow['text'],
+                'confianca': 1.0,
+                'latency_ms': 0,
+                'tokens_prompt': 0, 'tokens_completion': 0, 'tokens_total': 0,
+                'cost_usd': 0,
+                'model': 'flow',
+                'whatsapp_buttons': None,
+                'flow_buttons': pre_flow,
+                'referencias': []
+            }
 
-    if pre_flow and pre_flow.get('type') == 'flow_menu':
-        return {
-            'resposta': pre_flow['text'],
-            'confianca': 1.0,
-            'latency_ms': 0,
-            'tokens_prompt': 0, 'tokens_completion': 0, 'tokens_total': 0,
-            'cost_usd': 0,
-            'model': 'flow',
-            'whatsapp_buttons': None,
-            'flow_buttons': pre_flow,
-            'referencias': []
-        }
+        if pre_flow and pre_flow.get('type') == 'flow_menu':
+            return {
+                'resposta': pre_flow['text'],
+                'confianca': 1.0,
+                'latency_ms': 0,
+                'tokens_prompt': 0, 'tokens_completion': 0, 'tokens_total': 0,
+                'cost_usd': 0,
+                'model': 'flow',
+                'whatsapp_buttons': None,
+                'flow_buttons': pre_flow,
+                'referencias': []
+            }
 
-    # --- Translate button clicks (L2/L3) to real questions for RAG ---
-    search_query = q
-    stripped_q = q_lower
-    for emoji in '🔑💰📚📄🔄👤🧾💳🤝💸🆕📱🖥️📅📖📝📋📎💲🏷️📈🔒💠⚠️📧🌐📨📊⏰':
-        stripped_q = stripped_q.replace(emoji + ' ', '').replace(emoji, '')
-    stripped_q = stripped_q.strip()
+        # --- Translate button clicks (L2/L3) to real questions for RAG ---
+        search_query = q
+        stripped_q = q_lower
+        for emoji in '🔑💰📚📄🔄👤🧾💳🤝💸🆕📱🖥️📅📖📝📋📎💲🏷️📈🔒💠⚠️📧🌐📨📊⏰':
+            stripped_q = stripped_q.replace(emoji + ' ', '').replace(emoji, '')
+        stripped_q = stripped_q.strip()
 
-    all_buttons = {}
-    for cat in list(SUBMENU.values()) + list(SUBMENU_L3.values()):
-        for b in cat.get('buttons', []) + cat.get('buttons2', []):
-            if b['id'] in SUBMENU_TO_QUESTION:
-                clean = b['title'].lower()
-                for emoji in '🔑💰📚📄🔄👤🧾💳🤝💸🆕📱🖥️📅📖📝📋📎💲🏷️📈🔒💠⚠️📧🌐📨📊⏰':
-                    clean = clean.replace(emoji + ' ', '').replace(emoji, '')
-                all_buttons[clean.strip()] = SUBMENU_TO_QUESTION[b['id']]
+        all_buttons = {}
+        for cat in list(SUBMENU.values()) + list(SUBMENU_L3.values()):
+            for b in cat.get('buttons', []) + cat.get('buttons2', []):
+                if b['id'] in SUBMENU_TO_QUESTION:
+                    clean = b['title'].lower()
+                    for emoji in '🔑💰📚📄🔄👤🧾💳🤝💸🆕📱🖥️📅📖📝📋📎💲🏷️📈🔒💠⚠️📧🌐📨📊⏰':
+                        clean = clean.replace(emoji + ' ', '').replace(emoji, '')
+                    all_buttons[clean.strip()] = SUBMENU_TO_QUESTION[b['id']]
 
-    for btn_text, real_question in all_buttons.items():
-        if btn_text and btn_text in stripped_q:
-            search_query = real_question
-            break
-
-    # For short replies with history context
-    if data.history and len(search_query) < 30 and search_query == q:
-        last_bot = None
-        for h in reversed(data.history or []):
-            if h.get('role') == 'bot':
-                last_bot = h.get('text', '')[:200]
+        for btn_text, real_question in all_buttons.items():
+            if btn_text and btn_text in stripped_q:
+                search_query = real_question
                 break
-        if last_bot:
-            search_query = f"{last_bot} {search_query}"
 
-    results = rag_search(search_query)
-    refs = build_refs(results)
+        # For short replies with history context
+        if data.history and len(search_query) < 30 and search_query == q:
+            last_bot = None
+            for h in reversed(data.history or []):
+                if h.get('role') == 'bot':
+                    last_bot = h.get('text', '')[:200]
+                    break
+            if last_bot:
+                search_query = f"{last_bot} {search_query}"
 
-    history_text = ''
-    if data.history:
-        for h in data.history[-4:]:
-            role = 'Aluno' if h.get('role') == 'user' else 'Assistente'
-            history_text += f"{role}: {h.get('text', '')[:200]}\n"
+        results = rag_search(search_query)
+        refs = build_refs(results)
 
-    # Build student/memory/sentiment context
-    student_ctx = "## ALUNO: Modo simulador (sem telefone)"
-    memory_ctx = ""
-    sentiment_ctx = ""
-    student_info = None
+        history_text = ''
+        if data.history:
+            for h in data.history[-4:]:
+                role = 'Aluno' if h.get('role') == 'user' else 'Assistente'
+                history_text += f"{role}: {h.get('text', '')[:200]}\n"
 
-    if data.phone:
-        clean_phone = data.phone.replace('+', '').replace(' ', '').replace('-', '')
-        h_crm = {'Authorization': f'Bearer {DCZ_TOKEN}', 'Content-Type': 'application/json'}
-        try:
-            r_crm = http_requests.get(f'https://crm.g1.datacrazy.io/api/crm/leads',
-                                     headers=h_crm, params={'search': clean_phone, 'limit': 1}, timeout=10)
-            if r_crm.status_code == 200:
-                leads = r_crm.json().get('data', [])
-                if leads:
-                    ld = leads[0]
-                    student_info = {'name': ld.get('name', ''), 'cpf': ld.get('taxId', ''),
-                                   'tags': [t.get('name', '') for t in ld.get('tags', [])]}
-                    fname = ld.get('name', '').split()[0].capitalize() if ld.get('name') else 'aluno'
-                    student_ctx = f"## DADOS DO ALUNO:\n- Nome: {ld.get('name','')}\n- Tags: {', '.join(student_info['tags'])}\n\nChame o aluno de *{fname}*."
-        except Exception:
-            pass
+        # Build student/memory/sentiment context
+        student_ctx = "## ALUNO: Modo simulador (sem telefone)"
+        memory_ctx = ""
+        sentiment_ctx = ""
+        student_info = None
 
-        with get_db() as conn:
-            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cur.execute("SELECT * FROM student_memory WHERE phone LIKE %s", (f'%{clean_phone[-11:]}%',))
-            mem = cur.fetchone()
-        if mem:
-            memory_ctx = f"## MEMÓRIA DO ALUNO:\n- Interações: {mem['interaction_count']}\n- Último assunto: {mem.get('last_topic','')}\n- Resumo anterior: {mem.get('last_summary','')}"
+        if data.phone:
+            clean_phone = data.phone.replace('+', '').replace(' ', '').replace('-', '')
+            h_crm = {'Authorization': f'Bearer {DCZ_TOKEN}', 'Content-Type': 'application/json'}
+            try:
+                r_crm = http_requests.get(f'https://crm.g1.datacrazy.io/api/crm/leads',
+                                         headers=h_crm, params={'search': clean_phone, 'limit': 1}, timeout=10)
+                if r_crm.status_code == 200:
+                    leads = r_crm.json().get('data', [])
+                    if leads:
+                        ld = leads[0]
+                        student_info = {'name': ld.get('name', ''), 'cpf': ld.get('taxId', ''),
+                                       'tags': [t.get('name', '') for t in ld.get('tags', [])]}
+                        fname = ld.get('name', '').split()[0].capitalize() if ld.get('name') else 'aluno'
+                        student_ctx = f"## DADOS DO ALUNO:\n- Nome: {ld.get('name','')}\n- Tags: {', '.join(student_info['tags'])}\n\nChame o aluno de *{fname}*."
+            except Exception:
+                pass
 
-    # Sentiment detection
-    frustration_words = ['não consigo', 'nao consigo', 'impossível', 'absurdo', 'problema', 'erro',
-                        'urgente', 'raiva', 'frustrado', 'horrível', 'já tentei', 'nunca funciona']
-    q_text = data.pergunta.lower()
-    frust = sum(1 for w in frustration_words if w in q_text)
-    if frust >= 2:
-        sentiment_ctx = "## SENTIMENTO: FRUSTRADO\n- Valide o sentimento antes de responder. Priorize resolução."
-    elif frust == 1:
-        sentiment_ctx = "## SENTIMENTO: PREOCUPADO\n- Seja atencioso e detalhado."
+            with get_db() as conn:
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur.execute("SELECT * FROM student_memory WHERE phone LIKE %s", (f'%{clean_phone[-11:]}%',))
+                mem = cur.fetchone()
+            if mem:
+                memory_ctx = f"## MEMÓRIA DO ALUNO:\n- Interações: {mem['interaction_count']}\n- Último assunto: {mem.get('last_topic','')}\n- Resumo anterior: {mem.get('last_summary','')}"
 
-    if data.prompt_id:
-        with get_db() as conn:
-            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cur.execute("SELECT * FROM prompt_versions WHERE id = %s", (data.prompt_id,))
-            pv = cur.fetchone()
-        if pv:
-            prompt_text = pv['system_prompt'].replace('{references}', refs).replace('{history}', history_text)
-            prompt_text = prompt_text.replace('{student_context}', student_ctx).replace('{memory_context}', memory_ctx).replace('{sentiment_context}', sentiment_ctx)
-            model = data.model or pv['model']
-            llm = call_llm(data.pergunta, prompt_text, model, pv['temperature'], pv['max_tokens'], data.history)
+        # Sentiment detection
+        frustration_words = ['não consigo', 'nao consigo', 'impossível', 'absurdo', 'problema', 'erro',
+                            'urgente', 'raiva', 'frustrado', 'horrível', 'já tentei', 'nunca funciona']
+        q_text = data.pergunta.lower()
+        frust = sum(1 for w in frustration_words if w in q_text)
+        if frust >= 2:
+            sentiment_ctx = "## SENTIMENTO: FRUSTRADO\n- Valide o sentimento antes de responder. Priorize resolução."
+        elif frust == 1:
+            sentiment_ctx = "## SENTIMENTO: PREOCUPADO\n- Seja atencioso e detalhado."
+
+        if data.prompt_id:
+            with get_db() as conn:
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur.execute("SELECT * FROM prompt_versions WHERE id = %s", (data.prompt_id,))
+                pv = cur.fetchone()
+            if pv:
+                prompt_text = pv['system_prompt'].replace('{references}', refs).replace('{history}', history_text)
+                prompt_text = prompt_text.replace('{student_context}', student_ctx).replace('{memory_context}', memory_ctx).replace('{sentiment_context}', sentiment_ctx)
+                model = data.model or pv['model']
+                llm = call_llm(data.pergunta, prompt_text, model, pv['temperature'], pv['max_tokens'], data.history)
+            else:
+                raise HTTPException(404, "Prompt não encontrado")
         else:
-            raise HTTPException(404, "Prompt não encontrado")
-    else:
-        active = get_active_prompt()
-        prompt_text = active['system_prompt'].replace('{references}', refs).replace('{history}', history_text)
-        prompt_text = prompt_text.replace('{student_context}', student_ctx).replace('{memory_context}', memory_ctx).replace('{sentiment_context}', sentiment_ctx)
-        model = data.model or active['model']
-        llm = call_llm(data.pergunta, prompt_text, model, active['temperature'], active['max_tokens'], data.history)
+            active = get_active_prompt()
+            prompt_text = active['system_prompt'].replace('{references}', refs).replace('{history}', history_text)
+            prompt_text = prompt_text.replace('{student_context}', student_ctx).replace('{memory_context}', memory_ctx).replace('{sentiment_context}', sentiment_ctx)
+            model = data.model or active['model']
+            llm = call_llm(data.pergunta, prompt_text, model, active['temperature'], active['max_tokens'], data.history)
 
-    # Determine follow-up buttons based on flow state
-    flow_buttons = generate_flow_buttons(data.pergunta, llm['confianca'], data.history)
+        # Determine follow-up buttons based on flow state
+        flow_buttons = generate_flow_buttons(data.pergunta, llm['confianca'], data.history)
 
-    # KB-defined buttons (from bot flow import) - only if no flow buttons
-    best_wa = None
-    if not flow_buttons:
-        for r in results:
-            if r.get('whatsapp_buttons') and float(r['score']) >= 0.75:
-                best_wa = r['whatsapp_buttons']
-                break
+        # KB-defined buttons (from bot flow import) - only if no flow buttons
+        best_wa = None
+        if not flow_buttons:
+            for r in results:
+                if r.get('whatsapp_buttons') and float(r['score']) >= 0.75:
+                    best_wa = r['whatsapp_buttons']
+                    break
 
-    return {
-        **llm,
-        'whatsapp_buttons': best_wa,
-        'flow_buttons': flow_buttons,
-        'referencias': [
-            {'id': r['id'], 'pergunta': str(r['pergunta_aluno'])[:200], 'resposta': str(r['resposta_atendente'])[:300],
-             'tema': r['tema'], 'score': round(float(r['score']), 3),
-             'whatsapp_buttons': r.get('whatsapp_buttons')} for r in results
-        ]
-    }
+        return {
+            **llm,
+            'whatsapp_buttons': best_wa,
+            'flow_buttons': flow_buttons,
+            'referencias': [
+                {'id': r['id'], 'pergunta': str(r['pergunta_aluno'])[:200], 'resposta': str(r['resposta_atendente'])[:300],
+                 'tema': r['tema'], 'score': round(float(r['score']), 3),
+                 'whatsapp_buttons': r.get('whatsapp_buttons')} for r in results
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(status_code=200, content={
+            'resposta': 'Desculpe, ocorreu um erro temporário ao processar sua pergunta. Por favor, tente novamente.',
+            'confianca': 0,
+            'latency_ms': 0,
+            'tokens_prompt': 0, 'tokens_completion': 0, 'tokens_total': 0,
+            'cost_usd': 0,
+            'model': 'erro',
+            'whatsapp_buttons': None,
+            'flow_buttons': None,
+            'referencias': [],
+            'erro': str(e)
+        })
 
 
 @app.post("/api/playground")

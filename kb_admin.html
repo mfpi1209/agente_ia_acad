@@ -1136,9 +1136,12 @@ inp.disabled=true;document.getElementById('btn-cs').disabled=true;
 addBub('user',q);chatH.push({role:'user',text:q});const ty=addBub('typing');
 try{const model=document.getElementById('chat-model').value;const pid=document.getElementById('chat-prompt').value;
 const body={pergunta:q,history:chatH.slice(0,-1)};if(model)body.model=model;if(pid)body.prompt_id=parseInt(pid);
-const d=await(await fetch(A+'/api/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+const resp=await fetch(A+'/api/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+let d;
+try{d=await resp.json();}catch(parseErr){throw new Error('Erro temporário no servidor. Tente novamente.');}
+if(d.erro){console.warn('API retornou erro tratado:',d.erro);}
 ty.remove();chatN++;const mid=chatN;chatR[mid]={...d,pergunta:q,prompt_id:pid||null};addBub('bot',d.resposta,mid,d.whatsapp_buttons,d.flow_buttons);chatH.push({role:'bot',text:d.resposta});if(d.model!=='flow')selBot(mid);
-}catch(e){ty.remove();addBub('sys','Erro: '+e.message);}finally{inp.disabled=false;document.getElementById('btn-cs').disabled=false;inp.focus();}}
+}catch(e){ty.remove();addBub('sys',e.message||'Erro desconhecido. Tente novamente.');}finally{inp.disabled=false;document.getElementById('btn-cs').disabled=false;inp.focus();}}
 
 function selBot(mid){document.querySelectorAll('.wa-bot').forEach(e=>e.classList.remove('selected'));const el=document.getElementById('bm-'+mid);if(el)el.classList.add('selected');
 const d=chatR[mid];if(!d)return;const cf=d.confianca;
