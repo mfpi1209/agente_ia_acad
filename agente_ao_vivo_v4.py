@@ -2775,20 +2775,17 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         waiting_for_client = False; inactivity_start = 0
         return
 
-    # === PRIMEIRA INTERAÇÃO: verifica se aluno está na pipeline BASE DE ALUNOS ===
+    # === PRIMEIRA INTERAÇÃO: verifica se lead/negócio existe ===
     if is_first:
-        p(f"  Primeira interação -> verificando se aluno está na pipeline BASE DE ALUNOS...")
-        in_pipeline = check_lead_has_pipeline(cur_phone)
-
-        if in_pipeline:
+        if student_profile:
             _student_in_base = True
-            p(f"  Aluno NA BASE -> saudação + menu")
+            p(f"  Lead existe no CRM -> saudação + menu (sem mencionar matrícula)")
         else:
             _student_in_base = False
-            p(f"  Aluno NÃO encontrado na pipeline -> fluxo de identificação")
+            p(f"  Lead NÃO encontrado no CRM -> fluxo de identificação")
             msg = ("👋 Oi, tudo bem?\n\n"
-                   "Não localizei este telefone que estamos conversando em nossa base de dados!\n\n"
-                   "Para continuarmos, por favor *digite* uma das opções abaixo: 👇")
+                   "Não localizei este telefone em nosso sistema.\n\n"
+                   "Para continuarmos, por favor *escolha* uma das opções abaixo: 👇")
             meta_typing_on()
             send_and_track(conv_id, msg, buttons=NOT_IN_BASE_BUTTONS)
             conversation_messages.append({'role': 'bot', 'text': msg})
@@ -2843,9 +2840,9 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         waiting_for_client = True; inactivity_start = time.time()
         return
 
-    # === BLOQUEIO: aluno NÃO está na pipeline BASE DE ALUNOS ===
-    if _student_in_base is False:
-        p(f"  Aluno NÃO na pipeline -> reapresentando opções de identificação")
+    # === BLOQUEIO: lead NÃO encontrado no CRM ===
+    if _student_in_base is False and student_profile is None:
+        p(f"  Lead não encontrado -> reapresentando opções de identificação")
         msg = ("Para que eu possa te atender, preciso primeiro te localizar em nosso sistema.\n\n"
                "Por favor, escolha uma das opções abaixo: 👇")
         meta_typing_on()
@@ -3302,11 +3299,13 @@ def main():
 
                 # Extrair telefone do contato desta conversa
                 contact = conv.get('contact', {}) or {}
-                conv_phone = (contact.get('rawPhone', '') or contact.get('phone', '') or
+                conv_phone = (contact.get('phoneNumber', '') or contact.get('contactId', '') or
+                              contact.get('rawPhone', '') or contact.get('phone', '') or
                               contact.get('number', '') or '')
                 if not conv_phone:
                     lead_info = conv.get('lead', {}) or {}
-                    conv_phone = (lead_info.get('rawPhone', '') or lead_info.get('phone', '') or '')
+                    conv_phone = (lead_info.get('phoneNumber', '') or lead_info.get('rawPhone', '') or
+                                  lead_info.get('phone', '') or '')
                 if not conv_phone:
                     conv_phone = (conv.get('contactPhone', '') or conv.get('phone', '') or
                                   conv.get('number', '') or conv.get('from', '') or '')
