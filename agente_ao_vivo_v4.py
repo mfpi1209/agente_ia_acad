@@ -14,6 +14,7 @@ import os
 import re
 import time
 import hashlib
+import base64
 from datetime import datetime
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -31,6 +32,22 @@ DCZ_MSG = 'https://messaging.g1.datacrazy.io/api'
 DCZ_TOKEN = os.environ.get('DCZ_TOKEN', '')
 H = {'Authorization': f'Bearer {DCZ_TOKEN}', 'Content-Type': 'application/json'}
 
+PIPELINE_ALUNOS_ID = '7d1b30e3-b554-4225-8523-d2d21ffc7c35'
+N8N_WEBHOOK_LEADS_CPF = 'https://n8n-new-n8n.ca31ey.easypanel.host/webhook/leads_cpf_csv'
+STAGE_ATENDIMENTO_ID = '7e89e4a3-09ca-4e5a-976b-35f7f041ccf6'
+STAGE_EM_ATENDIMENTO_ID = '742714eb-ac5a-435f-8680-97e6ab8f2f6e'
+
+POLOS_LIST = ("Barra Funda\nVila Prudente\nVila Mariana\nFreguesia do Ó (Moinho Velho)\n"
+              "Vila Ema (Sapopemba)\nIbirapuera (Indianópolis)\nTaboão da Serra - Jardim Mituzi\n"
+              "Taboão da Serra - Centro\nCampinas (Ouro Verde)\nItapira (Santo Antônio)\n"
+              "Capivari (Centro)\nMorumbi (Vila Progedior)\nSantana 2")
+
+NOT_IN_BASE_BUTTONS = ['Já sou aluno', 'Quero me matricular']
+COMMERCIAL_REDIRECT_MSG = ("Certo!\n\nEste canal é dedicado ao atendimento dos nossos alunos.\n\n"
+                           "Vamos transferir esta conversa para nosso time comercial e em breve, "
+                           "você receberá uma mensagem de um(a) de nossos consultores(as) que vai "
+                           "te orientar e tirar todas as suas dúvidas. 😉\nAté mais!")
+
 DB_CONFIG = {
     'host': os.environ.get('DB_HOST', 'localhost'),
     'port': int(os.environ.get('DB_PORT', 5432)),
@@ -44,6 +61,45 @@ PHONE_TO_MONITOR = PHONE_TO_MONITOR_DEFAULT
 CONFIDENCE_THRESHOLD = 0.5
 POLL_INTERVAL = 3
 TOP_K_RESULTS = 5
+
+# ===================== DISTRIBUICAO CONFIG =====================
+
+SUPABASE_URL = 'https://gtmeiltmhytufwdjhzxh.supabase.co'
+SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd0bWVpbHRtaHl0dWZ3ZGpoenhoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NTYzMzQ1MywiZXhwIjoyMDcxMjA5NDUzfQ.Sy5JRcYqmKh-Rd9PDScGftQ_rOqQHLOIPLyvDoHDJeM'
+SUPABASE_HEADERS = {
+    'apikey': SUPABASE_KEY,
+    'Authorization': f'Bearer {SUPABASE_KEY}',
+    'Content-Type': 'application/json',
+}
+DISTRIBUICAO_TABLE = 'distribuicao_academico_duplicate'
+
+ATTENDANT_MAP = {
+    'julia':   '69161295adb204a6c1033c27',
+    'marilia': '6903721f1be7fd548fbd5cd3',
+    'gustavo': '69026c3a4c877a72ba961aa6',
+    'mariana': '69025e95b4c8740e16bb5fbf',
+    'debora':  '69025ddf04698c58701e2792',
+    'joyce':   '69024f58706ac6e207bf961e',
+    'emanuel': '690248cb1f4a6684ed64de58',
+    'jessica': '690247b616be0c8343ba8b3a',
+    'camila':  '69024741a25c3347e8bdcb4d',
+    'danubia': '6902473c20efbbc9adb9d08f',
+    'wesley':  '69024605706ac6e207a35209',
+    'felipe':  '696fcd21767a0bfa800d1034',
+    'beatriz': '6989ef9a6ae58a6435bd2438',
+}
+
+ALMOCO_ANTE_MIN = 20
+ALMOCO_DURACAO_MIN = 60
+SAIDA_ANTE_MIN = 20
+
+OUT_OF_HOURS_MSG = (
+    "Nosso time de atendimento está disponível nos seguintes horários:\n\n"
+    "📅 *Segunda a Sexta*: 09h às 20h\n"
+    "📅 *Sábado*: 09h às 13h\n\n"
+    "Fora desse horário, eu (assistente virtual) continuo por aqui para te ajudar! 😊\n"
+    "Caso precise falar com um atendente, por favor retorne dentro do horário de atendimento."
+)
 
 # ===================== FLOW CONSTANTS =====================
 
@@ -69,11 +125,33 @@ FRUSTRATION_WORDS = [
     'já tentei', 'ja tentei', 'várias vezes', 'varias vezes', 'nunca',
 ]
 
-FOLLOWUP_HIGH_BUTTONS = ['Resolveu!', 'Outra dúvida', 'Falar com atendente']
-FOLLOWUP_MED_BUTTONS = ['Ajudou!', 'Falar com atendente']
+FOLLOWUP_HIGH_BUTTONS = ['Resolveu!', 'Tenho outra dúvida', 'Falar com atendente']
+FOLLOWUP_MED_BUTTONS = ['Resolveu!', 'Tenho outra dúvida', 'Falar com atendente']
 RESOLVED_BUTTONS = ['Tenho outra dúvida', 'Não, obrigado!']
 CLOSING_RESPONSE_TPL = "Obrigado pelo contato{name_suffix}! Qualquer dúvida é só nos chamar novamente. Até mais! 😊"
 ESCALATION_MSG = "Entendi sua situação. Vou te transferir para um atendente que pode te ajudar diretamente. Um momento, por favor."
+
+RETENTION_TAG_ID = '6fcefbd5-3c33-4e5c-b139-7f89718f6f0c'
+RETENTION_WESLEY_CRM_ID = 'dd6cbed7-7666-45d1-bd90-368c8b97e217'
+RETENTION_PHRASES = [
+    'quero cancelar', 'quero trancar', 'vou cancelar', 'vou trancar',
+    'cancelar meu curso', 'cancelar minha matrícula', 'cancelar minha matricula',
+    'trancar meu curso', 'trancar minha matrícula', 'trancar minha matricula',
+    'cancelar o curso', 'trancar o curso', 'cancelar a matrícula', 'cancelar a matricula',
+    'trancar a matrícula', 'trancar a matricula',
+    'quero desistir', 'vou desistir', 'desistir do curso',
+    'preciso cancelar', 'preciso trancar', 'desejo cancelar', 'desejo trancar',
+    'gostaria de cancelar', 'gostaria de trancar',
+    'quero realizar o cancelamento', 'quero fazer o cancelamento',
+    'quero realizar o trancamento', 'quero fazer o trancamento',
+    'cancelar matrícula', 'cancelar matricula', 'trancar matrícula', 'trancar matricula',
+]
+RETENTION_QUESTION_WORDS = [
+    'prazo', 'data', 'quando', 'como funciona', 'como solicitar', 'quanto custa',
+    'valor', 'taxa', 'multa', 'processo', 'procedimento', 'posso solicitar',
+    'até que', 'ate que', 'qual o prazo', 'como faço para solicitar',
+]
+RETENTION_MSG = "Entendi sua situação. Vou te encaminhar para nosso consultor especializado que poderá te ajudar. Um momento, por favor!"
 
 MAIN_MENU_BUTTONS = ['Acesso Portal/App', 'Financeiro', 'Aulas e Conteúdo', 'Documentos', 'Rematrícula', 'Falar com atendente']
 
@@ -462,6 +540,7 @@ def load_menus_from_db():
         SUBMENU_TO_QUESTION = new_to_q
         SUBMENU_DIRECT_RESPONSE = new_direct
         print(f"[{time.strftime('%H:%M:%S')}]   Menus DB: {len(l1_items)} cat, {len(new_l3)} L3, {len(new_to_q)} RAG, {len(new_direct)} diretos", flush=True)
+        print(f"[{time.strftime('%H:%M:%S')}]   RAG keys: {list(new_to_q.keys())[:10]}...", flush=True)
     except Exception as e:
         print(f"[{time.strftime('%H:%M:%S')}]   Menus DB erro (usando defaults): {e}", flush=True)
 
@@ -521,6 +600,9 @@ RESPONSE_COOLDOWN = 1.0
 followup_stage = 0
 waiting_for_client = False
 inactivity_start = 0      # timestamp de quando o bot respondeu e começou a esperar o cliente
+_last_auto_skipped = False  # True se a última interação foi silenciada por automação DataCrazy
+_awaiting_cpf = False       # True quando aguardamos o aluno digitar o CPF
+_student_in_base = None     # None=nao verificado, True=confirmado, False=nao encontrado
 
 # ===================== HELPERS =====================
 
@@ -534,12 +616,21 @@ def get_db():
 
 
 def is_greeting(text):
-    normalized = text.lower().strip().rstrip('!?.').strip()
+    normalized = text.lower().strip().rstrip('!?.,').strip()
+    normalized = normalized.replace(',', ' ').replace('  ', ' ').strip()
     if normalized in GREETINGS:
         return True
     words = normalized.split()
-    if len(words) <= 3 and any(w in GREETINGS for w in words):
+    if len(words) <= 4 and any(w.rstrip('!?.,') in GREETINGS for w in words):
         return True
+    if len(words) <= 4:
+        joined = ' '.join(w.rstrip('!?.,') for w in words)
+        if joined in GREETINGS:
+            return True
+        for i in range(len(words)):
+            sub = ' '.join(w.rstrip('!?.,') for w in words[i:])
+            if sub in GREETINGS:
+                return True
     return False
 
 
@@ -556,7 +647,10 @@ def detect_sentiment(text):
 def first_name(full_name):
     if not full_name:
         return None
-    return full_name.strip().split()[0].capitalize()
+    name = full_name.strip().split()[0].capitalize()
+    if not any(c.isalpha() for c in name):
+        return None
+    return name
 
 
 # ===================== FASE 1: IDENTIFICAÇÃO =====================
@@ -572,23 +666,28 @@ def identify_student(phone):
             return None
 
         data = r.json()
-        leads = data.get('data', [])
+        if isinstance(data, list):
+            leads = data
+        elif isinstance(data, dict):
+            leads = data.get('data', [])
+        else:
+            leads = []
         if not leads:
             p(f"    Aluno nao encontrado no CRM")
             return None
 
         lead = leads[0]
         profile = {
-            'lead_id': lead.get('id', ''),
-            'name': lead.get('name', ''),
-            'first_name': first_name(lead.get('name', '')),
-            'phone': lead.get('rawPhone', phone),
-            'cpf': lead.get('taxId', ''),
-            'email': lead.get('email', ''),
-            'tags': [t.get('name', '') for t in lead.get('tags', [])],
-            'notes': lead.get('notes', ''),
-            'metrics': lead.get('metrics', {}),
-            'created_at': lead.get('createdAt', ''),
+            'lead_id': lead.get('id') or '',
+            'name': lead.get('name') or '',
+            'first_name': first_name(lead.get('name') or ''),
+            'phone': lead.get('rawPhone') or phone,
+            'cpf': lead.get('taxId') or '',
+            'email': lead.get('email') or '',
+            'tags': [t.get('name', '') for t in (lead.get('tags') or [])],
+            'notes': lead.get('notes') or '',
+            'metrics': lead.get('metrics') or {},
+            'created_at': lead.get('createdAt') or '',
         }
         p(f"    ALUNO: {profile['name']} | CPF: {profile['cpf'][:6]}*** | Tags: {profile['tags']}")
         return profile
@@ -596,6 +695,115 @@ def identify_student(phone):
     except Exception as e:
         p(f"    Erro CRM lookup: {e}")
         return None
+
+
+def check_lead_has_pipeline(phone, pipeline_id=None):
+    """Verifica se o lead tem negócio no pipeline de alunos ativos."""
+    if pipeline_id is None:
+        pipeline_id = PIPELINE_ALUNOS_ID
+    try:
+        search_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
+        r = requests.get(f'{DCZ_CRM}/businesses', headers=H,
+                        params={'search': search_phone, 'limit': 10}, timeout=10)
+        if r.status_code != 200:
+            p(f"    Pipeline check failed: {r.status_code}")
+            return False
+        data = r.json()
+        biz_list = data.get('data', data) if isinstance(data, dict) else data
+        if not isinstance(biz_list, list):
+            return False
+        for biz in biz_list:
+            biz_pipeline = biz.get('pipelineId') or biz.get('pipeline', {}).get('id', '')
+            if biz_pipeline == pipeline_id:
+                p(f"    Lead encontrado no pipeline de alunos ativos")
+                return True
+        p(f"    Lead NÃO encontrado no pipeline de alunos ({len(biz_list)} negócios verificados)")
+        return False
+    except Exception as e:
+        p(f"    Erro pipeline check: {e}")
+        return False
+
+
+def validate_student_cpf_webhook(cpf, phone, lead_id='', business_id='', name=''):
+    """Chama webhook n8n para validar CPF na base acadêmica."""
+    try:
+        clean_cpf = cpf.replace('.', '').replace('-', '').replace(' ', '').strip()
+        clean_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
+        payload = {
+            'cpf': clean_cpf,
+            'telefone': clean_phone,
+            'id_lead': lead_id,
+            'id_negocio': business_id,
+            'Nome': name,
+        }
+        p(f"    Webhook CPF: enviando CPF={clean_cpf[:6]}*** phone={clean_phone[-4:]}")
+        r = requests.post(N8N_WEBHOOK_LEADS_CPF, params=payload, headers=H, timeout=30)
+        p(f"    Webhook CPF: status={r.status_code}")
+        return r.status_code in (200, 201)
+    except Exception as e:
+        p(f"    Erro webhook CPF: {e}")
+        return False
+
+
+def check_lead_exists_field(lead_id):
+    """Verifica o campo adicional 'Lead Existe?' no lead do DataCrazy."""
+    try:
+        r = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
+        if r.status_code != 200:
+            p(f"    Lead field check failed: {r.status_code}")
+            return None
+        lead_data = r.json()
+        additional = lead_data.get('additionalFields') or lead_data.get('additional_fields') or {}
+        if isinstance(additional, list):
+            for field in additional:
+                if field.get('name', '').lower().strip() in ('lead existe?', 'lead existe'):
+                    val = str(field.get('value', '')).lower().strip()
+                    p(f"    Lead Existe? = '{val}'")
+                    return val == 'sim'
+        elif isinstance(additional, dict):
+            for key, val in additional.items():
+                if key.lower().strip() in ('lead existe?', 'lead existe'):
+                    val_str = str(val).lower().strip()
+                    p(f"    Lead Existe? = '{val_str}'")
+                    return val_str == 'sim'
+        custom = lead_data.get('customFields') or {}
+        if isinstance(custom, dict):
+            for key, val in custom.items():
+                if 'lead' in key.lower() and 'existe' in key.lower():
+                    val_str = str(val).lower().strip()
+                    p(f"    Lead Existe? (custom) = '{val_str}'")
+                    return val_str == 'sim'
+        p(f"    Campo 'Lead Existe?' não encontrado no lead")
+        return None
+    except Exception as e:
+        p(f"    Erro check lead exists: {e}")
+        return None
+
+
+def create_lead_and_business(phone, name=''):
+    """Cria lead e negócio no DataCrazy (para alunos não encontrados que dizem ser alunos)."""
+    try:
+        clean_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
+        r = requests.post(f'{DCZ_CRM}/leads', headers=H,
+                         json={'phone': clean_phone, 'name': name or clean_phone}, timeout=10)
+        if r.status_code not in (200, 201):
+            p(f"    Criar lead falhou: {r.status_code}")
+            return None, None
+        lead_data = r.json()
+        new_lead_id = lead_data.get('id', '')
+        p(f"    Lead criado: {new_lead_id}")
+
+        r_biz = requests.post(f'{DCZ_CRM}/businesses', headers=H,
+                             json={'leadId': new_lead_id, 'stageId': STAGE_ATENDIMENTO_ID}, timeout=10)
+        biz_id = ''
+        if r_biz.status_code in (200, 201):
+            biz_data = r_biz.json()
+            biz_id = biz_data.get('id', '')
+            p(f"    Business criado: {biz_id}")
+        return new_lead_id, biz_id
+    except Exception as e:
+        p(f"    Erro criar lead/business: {e}")
+        return None, None
 
 
 # ===================== FASE 2: MEMÓRIA =====================
@@ -847,7 +1055,8 @@ def build_student_context(profile):
         parts.append(f"- Tags: {', '.join(profile['tags'])}")
     if profile.get('email'):
         parts.append(f"- Email: {profile['email']}")
-    parts.append(f"\nChame o aluno de *{profile.get('first_name', 'aluno')}*.")
+    fname = profile.get('first_name') or 'aluno'
+    parts.append(f"\nChame o aluno de *{fname}*.")
     return '\n'.join(parts)
 
 
@@ -1009,7 +1218,7 @@ def build_greeting_alerts():
     return "\n\n" + "\n".join(lines)
 
 
-def call_llm(question, references, history, profile, memory, sentiment, is_first):
+def call_llm(question, references, history, profile, memory, sentiment, is_first, image_b64=None, image_mime=None, image_desc=None):
     client = OpenAI(api_key=OPENAI_API_KEY)
 
     student_ctx = build_student_context(profile)
@@ -1031,18 +1240,42 @@ def call_llm(question, references, history, profile, memory, sentiment, is_first
     else:
         prompt += "\n(Já em conversa - NÃO cumprimente, vá direto ao ponto.)\n"
 
+    if image_b64:
+        img_prompt = (
+            "\n## IMAGEM RECEBIDA:\n"
+            "O aluno enviou uma imagem (print de tela). Analise-a cuidadosamente e use o conteúdo visual "
+            "para complementar sua resposta. Se for um print de tela, identifique o que aparece "
+            "e oriente o aluno com base nas referências da base de conhecimento.\n"
+        )
+        if image_desc:
+            img_prompt += f"\n**Análise prévia da imagem:** {image_desc}\n"
+            img_prompt += (
+                "Use esta análise para orientar sua resposta. Se a análise menciona email pessoal "
+                "(gmail, hotmail, live.com) sendo usado em vez do acadêmico, oriente sobre usar o email acadêmico.\n"
+            )
+        prompt += img_prompt
+        user_content = [
+            {"type": "text", "text": question},
+            {"type": "image_url", "image_url": {
+                "url": f"data:{image_mime or 'image/jpeg'};base64,{image_b64}",
+                "detail": "low"
+            }}
+        ]
+    else:
+        user_content = question
+
     t0 = time.time()
     chat = client.chat.completions.create(
         model='gpt-4o-mini',
         messages=[
             {'role': 'system', 'content': prompt},
-            {'role': 'user', 'content': question}
+            {'role': 'user', 'content': user_content}
         ],
         max_tokens=800, temperature=0.3
     )
     resp_text = chat.choices[0].message.content
     t_llm = time.time() - t0
-    p(f"    LLM: {t_llm*1000:.0f}ms")
+    p(f"    LLM{'(vision)' if image_b64 else ''}: {t_llm*1000:.0f}ms")
 
     cm = re.search(r'\[CONFIANCA:(\d+\.?\d*)\]', resp_text)
     confidence = float(cm.group(1)) if cm else 0.3
@@ -1190,6 +1423,119 @@ def send_media_message(conv_id, media_item, caption=''):
 
     p(f"    FALHA ao enviar midia: {filename}")
     return 500
+
+
+# ===================== VISION: DOWNLOAD IMAGE =====================
+
+def download_whatsapp_image(image_info):
+    """Baixa imagem e retorna base64 + mime_type.
+    image_info pode ser:
+      - dict com keys url, media_id, mime_type (vindo de extract_image_from_message)
+      - str (media_id legado para Meta Graph API)
+    Tenta: 1) URL S3 do DataCrazy  2) Meta Graph API com media_id/fileName
+    """
+    if isinstance(image_info, str):
+        image_info = {'url': '', 'media_id': image_info, 'mime_type': 'image/jpeg'}
+
+    s3_url = image_info.get('url', '')
+    media_id = image_info.get('media_id', '')
+    mime_type = image_info.get('mime_type', 'image/jpeg')
+
+    # 1) Tentar download direto da URL S3 do DataCrazy
+    if s3_url and s3_url.startswith('http'):
+        try:
+            p(f"    Vision: baixando via URL direta...")
+            r = requests.get(s3_url, timeout=30)
+            if r.status_code == 200 and len(r.content) > 100:
+                img_b64 = base64.b64encode(r.content).decode('utf-8')
+                size_kb = len(r.content) / 1024
+                detected_mime = r.headers.get('Content-Type', mime_type)
+                if 'image' in detected_mime:
+                    mime_type = detected_mime
+                p(f"    Vision: imagem baixada via S3 ({size_kb:.0f}KB, {mime_type})")
+                return img_b64, mime_type
+            else:
+                p(f"    Vision: S3 falhou ({r.status_code}, {len(r.content)}B), tentando Meta...")
+        except Exception as e:
+            p(f"    Vision: S3 erro: {e}, tentando Meta...")
+
+    # 2) Fallback: Meta Graph API com media_id
+    if media_id:
+        try:
+            p(f"    Vision: baixando via Meta Graph (media_id={media_id[:20]})...")
+            r = requests.get(
+                f'https://graph.facebook.com/v25.0/{media_id}',
+                headers={'Authorization': f'Bearer {META_TOKEN}'},
+                timeout=15
+            )
+            if r.status_code != 200:
+                p(f"    Vision: Meta Graph falha ({r.status_code})")
+                return None, None
+            media_info = r.json()
+            media_url = media_info.get('url')
+            mime_type = media_info.get('mime_type', mime_type)
+            if not media_url:
+                p(f"    Vision: URL vazia da Meta")
+                return None, None
+            r2 = requests.get(
+                media_url,
+                headers={'Authorization': f'Bearer {META_TOKEN}'},
+                timeout=30
+            )
+            if r2.status_code != 200:
+                p(f"    Vision: Meta download falha ({r2.status_code})")
+                return None, None
+            img_b64 = base64.b64encode(r2.content).decode('utf-8')
+            size_kb = len(r2.content) / 1024
+            p(f"    Vision: imagem baixada via Meta ({size_kb:.0f}KB, {mime_type})")
+            return img_b64, mime_type
+        except Exception as e:
+            p(f"    Vision: Meta erro: {e}")
+
+    p(f"    Vision: nenhuma fonte disponível para baixar imagem")
+    return None, None
+
+
+def extract_image_from_message(msg):
+    """Extrai dados de imagem de uma mensagem do CRM.
+    Retorna dict com keys: url, media_id, caption (ou None se sem imagem).
+    Prioriza URL S3 do DataCrazy, depois fileName (WhatsApp media_id), depois Meta Graph.
+    """
+    attachments = msg.get('attachments', [])
+    if isinstance(attachments, list):
+        for att in attachments:
+            if isinstance(att, dict):
+                att_type = (att.get('type', '') or att.get('mimeType', '')).lower()
+                if 'image' in att_type:
+                    result = {
+                        'url': att.get('url', ''),
+                        'media_id': att.get('fileName', '') or att.get('mediaId', '') or att.get('media_id', ''),
+                        'caption': att.get('caption', ''),
+                        'mime_type': att.get('mimeType', 'image/jpeg'),
+                    }
+                    if result['url'] or result['media_id']:
+                        return result
+
+    source = msg.get('sourceData', msg.get('meta', msg.get('payload', {})))
+    if isinstance(source, dict):
+        img_data = source.get('image', {})
+        if isinstance(img_data, dict) and (img_data.get('id') or img_data.get('url')):
+            return {
+                'url': img_data.get('url', ''),
+                'media_id': img_data.get('id', ''),
+                'caption': img_data.get('caption', ''),
+                'mime_type': img_data.get('mime_type', 'image/jpeg'),
+            }
+        msg_type = source.get('type', '')
+        if msg_type == 'image' and (source.get('id') or source.get('url')):
+            return {
+                'url': source.get('url', ''),
+                'media_id': source.get('id', ''),
+                'caption': source.get('caption', ''),
+                'mime_type': source.get('mime_type', 'image/jpeg'),
+            }
+
+    return None
 
 
 def fetch_wamid(phone):
@@ -1409,6 +1755,364 @@ def transfer_to_human(conv_id, reason=''):
         return 500
 
 
+# ===================== DISTRIBUICAO AUTOMATICA =====================
+
+def _now_sp():
+    """Retorna datetime atual no fuso de São Paulo."""
+    from datetime import datetime, timezone, timedelta
+    utc_now = datetime.now(timezone.utc)
+    sp_offset = timedelta(hours=-3)
+    return utc_now + sp_offset
+
+
+def is_within_business_hours():
+    """Verifica se estamos dentro do horário de atendimento humano.
+    Seg-Sex: 09:00–20:00 | Sáb: 09:00–13:00 | Dom: sem atendimento.
+    """
+    now = _now_sp()
+    dow = now.weekday()  # 0=seg, 6=dom
+    hour = now.hour
+
+    if dow <= 4:
+        return 9 <= hour < 20
+    elif dow == 5:
+        return 9 <= hour < 13
+    return False
+
+
+def _em_intervalo(hora_str, ante_min, duracao_min, ref_now):
+    """Checa se ref_now está no intervalo [hora - ante_min, hora + duracao_min]."""
+    if not hora_str:
+        return False
+    try:
+        parts = str(hora_str).split(':')
+        h = int(parts[0])
+        m = int(parts[1]) if len(parts) > 1 else 0
+        s = int(parts[2]) if len(parts) > 2 else 0
+    except (ValueError, IndexError):
+        return False
+
+    from datetime import datetime, timedelta
+    base = ref_now.replace(hour=h, minute=m, second=s, microsecond=0)
+    ini = base - timedelta(minutes=ante_min)
+    fim = base + timedelta(minutes=duracao_min)
+    return ini <= ref_now <= fim
+
+
+def get_available_consultant():
+    """Consulta Supabase e retorna o consultor mais adequado ou None.
+    Aplica as mesmas regras do workflow n8n de distribuição.
+    """
+    try:
+        url = (f'{SUPABASE_URL}/rest/v1/{DISTRIBUICAO_TABLE}'
+               f'?ativo_inativo=eq.Ativo&tipo_atendimento=eq.Atendimento'
+               f'&select=*')
+        r = requests.get(url, headers=SUPABASE_HEADERS, timeout=10)
+        if r.status_code != 200:
+            p(f"  [DIST] Supabase query falhou: {r.status_code} {r.text[:200]}")
+            return None
+        rows = r.json()
+        if not rows:
+            p(f"  [DIST] Nenhum consultor ativo encontrado no Supabase")
+            return None
+    except Exception as e:
+        p(f"  [DIST] Erro ao consultar Supabase: {e}")
+        return None
+
+    now = _now_sp()
+    dow = now.weekday()
+    fim_de_semana = dow >= 5
+
+    disponiveis = []
+    for row in rows:
+        nome = row.get('responsavel', 'Sem Nome')
+        fila = int(row.get('fila') or 0)
+        limite = int(row.get('volume_distribuicao') or 10)
+        status_almoco = row.get('status_almoco', 'Ativo')
+        status_expediente = row.get('status_final_expediente', 'Ativo')
+        almoco_hora = row.get('almoco_real') or row.get('almoco')
+        saida_hora = row.get('final_expediente')
+
+        if status_almoco != 'Ativo':
+            p(f"  [DIST] {nome}: SKIP (status_almoco={status_almoco})")
+            continue
+        if status_expediente != 'Ativo':
+            p(f"  [DIST] {nome}: SKIP (status_expediente={status_expediente})")
+            continue
+        if fila >= limite:
+            p(f"  [DIST] {nome}: SKIP (fila={fila} >= limite={limite})")
+            continue
+        if not fim_de_semana and _em_intervalo(almoco_hora, ALMOCO_ANTE_MIN, ALMOCO_DURACAO_MIN, now):
+            p(f"  [DIST] {nome}: SKIP (pausa almoço)")
+            continue
+        if _em_intervalo(saida_hora, SAIDA_ANTE_MIN, 0, now):
+            p(f"  [DIST] {nome}: SKIP (perto da saída)")
+            continue
+
+        ts_raw = row.get('timestamp') or row.get('ultima_execucao')
+        ts_val = 0
+        if ts_raw:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(str(ts_raw).replace(' - ', ' ').replace('Z', '+00:00'))
+                ts_val = dt.timestamp()
+            except Exception:
+                ts_val = 0
+
+        disponiveis.append({
+            'id': row.get('id', ''),
+            'nome': nome,
+            'fila': fila,
+            'limite': limite,
+            '_ts': ts_val,
+        })
+
+    if not disponiveis:
+        p(f"  [DIST] Nenhum consultor disponível após filtros")
+        return None
+
+    import time as _time
+    agora = _time.time()
+    disponiveis.sort(key=lambda x: (
+        -(agora - x['_ts']) if x['_ts'] > 0 else 1,
+        x['fila'],
+        x['nome'],
+    ))
+
+    escolhido = disponiveis[0]
+    p(f"  [DIST] Escolhido: {escolhido['nome']} (fila={escolhido['fila']}, id={escolhido['id'][:16]})")
+    return escolhido
+
+
+def _dcz_transfer_lead(lead_id, attendant_name):
+    """Atribui o lead ao responsável no DataCrazy CRM."""
+    nome_norm = attendant_name.strip().lower()
+    nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm) if __import__('unicodedata').category(c) != 'Mn')
+    att_id = ATTENDANT_MAP.get(nome_norm)
+    if not att_id:
+        p(f"  [DIST] attendantId não encontrado para '{attendant_name}' (norm='{nome_norm}')")
+        return False
+    if not lead_id:
+        p(f"  [DIST] lead_id vazio, skip lead transfer")
+        return False
+    try:
+        r = requests.patch(
+            f'{DCZ_CRM}/leads/{lead_id}', headers=H,
+            json={'responsibleId': att_id}, timeout=10
+        )
+        p(f"  [DIST] Lead {lead_id[:16]} -> responsibleId={att_id[:12]} (status={r.status_code})")
+        return r.status_code in (200, 201)
+    except Exception as e:
+        p(f"  [DIST] Erro lead transfer: {e}")
+        return False
+
+
+def _dcz_transfer_business(phone, attendant_name):
+    """Encontra o negócio do aluno e atribui ao attendant."""
+    nome_norm = attendant_name.strip().lower()
+    nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm) if __import__('unicodedata').category(c) != 'Mn')
+    att_id = ATTENDANT_MAP.get(nome_norm)
+    if not att_id:
+        return False
+    try:
+        search_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
+        r = requests.get(f'{DCZ_CRM}/businesses', headers=H,
+                         params={'search': search_phone, 'limit': 5}, timeout=10)
+        if r.status_code != 200:
+            p(f"  [DIST] Business search falhou: {r.status_code}")
+            return False
+        data = r.json()
+        biz_list = data.get('data', data) if isinstance(data, dict) else data
+        if not isinstance(biz_list, list) or not biz_list:
+            p(f"  [DIST] Nenhum negócio encontrado para {search_phone}")
+            return False
+        biz = biz_list[0]
+        biz_id = biz.get('id', '')
+        if not biz_id:
+            return False
+        r2 = requests.patch(
+            f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+            json={'attendantId': att_id}, timeout=10
+        )
+        p(f"  [DIST] Business {biz_id[:16]} -> attendantId={att_id[:12]} (status={r2.status_code})")
+        return r2.status_code in (200, 201)
+    except Exception as e:
+        p(f"  [DIST] Erro business transfer: {e}")
+        return False
+
+
+def _dcz_transfer_chat(conv_id, attendant_name):
+    """Transfere a conversa para o attendant via change-attendant."""
+    nome_norm = attendant_name.strip().lower()
+    nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm) if __import__('unicodedata').category(c) != 'Mn')
+    att_id = ATTENDANT_MAP.get(nome_norm)
+    if not att_id:
+        return False
+    try:
+        r = requests.post(
+            f'{DCZ_MSG}/messaging/conversations/{conv_id}/change-attendant',
+            headers=H, json={'attendantId': att_id}, timeout=10
+        )
+        p(f"  [DIST] Chat {conv_id[:16]} -> attendant={att_id[:12]} (status={r.status_code})")
+        return r.status_code in (200, 201)
+    except Exception as e:
+        p(f"  [DIST] Erro chat transfer: {e}")
+        return False
+
+
+def _supabase_increment_fila(consultant_id, current_fila):
+    """Incrementa fila +1 e atualiza timestamp no Supabase."""
+    try:
+        from datetime import datetime, timezone, timedelta
+        now_str = datetime.now(timezone(timedelta(hours=-3))).strftime('%d/%m/%Y - %H:%M')
+        iso_str = datetime.now(timezone(timedelta(hours=-3))).isoformat()
+
+        url = f'{SUPABASE_URL}/rest/v1/{DISTRIBUICAO_TABLE}?id=eq.{consultant_id}'
+        payload = {
+            'fila': current_fila + 1,
+            'ultima_execucao': now_str,
+            'timestamp': iso_str,
+        }
+        r = requests.patch(url, headers=SUPABASE_HEADERS, json=payload, timeout=10)
+        p(f"  [DIST] Supabase fila: {current_fila} -> {current_fila + 1} (status={r.status_code})")
+        return r.status_code in (200, 204)
+    except Exception as e:
+        p(f"  [DIST] Erro Supabase update: {e}")
+        return False
+
+
+def distribute_to_attendant(conv_id, reason=''):
+    """Distribui o aluno para um atendente humano real.
+    1) Verifica horário  2) Escolhe consultor  3) Transfere lead/negócio/chat
+    4) Atualiza fila no Supabase  5) Envia mensagem ao aluno.
+    Retorna True se distribuiu, False se não conseguiu.
+    """
+    if not is_within_business_hours():
+        p(f"  [DIST] Fora do horário de atendimento")
+        meta_typing_on()
+        send_and_track(conv_id, OUT_OF_HOURS_MSG)
+        return False
+
+    consultant = get_available_consultant()
+    if not consultant:
+        p(f"  [DIST] Nenhum consultor disponível -> fallback nota interna")
+        msg = ("No momento, todos os nossos atendentes estão ocupados. "
+               "Mas não se preocupe — em breve um deles irá te atender! 😊")
+        meta_typing_on()
+        send_and_track(conv_id, msg)
+        transfer_to_human(conv_id, reason)
+        return False
+
+    nome = consultant['nome']
+    p(f"  [DIST] Distribuindo para {nome}...")
+
+    lead_id = student_profile.get('lead_id', '') if student_profile else ''
+    phone = PHONE_TO_MONITOR
+
+    _dcz_transfer_lead(lead_id, nome)
+    _dcz_transfer_business(phone, nome)
+    _dcz_transfer_chat(conv_id, nome)
+    _supabase_increment_fila(consultant['id'], consultant['fila'])
+
+    note = (f"🔔 *Distribuição automática pelo agente IA*\n"
+            f"Atendente: *{nome}*\n"
+            f"Motivo: {reason}" if reason else
+            f"🔔 *Distribuição automática pelo agente IA*\n"
+            f"Atendente: *{nome}*")
+    try:
+        requests.post(
+            f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+            headers=H, json={'body': note, 'isInternal': True}, timeout=10
+        )
+    except Exception:
+        pass
+
+    client_msg = (
+        f"Vou te transferir para *{nome}*, que vai dar continuidade ao seu atendimento. "
+        f"Um momento, por favor! 😊"
+    )
+    meta_typing_on()
+    send_and_track(conv_id, client_msg)
+
+    p(f"  [DIST] ✅ Distribuição concluída para {nome}")
+    return True
+
+
+def trigger_retention(conv_id, lead_id, question):
+    """Aciona Retenção: tag + responsável Wesley no lead + nota interna."""
+    try:
+        if lead_id:
+            r_lead = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
+            existing_tags = []
+            if r_lead.status_code == 200:
+                lead_data = r_lead.json()
+                for t in (lead_data.get('tags') or []):
+                    tid = t.get('id', '')
+                    if tid:
+                        existing_tags.append({'id': tid})
+
+            tag_already = any(t.get('id') == RETENTION_TAG_ID for t in existing_tags)
+            if not tag_already:
+                existing_tags.append({'id': RETENTION_TAG_ID})
+
+            r = requests.patch(
+                f'{DCZ_CRM}/leads/{lead_id}', headers=H,
+                json={'tags': existing_tags, 'responsibleId': RETENTION_WESLEY_CRM_ID},
+                timeout=10
+            )
+            p(f"  [RETENÇÃO] Lead: tag + responsável Wesley (status={r.status_code})")
+
+            try:
+                r_biz = requests.get(
+                    f'{DCZ_CRM}/businesses', headers=H,
+                    params={'search': PHONE_TO_MONITOR, 'limit': 5}, timeout=10
+                )
+                if r_biz.status_code == 200:
+                    biz_data = r_biz.json()
+                    biz_list = biz_data.get('data', biz_data) if isinstance(biz_data, dict) else biz_data
+                    for biz in (biz_list if isinstance(biz_list, list) else []):
+                        biz_lead = biz.get('lead', {})
+                        biz_lead_id = biz_lead.get('id', '') if isinstance(biz_lead, dict) else str(biz_lead)
+                        if biz_lead_id == lead_id:
+                            biz_id = biz.get('id')
+                            rb = requests.patch(
+                                f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+                                json={'responsibleId': RETENTION_WESLEY_CRM_ID}, timeout=10
+                            )
+                            p(f"  [RETENÇÃO] Negócio responsável -> Wesley (status={rb.status_code})")
+                            break
+            except Exception as e2:
+                p(f"  [RETENÇÃO] Erro ao atualizar negócio: {e2}")
+        else:
+            p(f"  [RETENÇÃO] Sem lead_id, pulando transferência")
+
+        note = (
+            f"🔴 *Retenção - Agente IA*\n"
+            f"O aluno manifestou intenção de cancelamento/trancamento.\n"
+            f"Mensagem: \"{question[:120]}\"\n"
+            f"Transferido automaticamente para Wesley Guerreiro (Retenção)."
+        )
+        requests.post(
+            f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+            headers=H, json={'body': note, 'isInternal': True}, timeout=10
+        )
+        p(f"  [RETENÇÃO] Nota interna enviada na conversa")
+
+    except Exception as e:
+        p(f"  [RETENÇÃO] Erro: {e}")
+
+
+def is_retention_intent(text):
+    """Detecta intenção REAL de cancelar/trancar. Ignora perguntas sobre o processo."""
+    t = text.lower().strip()
+    if any(q in t for q in RETENTION_QUESTION_WORDS):
+        return False
+    for phrase in RETENTION_PHRASES:
+        if phrase in t:
+            return True
+    return False
+
+
 def get_conversation_messages_api(conv_id, limit=15):
     try:
         r = requests.get(f'{DCZ_MSG}/messaging/conversations/{conv_id}/messages',
@@ -1437,6 +2141,10 @@ BOT_RESPONSE_FINGERPRINTS = [
     'não encontrei uma resposta exata',
     'Não entendi',
     'Posso te ajudar de outra forma',
+    'Clique em uma das opções disponíveis',
+    'Teria mais alguma dúvida',
+    'clique em uma das opções',
+    'teria mais alguma dúvida',
 ]
 
 
@@ -1449,8 +2157,63 @@ def is_bot_message(body):
 
 
 _cached_msgs = {}
+_last_processed_msg_id = None
+
+OUR_MSG_FINGERPRINTS = (
+    'como posso te ajudar', 'escolha uma opção', 'selecione o assunto',
+    'assistente virtual', 'algo mais específico', 'ficou alguma dúvida',
+    'que bom que pude ajudar', 'vou te transferir', 'vou te encaminhar',
+    'claro!', 'claro,',
+)
+
+def _automation_already_responded(conv_id, user_msg_id):
+    """Verifica se a automação do DataCrazy já enviou resposta após a mensagem do usuário."""
+    msgs = _cached_msgs.get(conv_id, [])
+    found_user_msg = False
+    for m in msgs:
+        mid = m.get('id', '')
+        if mid == user_msg_id:
+            found_user_msg = True
+            continue
+        if found_user_msg and not m.get('received', False):
+            body = (m.get('body') or m.get('text') or '').strip()
+            if not body:
+                continue
+            body_lower = body.lower()
+            is_our_msg = any(fp in body_lower for fp in OUR_MSG_FINGERPRINTS)
+            if is_our_msg:
+                continue
+            if len(body) > 15:
+                return True
+    return False
+
+def _recheck_automation(conv_id, msg_id):
+    """Re-busca mensagens e verifica novamente se automação respondeu."""
+    fresh = get_conversation_messages_api(conv_id, limit=10)
+    _cached_msgs[conv_id] = fresh
+    return _automation_already_responded(conv_id, msg_id)
+
+def _wait_automation_finish(conv_id, max_wait=30, stable_time=5):
+    """Espera a automação do DataCrazy terminar de enviar todas as mensagens.
+    Monitora a contagem de mensagens e aguarda ficar estável por stable_time segundos."""
+    prev_count = 0
+    stable_since = time.time()
+    start = time.time()
+    while time.time() - start < max_wait:
+        msgs = get_conversation_messages_api(conv_id, limit=15)
+        _cached_msgs[conv_id] = msgs
+        out_count = sum(1 for m in msgs if not m.get('received', False))
+        if out_count != prev_count:
+            prev_count = out_count
+            stable_since = time.time()
+        elif time.time() - stable_since >= stable_time:
+            break
+        time.sleep(2)
+    p(f"    Automação estável após {time.time() - start:.0f}s ({prev_count} msgs saída)")
+
 
 def get_new_client_message(conv_id):
+    """Retorna (msg_id, body, is_button_click, image_info)."""
     msgs = get_conversation_messages_api(conv_id, limit=10)
     _cached_msgs[conv_id] = msgs
     for m in msgs:
@@ -1461,6 +2224,10 @@ def get_new_client_message(conv_id):
         if not received:
             processed_msg_ids.add(mid)
             continue
+
+        image_info = extract_image_from_message(m)
+        img_caption = image_info.get('caption', '') if image_info else ''
+
         body = (m.get('body', '') or '').strip()
         is_button_click = False
         if not body:
@@ -1478,6 +2245,13 @@ def get_new_client_message(conv_id):
                             body = rep['title'].strip()
                             is_button_click = True
                             break
+
+        if not body and img_caption:
+            body = img_caption
+
+        if not body and image_info:
+            body = '[imagem enviada pelo aluno]'
+
         if not body:
             p(f"  SKIP vazio: mid={mid[:20]} keys={list(m.keys())[:8]}")
             processed_msg_ids.add(mid)
@@ -1490,15 +2264,15 @@ def get_new_client_message(conv_id):
             p(f"  SKIP echo: \"{body[:60]}\"")
             processed_msg_ids.add(mid)
             continue
-        if not _db_claim_message(mid, body):
-            processed_msg_ids.add(mid)
-            continue
         if _db_is_duplicate_body(body, window_seconds=45):
             p(f"  SKIP dup-body: \"{body[:60]}\"")
             processed_msg_ids.add(mid)
             continue
-        return mid, body, is_button_click
-    return None, None, False
+        if not _db_claim_message(mid, body):
+            processed_msg_ids.add(mid)
+            continue
+        return mid, body, is_button_click, image_info
+    return None, None, False, None
 
 
 def build_conversation_history(conv_id):
@@ -1702,16 +2476,140 @@ def handle_debug_command(conv_id, cmd):
     p(f"  [DEBUG] Comando desconhecido: {cmd}")
 
 
+def _handle_cpf_input(conv_id, question, name_suffix):
+    """Processa o CPF digitado pelo aluno no fluxo 'Já sou aluno'."""
+    global _awaiting_cpf, _student_in_base, student_profile, waiting_for_client, inactivity_start
+
+    cpf_raw = question.strip().replace('.', '').replace('-', '').replace(' ', '')
+    if not cpf_raw.isdigit() or len(cpf_raw) < 10:
+        msg = "Não consegui identificar um CPF válido. Por favor, *digite apenas os números* do seu CPF.\n\n*Exemplo*: 12345678910"
+        meta_typing_on()
+        send_and_track(conv_id, msg)
+        log_to_db(conv_id, question, msg, 0.0, 'cpf_invalid')
+        waiting_for_client = True; inactivity_start = time.time()
+        return
+
+    msg_wait = "Certo. Por favor *aguarde* enquanto localizo as informações em nossa base de dados. ⌛"
+    meta_typing_on()
+    send_and_track(conv_id, msg_wait)
+
+    lead_id = student_profile.get('lead_id', '') if student_profile else ''
+    lead_name = student_profile.get('name', '') if student_profile else ''
+
+    if not lead_id:
+        p(f"  Lead não existe, criando...")
+        new_lead_id, new_biz_id = create_lead_and_business(PHONE_TO_MONITOR, name=lead_name)
+        if new_lead_id:
+            lead_id = new_lead_id
+            if student_profile:
+                student_profile['lead_id'] = new_lead_id
+
+    biz_id = ''
+    try:
+        r_biz = requests.get(f'{DCZ_CRM}/businesses', headers=H,
+                            params={'search': PHONE_TO_MONITOR.replace('+','').replace(' ','').replace('-',''), 'limit': 5}, timeout=10)
+        if r_biz.status_code == 200:
+            biz_data = r_biz.json()
+            biz_list = biz_data.get('data', biz_data) if isinstance(biz_data, dict) else biz_data
+            if isinstance(biz_list, list) and biz_list:
+                biz_id = biz_list[0].get('id', '')
+    except Exception:
+        pass
+
+    validate_student_cpf_webhook(cpf_raw, PHONE_TO_MONITOR, lead_id, biz_id, lead_name)
+
+    p(f"  Aguardando resultado do webhook (polling campo Lead Existe?)...")
+    lead_exists = None
+    for attempt in range(6):
+        time.sleep(5)
+        lead_exists = check_lead_exists_field(lead_id)
+        if lead_exists is not None:
+            break
+        p(f"    Polling {attempt+1}/6... campo ainda não setado")
+
+    _awaiting_cpf = False
+
+    if lead_exists is True:
+        _student_in_base = True
+        p(f"  ALUNO VALIDADO pelo CPF -> saudação + menu")
+        student_profile = identify_student(PHONE_TO_MONITOR)
+        fname = student_profile.get('first_name', '') if student_profile else ''
+        if fname:
+            greeting = f"*Em breve um de nossos consultores irá te chamar!*\n\nMe conta, sobre o que você deseja falar?\nPergunte de maneira simples que eu entendo melhor assim. 😊"
+        else:
+            greeting = f"*Em breve um de nossos consultores irá te chamar!*\n\nMe conta, sobre o que você deseja falar?\nPergunte de maneira simples que eu entendo melhor assim. 😊"
+        meta_typing_on()
+        send_and_track(conv_id, greeting, buttons=GREETING_BUTTONS)
+        conversation_messages.append({'role': 'bot', 'text': greeting})
+        log_to_db(conv_id, question, greeting, 1.0, 'cpf_validated')
+        waiting_for_client = True; inactivity_start = time.time()
+    else:
+        _student_in_base = False
+        p(f"  Aluno NÃO encontrado na base acadêmica pelo CPF")
+        msg_nf = (f"Não encontramos você em nossa *base de alunos*.\n\n"
+                  f"Prestamos suporte para as unidades (polos) 👇")
+        meta_typing_on()
+        send_and_track(conv_id, msg_nf)
+        time.sleep(1)
+        send_and_track(conv_id, POLOS_LIST)
+        time.sleep(1)
+        send_and_track(conv_id, "Você é matriculado em algum dos polos *acima?*", buttons=['Sim', 'Não'])
+        conversation_messages.append({'role': 'bot', 'text': msg_nf})
+        log_to_db(conv_id, question, msg_nf, 0.0, 'cpf_not_found')
+        waiting_for_client = True; inactivity_start = time.time()
+
+
 # ===================== HANDLER =====================
 
-def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
+def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=None):
     global active_conv_id, student_profile, conversation_messages, last_response_time
-    global followup_stage, waiting_for_client, inactivity_start
+    global followup_stage, waiting_for_client, inactivity_start, _last_auto_skipped
+    global _awaiting_cpf, _student_in_base
     processed_msg_ids.add(msg_id)
     followup_stage = 0
     waiting_for_client = False
     inactivity_start = 0
+    _last_auto_skipped = False
     question = msg_body
+
+    image_b64 = None
+    image_mime = None
+    image_desc = None
+    if image_info:
+        p(f"  Vision: baixando imagem (url={bool(image_info.get('url'))}, media_id={str(image_info.get('media_id',''))[:20]})...")
+        image_b64, image_mime = download_whatsapp_image(image_info)
+        if image_b64:
+            p(f"  Vision: imagem pronta, gerando descricao...")
+            try:
+                client = OpenAI(api_key=OPENAI_API_KEY)
+                desc_chat = client.chat.completions.create(
+                    model='gpt-4o-mini',
+                    messages=[
+                        {'role': 'system', 'content': (
+                            'Você é um assistente de suporte acadêmico da Cruzeiro do Sul. O aluno enviou uma imagem (print de tela ou screenshot). '
+                            'Analise detalhadamente e descreva em 3-5 frases O QUE a imagem mostra. Foque em: '
+                            '1) Qual plataforma/app (DUDA, Portal do Aluno, Blackboard, etc). '
+                            '2) Se há mensagens de erro, transcreva o código e texto EXATO do erro (ex: AADSTS90072). '
+                            '3) Se há emails visíveis, transcreva-os e diga se é email pessoal (gmail, hotmail, live.com, outlook) ou acadêmico (@aluno.cruzeirodosul, @cs.unicid). '
+                            '4) Identifique o problema: ex. "user account does not exist in tenant", "identity provider does not exist". '
+                            '5) Se for erro de login com email pessoal, mencione explicitamente que o aluno está usando email pessoal em vez do acadêmico. '
+                            'Responda APENAS com a descrição técnica, sem saudação.'
+                        )},
+                        {'role': 'user', 'content': [
+                            {"type": "text", "text": question if question != '[imagem enviada pelo aluno]' else "O que esta imagem mostra?"},
+                            {"type": "image_url", "image_url": {"url": f"data:{image_mime};base64,{image_b64}", "detail": "high"}}
+                        ]}
+                    ],
+                    max_tokens=250, temperature=0.2
+                )
+                image_desc = desc_chat.choices[0].message.content.strip()
+                p(f"  Vision desc: {image_desc[:200]}")
+                if question == '[imagem enviada pelo aluno]':
+                    question = image_desc
+            except Exception as e:
+                p(f"  Vision desc erro: {e}")
+        else:
+            p(f"  Vision: falha no download, processando apenas texto")
 
     p(f"")
     p(f"{'='*55}")
@@ -1753,10 +2651,36 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
     if sentiment != 'neutro':
         p(f"  Sentimento: {sentiment}")
 
+    # === AGUARDANDO CPF (fluxo "Já sou aluno") ===
+    if _awaiting_cpf:
+        _handle_cpf_input(conv_id, question, name_suffix)
+        return
+
+    # === "JÁ SOU ALUNO" / "QUERO ME MATRICULAR" (resposta ao "não encontrado na base") ===
+    if q_lower in ('já sou aluno', 'ja sou aluno'):
+        _awaiting_cpf = True
+        msg = ("Certo! Para começarmos, por favor *digite* seu *CPF* completo.\n\n"
+               "*Exemplo*: Se seu CPF for 123.456.789-10 você deverá digitar 12345678910.")
+        meta_typing_on()
+        send_and_track(conv_id, msg)
+        conversation_messages.append({'role': 'bot', 'text': msg})
+        log_to_db(conv_id, question, msg, 1.0, 'ask_cpf')
+        waiting_for_client = True; inactivity_start = time.time()
+        return
+
+    if q_lower in ('quero me matricular', 'quero matricular', 'matricular'):
+        meta_typing_on()
+        send_and_track(conv_id, COMMERCIAL_REDIRECT_MSG)
+        conversation_messages.append({'role': 'bot', 'text': COMMERCIAL_REDIRECT_MSG})
+        log_to_db(conv_id, question, COMMERCIAL_REDIRECT_MSG, 1.0, 'commercial_redirect')
+        distribute_to_attendant(conv_id, 'Interessado em matrícula - encaminhar para comercial')
+        waiting_for_client = False; inactivity_start = 0
+        return
+
     # === SAUDAÇÃO ===
     if is_greeting(question):
         if not is_first:
-            p(f"  Saudacao repetida -> mostrando menu")
+            p(f"  Saudação repetida -> mostrando menu")
             msg = f"Claro{name_suffix}! Como posso te ajudar? Escolha uma opção abaixo 👇"
             greeting_alert_text = build_greeting_alerts()
             if greeting_alert_text:
@@ -1765,6 +2689,26 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
             send_and_track(conv_id, msg, buttons=GREETING_BUTTONS)
             conversation_messages.append({'role': 'bot', 'text': msg})
             log_to_db(conv_id, question, msg, 1.0, 'greeting_repeat')
+            waiting_for_client = True; inactivity_start = time.time()
+            return
+
+        # Primeira saudação: verificar se aluno está na base
+        p(f"  Verificando se aluno está na base (pipeline)...")
+        in_pipeline = check_lead_has_pipeline(PHONE_TO_MONITOR)
+
+        if in_pipeline:
+            _student_in_base = True
+            p(f"  Aluno NA BASE -> saudação + menu")
+        else:
+            _student_in_base = False
+            p(f"  Aluno NÃO encontrado no pipeline -> fluxo de identificação")
+            msg = ("👋 Oi, tudo bem?\n\n"
+                   "Não localizei este telefone que estamos conversando em nossa base de dados!\n\n"
+                   "Para continuarmos, por favor *digite* uma das opções abaixo: 👇")
+            meta_typing_on()
+            send_and_track(conv_id, msg, buttons=NOT_IN_BASE_BUTTONS)
+            conversation_messages.append({'role': 'bot', 'text': msg})
+            log_to_db(conv_id, question, msg, 1.0, 'not_in_base')
             waiting_for_client = True; inactivity_start = time.time()
             return
 
@@ -1793,8 +2737,8 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
         greeting_alert_text = build_greeting_alerts()
         if greeting_alert_text:
             greeting += greeting_alert_text
-            p(f"  Saudacao com alerta(s) anexado(s)")
-        p(f"  Saudacao personalizada (returning={memory is not None and memory.get('interaction_count', 0) > 0})")
+            p(f"  Saudação com alerta(s) anexado(s)")
+        p(f"  Saudação personalizada (returning={memory is not None and memory.get('interaction_count', 0) > 0})")
         send_and_track(conv_id, greeting, buttons=GREETING_BUTTONS)
         conversation_messages.append({'role': 'bot', 'text': greeting})
         log_to_db(conv_id, question, greeting, 1.0, 'greeting')
@@ -1802,7 +2746,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
         return
 
     # === RESOLVEU ===
-    if any(w in q_lower for w in RESOLVED_WORDS) or (q_lower in ('sim', 'si') and not is_first):
+    if any(w in q_lower for w in RESOLVED_WORDS):
         msg = f"Que bom que pude ajudar{name_suffix}! Se precisar de algo no futuro, estou à disposição. Até mais! 😊"
         meta_typing_on()
         send_and_track(conv_id, msg)
@@ -1846,19 +2790,46 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
         inactivity_start = 0
         return
 
+    # === RETENÇÃO (cancelamento / trancamento) — ANTES da escalação ===
+    if is_retention_intent(question):
+        p(f"  [RETENÇÃO] Intenção detectada: \"{question[:80]}\"")
+        meta_typing_on()
+        send_and_track(conv_id, RETENTION_MSG)
+        conversation_messages.append({'role': 'bot', 'text': RETENTION_MSG})
+        log_to_db(conv_id, question, RETENTION_MSG, 1.0, 'retention')
+
+        lead_id = student_profile.get('lead_id') if student_profile else None
+        trigger_retention(conv_id, lead_id, question)
+
+        summary = generate_conversation_summary(conversation_messages)
+        save_memory(PHONE_TO_MONITOR, student_profile, 'retencao', summary, sentiment)
+        tabulate_interaction(conversation_messages, student_profile, PHONE_TO_MONITOR)
+        waiting_for_client = False; inactivity_start = 0
+        p(f"  [RETENÇÃO] Conversa encaminhada para Wesley - follow-ups desativados")
+        return
+
     # === ESCALAÇÃO EXPLÍCITA ===
     if any(w in q_lower for w in ESCALATE_WORDS):
         meta_typing_on()
-        send_and_track(conv_id, ESCALATION_MSG)
-        conversation_messages.append({'role': 'bot', 'text': ESCALATION_MSG})
         log_to_db(conv_id, question, ESCALATION_MSG, 1.0, 'escalate_request')
-        transfer_to_human(conv_id, f'Solicitação explícita do aluno: "{question[:80]}"')
+        distributed = distribute_to_attendant(conv_id, f'Solicitação explícita do aluno: "{question[:80]}"')
+        conversation_messages.append({'role': 'bot', 'text': ESCALATION_MSG})
 
         summary = generate_conversation_summary(conversation_messages)
         save_memory(PHONE_TO_MONITOR, student_profile, 'escalacao', summary, sentiment)
         tabulate_interaction(conversation_messages, student_profile, PHONE_TO_MONITOR)
         waiting_for_client = False; inactivity_start = 0
-        p(f"  [ESCALADO] Follow-ups desativados (atendente humano assume)")
+        p(f"  [ESCALADO] Distribuído={distributed} - Follow-ups desativados")
+        return
+
+    # === SIM (resposta ao "algo mais específico?") ===
+    if q_lower == 'sim':
+        msg = "Claro! Me conta, qual é a sua dúvida específica? 😊"
+        meta_typing_on()
+        send_and_track(conv_id, msg)
+        conversation_messages.append({'role': 'bot', 'text': msg})
+        log_to_db(conv_id, question, msg, 1.0, 'ask_specific')
+        waiting_for_client = True; inactivity_start = time.time()
         return
 
     # === OUTRA DÚVIDA / VER OPÇÕES / PEDIDO DE AJUDA GENÉRICO ===
@@ -1867,7 +2838,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
                     'preciso de ajuda', 'ajuda', 'me ajuda', 'pode me ajudar', 'quero ajuda',
                     'preciso de help', 'help', 'socorro', 'como funciona', 'o que voce faz',
                     'o que você faz', 'quais opções', 'quais opcoes', 'ainda estou aqui',
-                    'ainda estou aqui!'):
+                    'ainda estou aqui!', 'voltar para o início', 'voltar para o inicio', 'voltar'):
         if student_profile and student_profile.get('first_name'):
             msg = f"Claro, {student_profile['first_name']}! Como posso te ajudar?"
         else:
@@ -1883,12 +2854,11 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
     should_escalate, reason = is_escalation_trigger(question)
     if should_escalate:
         meta_typing_on()
-        send_and_track(conv_id, ESCALATION_MSG)
-        conversation_messages.append({'role': 'bot', 'text': ESCALATION_MSG})
         log_to_db(conv_id, question, ESCALATION_MSG, 0.1, 'escalate_cpf')
-        transfer_to_human(conv_id, f'Dados sensíveis detectados (CPF/RGM)')
+        distributed = distribute_to_attendant(conv_id, 'Dados sensíveis detectados (CPF/RGM)')
+        conversation_messages.append({'role': 'bot', 'text': ESCALATION_MSG})
         waiting_for_client = False; inactivity_start = 0
-        p(f"  [ESCALADO] Follow-ups desativados (atendente humano assume)")
+        p(f"  [ESCALADO] Distribuído={distributed} - Follow-ups desativados")
         return
 
     # === STRIP EMOJIS + ASTERISCOS ===
@@ -1897,60 +2867,90 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
         stripped = stripped.replace(e + ' ', '').replace(e, '')
     stripped = stripped.strip()
 
-    # Função auxiliar: match depende se é botão ou texto digitado
-    def _matches(key, text):
-        if is_button_click:
-            return key in text
-        return text == key
+    # =====================================================================
+    # VERIFICA SE O TEXTO CORRESPONDE A UM ITEM DE MENU CONHECIDO
+    # Agente envia diretamente submenus e conteúdo (100% agente).
+    # =====================================================================
+    _matched_l1_key = None
+    _matched_l3_key = None
+    _matched_direct_key = None
+    _matched_rag_key = None
 
-    # === 0) BOTÃO COM RESPOSTA DIRETA ===
-    for direct_key, direct_text in SUBMENU_DIRECT_RESPONSE.items():
-        if _matches(direct_key, stripped):
-            p(f"  Button click -> resposta direta: '{direct_key}'")
+    for menu_key, mapped_key in MAIN_MENU_KEYS.items():
+        if menu_key in stripped or stripped == menu_key:
+            _matched_l1_key = mapped_key
+            break
+    if not _matched_l1_key:
+        for l3_key in SUBMENU_L3:
+            if l3_key in stripped or stripped == l3_key:
+                _matched_l3_key = l3_key
+                break
+    if not _matched_l1_key and not _matched_l3_key:
+        for direct_key in SUBMENU_DIRECT_RESPONSE:
+            if direct_key in stripped or stripped == direct_key:
+                _matched_direct_key = direct_key
+                break
+    if not _matched_l1_key and not _matched_l3_key and not _matched_direct_key:
+        for sub_key in SUBMENU_TO_QUESTION:
+            if sub_key in stripped or stripped == sub_key:
+                _matched_rag_key = sub_key
+                break
+
+    # --- Menu L1 (ex: "Financeiro") → agente envia submenu L2 ---
+    if _matched_l1_key:
+        submenu = SUBMENU.get(_matched_l1_key)
+        if submenu:
+            p(f"  Menu L1: '{stripped}' -> enviando submenu '{_matched_l1_key}'")
             meta_typing_on()
-            send_and_track(conv_id, direct_text, buttons=['Voltar ao menu', 'Falar com atendente'])
-            conversation_messages.append({'role': 'bot', 'text': direct_text})
-            log_to_db(conv_id, question, direct_text, 1.0, 'direct_response')
-            send_topic_media(conv_id, direct_key)
+            send_and_track(conv_id, submenu['text'], buttons=submenu.get('buttons', []))
+            conversation_messages.append({'role': 'bot', 'text': submenu['text']})
+            log_to_db(conv_id, question, submenu['text'], 1.0, 'menu_l1')
             waiting_for_client = True; inactivity_start = time.time()
             return
+        p(f"  Menu L1: '{stripped}' mapeado para '{_matched_l1_key}' mas sem submenu")
 
-    # === 1) BOTÃO ESPECÍFICO -> RAG ===
-    search_query = question
-    is_specific_click = False
-    for sub_key, real_question in SUBMENU_TO_QUESTION.items():
-        if _matches(sub_key, stripped):
-            search_query = real_question
-            is_specific_click = True
-            p(f"  Button click -> RAG: '{real_question[:50]}'")
-            break
+    # --- Menu L2/L3 (ex: "Boleto / Pagamento") → agente envia submenu L3 ---
+    if _matched_l3_key:
+        l3_data = SUBMENU_L3[_matched_l3_key]
+        p(f"  Menu L3: '{stripped}' -> enviando opcoes L3")
+        meta_typing_on()
+        send_and_track(conv_id, l3_data['text'], buttons=l3_data.get('buttons', []))
+        conversation_messages.append({'role': 'bot', 'text': l3_data['text']})
+        log_to_db(conv_id, question, l3_data['text'], 1.0, 'menu_l3')
+        waiting_for_client = True; inactivity_start = time.time()
+        return
 
-    if not is_specific_click:
-        # === 2) SUBMENU L2 -> L3 ===
-        for l3_key, l3_data in SUBMENU_L3.items():
-            if _matches(l3_key, stripped):
-                p(f"  Submenu L2 -> L3: {l3_key}")
-                meta_typing_on()
-                send_and_track(conv_id, l3_data['text'], buttons=l3_data['buttons'])
-                conversation_messages.append({'role': 'bot', 'text': l3_data['text']})
-                log_to_db(conv_id, question, l3_data['text'], 1.0, 'submenu_l3')
-                waiting_for_client = True; inactivity_start = time.time()
-                return
+    # --- Resposta direta (response_text do DB) ---
+    if _matched_direct_key:
+        direct_text = SUBMENU_DIRECT_RESPONSE[_matched_direct_key]
+        p(f"  Menu direto: '{stripped}' -> enviando response_text")
+        meta_typing_on()
+        send_and_track(conv_id, direct_text)
+        time.sleep(1)
+        send_and_track(conv_id, "Ficou alguma dúvida sobre o assunto? 😊\nDigite *Resolveu* ou me conte sua dúvida!")
+        conversation_messages.append({'role': 'bot', 'text': direct_text})
+        log_to_db(conv_id, question, direct_text, 1.0, 'menu_direct')
+        waiting_for_client = True; inactivity_start = time.time()
+        return
 
-        # === 3) MAIN MENU -> SUBMENU L2 ===
-        for menu_key, submenu_key in MAIN_MENU_KEYS.items():
-            if _matches(menu_key, stripped):
-                sub = SUBMENU[submenu_key]
-                p(f"  Menu -> submenu L2: {submenu_key}")
-                meta_typing_on()
-                send_and_track(conv_id, sub['text'], buttons=sub['buttons'])
-                conversation_messages.append({'role': 'bot', 'text': sub['text']})
-                log_to_db(conv_id, question, sub['text'], 1.0, 'submenu')
-                waiting_for_client = True; inactivity_start = time.time()
-                return
+    # --- Item de menu mapeado para RAG (ex: "Segunda via do boleto") ---
+    if _matched_rag_key:
+        mapped_question = SUBMENU_TO_QUESTION[_matched_rag_key]
+        p(f"  Menu RAG: '{stripped}' -> RAG com '{mapped_question[:50]}'")
+        search_query = mapped_question
 
-    # === FALLBACK: mensagem muito curta ===
-    if len(stripped) <= 3 and search_query == question:
+    # =====================================================================
+    # TEXTO LIVRE (não corresponde a nenhum menu) → agente responde via RAG
+    # =====================================================================
+    if not _matched_rag_key:
+        if image_desc:
+            search_query = f"{question}\n\n{image_desc}"
+            p(f"  RAG: texto + vision desc combinados para busca")
+        else:
+            search_query = question
+
+    has_image_context = bool(image_desc)
+    if len(stripped) <= 3 and not _matched_rag_key and not has_image_context:
         p(f"  Msg muito curta sem match, mostrando menu")
         msg = "Não entendi 🤔 Selecione uma opção:"
         meta_typing_on()
@@ -1961,10 +2961,20 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
 
     # === PIPELINE RAG ===
     p(f"  Pipeline RAG... (sentimento: {sentiment})")
-    results, emb = rag_search(search_query)
+    try:
+        results, emb = rag_search(search_query)
+    except Exception as e:
+        p(f"  ERRO RAG search: {e}")
+        msg = "Desculpe, tive um problema técnico. Posso te ajudar de outra forma?"
+        send_and_track(conv_id, msg, buttons=['Tentar de novo', 'Falar com atendente', 'Ver opções'])
+        conversation_messages.append({'role': 'bot', 'text': msg})
+        log_to_db(conv_id, question, msg, 0.0, 'rag_error')
+        waiting_for_client = True; inactivity_start = time.time()
+        return
+
     top_score = results[0][5] if results else 0
 
-    if top_score < 0.65:
+    if top_score < 0.50:
         msg = "Hmm, não encontrei uma resposta exata para isso. Posso te ajudar de outra forma?"
         meta_typing_on()
         send_and_track(conv_id, msg, buttons=['Tentar de novo', 'Falar com atendente', 'Ver opções'])
@@ -1975,18 +2985,11 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
 
     references = build_references(results)
     history = build_conversation_history(conv_id)
-    clean, confidence, llm_time = call_llm(question, references, history, student_profile, memory, sentiment, is_first)
+    clean, confidence, llm_time = call_llm(question, references, history, student_profile, memory, sentiment, is_first, image_b64=image_b64, image_mime=image_mime, image_desc=image_desc)
 
     p(f"  Resultado: conf={confidence:.2f} | top_sim={top_score:.3f}")
     p(f"  Resposta: {clean[:200]}...")
 
-    # Botões baseados no score RAG (não na auto-avaliação do LLM)
-    if top_score >= 0.80:
-        followup_buttons = FOLLOWUP_HIGH_BUTTONS
-    else:
-        followup_buttons = FOLLOWUP_MED_BUTTONS
-
-    # Enviar mídias ANTES do texto (com caption)
     if results and results[0][4]:
         try:
             media_list = json.loads(results[0][4])
@@ -2008,17 +3011,26 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False):
         except Exception as e:
             p(f"    Erro ao enviar midias: {e}")
 
-    # Dividir resposta em blocos para enviar como mensagens separadas no WhatsApp
-    chunks = [c.strip() for c in clean.split('\n\n') if c.strip()]
-    if len(chunks) <= 1:
-        status = send_and_track(conv_id, clean, buttons=followup_buttons)
-        p(f"  ENVIADO 1/1 (status {status})")
+    status = send_and_track(conv_id, clean)
+    p(f"  ENVIADO resposta (status {status})")
+
+    _clean_lower = clean.lower()
+    _asking_patterns = ('me conta', 'me fala', 'me diga', 'me explica', 'pode me contar',
+                        'pode descrever', 'qual é o erro', 'qual o erro', 'qual mensagem',
+                        'o que aparece', 'o que acontece', 'consegue enviar', 'consegue me enviar',
+                        'tente novamente', 'já tentou', 'você pode', 'voce pode',
+                        'assim consigo te ajudar', 'para eu te ajudar', 'pra eu te ajudar')
+    _is_asking_question = (
+        clean.rstrip().endswith('?') or
+        clean.rstrip().rstrip('😊😉🤔').rstrip().endswith('?') or
+        any(p_ask in _clean_lower for p_ask in _asking_patterns) or
+        confidence < 0.40
+    )
+    if not _is_asking_question:
+        time.sleep(1)
+        send_and_track(conv_id, "Ficou alguma dúvida sobre o assunto? 😊\nDigite *Resolveu* ou me conte sua dúvida!")
     else:
-        for i, chunk in enumerate(chunks):
-            is_last = (i == len(chunks) - 1)
-            btns = followup_buttons if is_last else None
-            status = send_and_track(conv_id, chunk, buttons=btns)
-            p(f"  ENVIADO {i+1}/{len(chunks)} (status {status})")
+        p(f"  Resposta é pergunta/pede mais info (conf={confidence:.2f}) -> sem follow-up 'ficou alguma dúvida'")
 
     conversation_messages.append({'role': 'bot', 'text': clean})
     log_to_db(conv_id, question, clean, confidence, 'auto_reply')
@@ -2061,7 +3073,6 @@ def _init_phone(phone):
 
     for c in convs:
         cid = c.get('id', '')
-        conversation_greeted.add(cid)
         msgs = get_conversation_messages_api(cid, limit=20)
         for m in msgs:
             processed_msg_ids.add(m.get('id', ''))
@@ -2080,7 +3091,8 @@ def _init_phone(phone):
 
 
 def main():
-    global active_conv_id, student_profile, followup_stage, waiting_for_client, inactivity_start
+    global active_conv_id, student_profile, followup_stage, waiting_for_client, inactivity_start, _last_auto_skipped
+    global _awaiting_cpf, _student_in_base
 
     load_agent_config_from_db()
     load_menus_from_db()
@@ -2171,10 +3183,10 @@ def main():
                 continue
 
             conv_id = convs[0].get('id', '')
-            msg_id, msg_body, is_click = get_new_client_message(conv_id)
+            msg_id, msg_body, is_click, img_info = get_new_client_message(conv_id)
             if msg_id and msg_body:
-                p(f"  >>> MSG: \"{msg_body[:80]}\"")
-                handle_message(conv_id, msg_id, msg_body, is_click)
+                p(f"  >>> MSG: \"{msg_body[:80]}\"{' [+IMAGEM]' if img_info else ''}")
+                handle_message(conv_id, msg_id, msg_body, is_click, image_info=img_info)
 
             # === FOLLOW-UP & ENCERRAMENTO POR INATIVIDADE ===
             if waiting_for_client and active_conv_id and inactivity_start > 0:

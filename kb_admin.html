@@ -117,6 +117,7 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
   <div class="tab" data-tab="logs" onclick="sw('logs')"><i class="fas fa-timeline mr-1.5"></i>Interações</div>
   <div class="tab" data-tab="alerts" onclick="sw('alerts')"><i class="fas fa-triangle-exclamation mr-1.5"></i>Alertas</div>
   <div class="tab" data-tab="menus" onclick="sw('menus')"><i class="fas fa-bars-staggered mr-1.5"></i>Menus</div>
+  <div class="tab" data-tab="conversations" onclick="sw('conversations')"><i class="fas fa-comments mr-1.5"></i>Conversas</div>
   <div class="tab" data-tab="agentcfg" onclick="sw('agentcfg')"><i class="fas fa-sliders mr-1.5"></i>Config Agente</div>
 </div>
 </div>
@@ -181,11 +182,26 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
       <select id="chat-model" class="inp" style="width:auto;font-size:11px;padding:5px 8px;background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.3);max-width:160px;"></select>
       <select id="chat-prompt" class="inp" style="width:auto;font-size:11px;padding:5px 8px;background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.3);max-width:180px;"></select>
       <button onclick="clearChat()" class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.2);"><i class="fas fa-broom"></i></button>
+      <div style="display:flex;align-items:center;gap:6px;margin-left:8px;border-left:1px solid rgba(255,255,255,.2);padding-left:10px;">
+        <span id="agent-live-dot" style="width:8px;height:8px;border-radius:50%;background:#ef4444;"></span>
+        <span id="agent-live-label" style="font-size:10px;color:rgba(255,255,255,.7);">Ao vivo: OFF</span>
+        <button id="agent-live-btn" onclick="toggleAgentLive()" class="btn btn-sm" style="background:rgba(34,197,94,.2);color:#4ade80;border:1px solid rgba(34,197,94,.3);font-size:10px;padding:3px 10px;"><i class="fas fa-power-off mr-1"></i>Ligar</button>
+        <button id="agent-logs-btn" onclick="toggleAgentLogs()" class="btn btn-sm" style="background:rgba(255,255,255,.1);color:rgba(255,255,255,.7);border:1px solid rgba(255,255,255,.2);font-size:10px;padding:3px 8px;" title="Ver logs"><i class="fas fa-terminal"></i></button>
+      </div>
     </div>
     <div id="chat-msgs" class="flex-1 overflow-y-auto p-4 space-y-2.5 wa-bg">
       <div class="flex justify-center"><span class="bg-white text-xs text-gray-500 px-4 py-1.5 rounded-full shadow-sm">Envie uma mensagem como aluno</span></div>
     </div>
+    <div id="chat-img-preview" style="display:none;" class="px-3 pt-2 bg-gray-50 border-t">
+      <div style="display:inline-flex;align-items:center;gap:8px;background:#e8f5e9;border-radius:12px;padding:6px 12px;">
+        <img id="chat-img-thumb" style="max-height:48px;border-radius:6px;">
+        <span class="text-xs text-gray-600" id="chat-img-name"></span>
+        <button onclick="clearChatImage()" style="background:none;border:none;cursor:pointer;color:#999;font-size:16px;" title="Remover imagem">&times;</button>
+      </div>
+    </div>
     <div class="p-3 bg-gray-50 border-t flex gap-2 items-center">
+      <input type="file" id="chat-img-input" accept="image/*" style="display:none;" onchange="handleChatImage(this)">
+      <button onclick="document.getElementById('chat-img-input').click()" class="btn" style="border-radius:50%;width:40px;height:40px;padding:0;background:#f0f0f0;border:1px solid #ddd;" title="Enviar imagem"><i class="fas fa-image" style="color:#666;"></i></button>
       <input type="text" id="chat-in" class="inp flex-1" style="border-radius:24px;padding:10px 16px;" placeholder="Digite como aluno..." onkeydown="if(event.key==='Enter'){event.preventDefault();sendChat();}">
       <button onclick="sendChat()" class="btn btn-p" style="border-radius:50%;width:40px;height:40px;padding:0;" id="btn-cs"><i class="fas fa-paper-plane" style="margin-left:2px;"></i></button>
     </div>
@@ -195,6 +211,17 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
     <div class="p-3 border-b flex items-center gap-2"><i class="fas fa-microscope text-indigo-500"></i><span class="text-sm font-semibold text-gray-700">Detalhes & Treinamento</span></div>
     <div id="chat-side" class="flex-1 overflow-y-auto p-3"><div class="text-sm text-gray-400 text-center mt-10"><i class="fas fa-arrow-left mr-1"></i>Clique em uma resposta da IA</div></div>
   </div>
+</div>
+<!-- Agent Logs Panel -->
+<div id="agent-logs-panel" class="card mt-2 overflow-hidden" style="display:none;">
+  <div class="p-2 border-b flex items-center justify-between" style="background:#1e1b2e;">
+    <span class="text-xs font-semibold text-gray-300"><i class="fas fa-terminal mr-1.5 text-green-400"></i>Logs do Agente ao Vivo (teste: 11970617878)</span>
+    <div class="flex gap-2">
+      <button onclick="refreshAgentLogs()" class="btn btn-sm" style="font-size:10px;padding:2px 8px;background:rgba(255,255,255,.1);color:#ccc;border:1px solid rgba(255,255,255,.15);"><i class="fas fa-sync-alt mr-1"></i>Atualizar</button>
+      <button onclick="toggleAgentLogs()" class="btn btn-sm" style="font-size:10px;padding:2px 8px;background:rgba(255,255,255,.1);color:#ccc;border:1px solid rgba(255,255,255,.15);"><i class="fas fa-times"></i></button>
+    </div>
+  </div>
+  <pre id="agent-logs-content" style="background:#0d0b1a;color:#a5f3ab;font-size:11px;padding:10px;height:200px;overflow-y:auto;margin:0;font-family:'Fira Code',monospace;white-space:pre-wrap;word-break:break-all;"></pre>
 </div>
 </div>
 
@@ -792,6 +819,101 @@ Pode encerrar</textarea>
 </div>
 </div>
 
+<!-- ===== CONVERSAS ===== -->
+<div id="tab-conversations" class="tc hidden fade">
+
+<!-- Filtros -->
+<div class="card mt-5 p-4">
+  <div class="flex flex-wrap items-end gap-3">
+    <div>
+      <label class="text-xs font-medium text-gray-500 block mb-1">Período</label>
+      <div class="flex gap-1.5">
+        <button onclick="setConvPeriod(0)" class="btn-period text-xs px-2.5 py-1.5 rounded-lg bg-gray-100 hover:bg-indigo-100 text-gray-600">Hoje</button>
+        <button onclick="setConvPeriod(7)" class="btn-period text-xs px-2.5 py-1.5 rounded-lg bg-indigo-100 text-indigo-700 font-medium">7 dias</button>
+        <button onclick="setConvPeriod(30)" class="btn-period text-xs px-2.5 py-1.5 rounded-lg bg-gray-100 hover:bg-indigo-100 text-gray-600">30 dias</button>
+        <button onclick="setConvPeriod(90)" class="btn-period text-xs px-2.5 py-1.5 rounded-lg bg-gray-100 hover:bg-indigo-100 text-gray-600">90 dias</button>
+      </div>
+    </div>
+    <div>
+      <label class="text-xs font-medium text-gray-500 block mb-1">De</label>
+      <input type="date" id="conv-start" class="inp text-xs px-2.5 py-1.5">
+    </div>
+    <div>
+      <label class="text-xs font-medium text-gray-500 block mb-1">Até</label>
+      <input type="date" id="conv-end" class="inp text-xs px-2.5 py-1.5">
+    </div>
+    <div>
+      <label class="text-xs font-medium text-gray-500 block mb-1">Tema</label>
+      <select id="conv-tema" class="inp text-xs px-2.5 py-1.5"><option value="">Todos</option></select>
+    </div>
+    <div>
+      <label class="text-xs font-medium text-gray-500 block mb-1">Ação</label>
+      <select id="conv-acao" class="inp text-xs px-2.5 py-1.5"><option value="">Todas</option></select>
+    </div>
+    <button onclick="loadConversations()" class="btn text-xs px-4 py-1.5 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600"><i class="fas fa-filter mr-1"></i>Filtrar</button>
+  </div>
+</div>
+
+<!-- Cards de métricas -->
+<div class="grid grid-cols-3 gap-4 mt-4">
+  <div class="card p-4 text-center">
+    <div class="text-2xl font-bold text-gray-800" id="conv-total">-</div>
+    <div class="text-xs text-gray-500 mt-1">Total de Conversas</div>
+  </div>
+  <div class="card p-4 text-center">
+    <div class="text-2xl font-bold text-green-600" id="conv-resolved">-</div>
+    <div class="text-xs text-gray-500 mt-1">Resolvidas</div>
+  </div>
+  <div class="card p-4 text-center">
+    <div class="text-2xl font-bold text-red-500" id="conv-retentions">-</div>
+    <div class="text-xs text-gray-500 mt-1">Retenções</div>
+  </div>
+</div>
+
+<!-- Gráficos -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+  <div class="card p-4">
+    <h3 class="text-sm font-semibold text-gray-700 mb-3"><i class="fas fa-chart-bar mr-1.5 text-indigo-500"></i>Assuntos Mais Recebidos</h3>
+    <canvas id="conv-chart-temas" height="260"></canvas>
+  </div>
+  <div class="card p-4">
+    <h3 class="text-sm font-semibold text-gray-700 mb-3"><i class="fas fa-chart-line mr-1.5 text-indigo-500"></i>Volume por Dia</h3>
+    <canvas id="conv-chart-timeline" height="260"></canvas>
+  </div>
+</div>
+
+<!-- Subtemas mais frequentes -->
+<div class="card p-4 mt-4">
+  <h3 class="text-sm font-semibold text-gray-700 mb-3"><i class="fas fa-tags mr-1.5 text-indigo-500"></i>Subtemas Mais Frequentes</h3>
+  <div id="conv-subtemas" class="flex flex-wrap gap-2"></div>
+</div>
+
+<!-- Tabela detalhada -->
+<div class="card mt-4 overflow-hidden">
+  <div class="p-4 border-b flex items-center justify-between">
+    <h3 class="text-sm font-semibold text-gray-700"><i class="fas fa-list mr-1.5 text-indigo-500"></i>Detalhes das Conversas</h3>
+    <span class="text-xs text-gray-400" id="conv-table-info">-</span>
+  </div>
+  <div class="overflow-x-auto">
+    <table class="w-full text-xs">
+      <thead class="bg-gray-50 text-gray-600 uppercase">
+        <tr>
+          <th class="px-4 py-2.5 text-left">Data</th>
+          <th class="px-4 py-2.5 text-left">Aluno</th>
+          <th class="px-4 py-2.5 text-left">Tema</th>
+          <th class="px-4 py-2.5 text-left">Subtema</th>
+          <th class="px-4 py-2.5 text-center">Resolvido</th>
+          <th class="px-4 py-2.5 text-left">Resumo</th>
+        </tr>
+      </thead>
+      <tbody id="conv-table-body" class="divide-y divide-gray-100"></tbody>
+    </table>
+  </div>
+  <div class="p-3 border-t flex justify-center gap-2" id="conv-pagination"></div>
+</div>
+
+</div>
+
 <!-- ===== MODAL Q&A ===== -->
 <div id="modal" class="fixed inset-0 z-50 hidden">
 <div class="modal-bg absolute inset-0" onclick="closeModal()"></div>
@@ -903,7 +1025,7 @@ function now(){return new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minu
 
 // ==== TABS ====
 function sw(t){document.querySelectorAll('.tc').forEach(e=>e.classList.add('hidden'));document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));document.getElementById('tab-'+t).classList.remove('hidden');document.querySelector(`.tab[data-tab="${t}"]`).classList.add('active');
-if(t==='dashboard')loadDash();if(t==='qa')loadQA();if(t==='logs')loadLogs();if(t==='prompts')loadPrompts();if(t==='playground')initPG();if(t==='chat')initChat();if(t==='tabulation')loadTabulation();if(t==='sentiment')loadSentiment();if(t==='team')loadTeam();if(t==='students')loadStudents();if(t==='alerts')loadAlerts();if(t==='menus')loadMenus();if(t==='agentcfg')loadAgentConfig();}
+if(t==='dashboard')loadDash();if(t==='qa')loadQA();if(t==='logs')loadLogs();if(t==='prompts')loadPrompts();if(t==='playground')initPG();if(t==='chat')initChat();if(t==='tabulation')loadTabulation();if(t==='sentiment')loadSentiment();if(t==='team')loadTeam();if(t==='students')loadStudents();if(t==='alerts')loadAlerts();if(t==='menus')loadMenus();if(t==='agentcfg')loadAgentConfig();if(t==='conversations')loadConversations();}
 
 // ==== DASHBOARD ====
 async function loadDash(){
@@ -1082,7 +1204,7 @@ function addMediaUrl(){
 }
 
 // ==== CHAT ====
-function initChat(){loadModelsInto('chat-model');loadPromptsInto('chat-prompt');}
+function initChat(){loadModelsInto('chat-model');loadPromptsInto('chat-prompt');checkAgentStatus();}
 function clearChat(){chatH=[];chatR={};chatN=0;document.getElementById('chat-msgs').innerHTML='<div class="flex justify-center"><span class="bg-white text-xs text-gray-500 px-4 py-1.5 rounded-full shadow-sm">Envie uma mensagem como aluno</span></div>';document.getElementById('chat-side').innerHTML='<div class="text-sm text-gray-400 text-center mt-10"><i class="fas fa-arrow-left mr-1"></i>Clique em uma resposta da IA</div>';}
 
 function renderWABubble(text,waData){
@@ -1128,20 +1250,43 @@ function renderFlowButtons(fb){
   return h;
 }
 
+let chatImageB64=null,chatImageMime=null;
+function handleChatImage(input){
+  const file=input.files[0];if(!file)return;
+  chatImageMime=file.type||'image/jpeg';
+  const reader=new FileReader();
+  reader.onload=function(e){
+    chatImageB64=e.target.result.split(',')[1];
+    document.getElementById('chat-img-thumb').src=e.target.result;
+    document.getElementById('chat-img-name').textContent=file.name.length>20?file.name.slice(0,17)+'...':file.name;
+    document.getElementById('chat-img-preview').style.display='block';
+  };
+  reader.readAsDataURL(file);
+}
+function clearChatImage(){
+  chatImageB64=null;chatImageMime=null;
+  document.getElementById('chat-img-preview').style.display='none';
+  document.getElementById('chat-img-input').value='';
+}
 async function sendChat(overrideText){
 const inp=document.getElementById('chat-in');
-const q=(overrideText||inp.value).trim();if(!q)return;
+let q=(overrideText||inp.value).trim();
+const hasImage=!!chatImageB64;
+if(!q&&!hasImage)return;
+if(!q&&hasImage)q='[imagem enviada]';
 if(!overrideText)inp.value='';
 inp.disabled=true;document.getElementById('btn-cs').disabled=true;
-addBub('user',q);chatH.push({role:'user',text:q});const ty=addBub('typing');
+const userDisplay=hasImage?q+' 📷':'q';
+addBub('user',hasImage?(q==='[imagem enviada]'?'📷 Imagem enviada':q+' 📷'):q);chatH.push({role:'user',text:q});const ty=addBub('typing');
 try{const model=document.getElementById('chat-model').value;const pid=document.getElementById('chat-prompt').value;
 const body={pergunta:q,history:chatH.slice(0,-1)};if(model)body.model=model;if(pid)body.prompt_id=parseInt(pid);
+if(hasImage){body.image_b64=chatImageB64;body.image_mime=chatImageMime;}
 const resp=await fetch(A+'/api/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 let d;
 try{d=await resp.json();}catch(parseErr){throw new Error('Erro temporário no servidor. Tente novamente.');}
 if(d.erro){console.warn('API retornou erro tratado:',d.erro);}
 ty.remove();chatN++;const mid=chatN;chatR[mid]={...d,pergunta:q,prompt_id:pid||null};addBub('bot',d.resposta,mid,d.whatsapp_buttons,d.flow_buttons);chatH.push({role:'bot',text:d.resposta});if(d.model!=='flow')selBot(mid);
-}catch(e){ty.remove();addBub('sys',e.message||'Erro desconhecido. Tente novamente.');}finally{inp.disabled=false;document.getElementById('btn-cs').disabled=false;inp.focus();}}
+}catch(e){ty.remove();addBub('sys',e.message||'Erro desconhecido. Tente novamente.');}finally{inp.disabled=false;document.getElementById('btn-cs').disabled=false;inp.focus();clearChatImage();}}
 
 function selBot(mid){document.querySelectorAll('.wa-bot').forEach(e=>e.classList.remove('selected'));const el=document.getElementById('bm-'+mid);if(el)el.classList.add('selected');
 const d=chatR[mid];if(!d)return;const cf=d.confianca;
@@ -1992,6 +2137,234 @@ async function seedMenus() {
     document.getElementById('menu-editor-empty').classList.remove('hidden');
     await loadMenus();
   } catch(e) { toast('Erro ao resetar', 'error'); }
+}
+
+// ==== AGENTE AO VIVO ====
+let agentLiveRunning=false;
+async function checkAgentStatus(){
+  try{
+    const r=await fetch(A+'/api/agent/live/status');
+    const d=await r.json();
+    agentLiveRunning=d.running;
+    updateAgentUI();
+  }catch(e){}
+}
+function updateAgentUI(){
+  const dot=document.getElementById('agent-live-dot');
+  const label=document.getElementById('agent-live-label');
+  const btn=document.getElementById('agent-live-btn');
+  if(agentLiveRunning){
+    dot.style.background='#22c55e';
+    label.textContent='Ao vivo: ON (teste)';
+    label.style.color='#4ade80';
+    btn.innerHTML='<i class="fas fa-power-off mr-1"></i>Desligar';
+    btn.style.background='rgba(239,68,68,.2)';
+    btn.style.color='#f87171';
+    btn.style.borderColor='rgba(239,68,68,.3)';
+  }else{
+    dot.style.background='#ef4444';
+    label.textContent='Ao vivo: OFF';
+    label.style.color='rgba(255,255,255,.7)';
+    btn.innerHTML='<i class="fas fa-power-off mr-1"></i>Ligar';
+    btn.style.background='rgba(34,197,94,.2)';
+    btn.style.color='#4ade80';
+    btn.style.borderColor='rgba(34,197,94,.3)';
+  }
+}
+async function toggleAgentLive(){
+  const btn=document.getElementById('agent-live-btn');
+  btn.disabled=true;btn.style.opacity='0.5';
+  try{
+    if(agentLiveRunning){
+      if(!confirm('Desligar o agente ao vivo de teste?'))return;
+      const r=await fetch(A+'/api/agent/live/stop',{method:'POST'});
+      const d=await r.json();
+      toast(d.msg,'success');
+    }else{
+      if(!confirm('Ligar o agente ao vivo?\n\nMonitorando apenas: 11970617878 (teste)'))return;
+      const r=await fetch(A+'/api/agent/live/start',{method:'POST'});
+      const d=await r.json();
+      toast(d.msg,d.ok?'success':'error');
+    }
+    await checkAgentStatus();
+  }catch(e){toast('Erro ao controlar agente','error');}
+  finally{btn.disabled=false;btn.style.opacity='1';}
+}
+setInterval(checkAgentStatus,10000);
+let agentLogsVisible=false, agentLogsInterval=null;
+function toggleAgentLogs(){
+  agentLogsVisible=!agentLogsVisible;
+  document.getElementById('agent-logs-panel').style.display=agentLogsVisible?'block':'none';
+  if(agentLogsVisible){refreshAgentLogs();agentLogsInterval=setInterval(refreshAgentLogs,3000);}
+  else if(agentLogsInterval){clearInterval(agentLogsInterval);agentLogsInterval=null;}
+}
+async function refreshAgentLogs(){
+  try{
+    const r=await fetch(A+'/api/agent/live/logs?lines=100');
+    const d=await r.json();
+    const el=document.getElementById('agent-logs-content');
+    el.textContent=d.lines.join('');
+    el.scrollTop=el.scrollHeight;
+  }catch(e){document.getElementById('agent-logs-content').textContent='Erro ao carregar logs';}
+}
+
+// ==== CONVERSAS ====
+let convPage=1,convData=null,convFiltersLoaded=false;
+
+function setConvPeriod(days){
+  const end=new Date(), start=new Date();
+  start.setDate(end.getDate()-days);
+  document.getElementById('conv-start').value=start.toISOString().slice(0,10);
+  document.getElementById('conv-end').value=end.toISOString().slice(0,10);
+  document.querySelectorAll('.btn-period').forEach(b=>{b.classList.remove('bg-indigo-100','text-indigo-700','font-medium');b.classList.add('bg-gray-100','text-gray-600');});
+  event.target.classList.remove('bg-gray-100','text-gray-600');
+  event.target.classList.add('bg-indigo-100','text-indigo-700','font-medium');
+  convPage=1;
+  loadConversations();
+}
+
+async function loadConversations(pg){
+  if(pg)convPage=pg;
+  if(!document.getElementById('conv-start').value){setConvPeriod(7);return;}
+  const p=new URLSearchParams();
+  p.set('start_date',document.getElementById('conv-start').value);
+  p.set('end_date',document.getElementById('conv-end').value);
+  const tema=document.getElementById('conv-tema').value;
+  const acao=document.getElementById('conv-acao').value;
+  if(tema)p.set('tema',tema);
+  if(acao)p.set('acao',acao);
+  p.set('page',convPage);
+  p.set('per_page',20);
+
+  try{
+    const r=await fetch(A+'/api/conversations/analytics?'+p.toString());
+    const d=await r.json();
+    convData=d;
+
+    document.getElementById('conv-total').textContent=d.summary.total.toLocaleString();
+    document.getElementById('conv-resolved').textContent=d.summary.resolution_rate+'%';
+    document.getElementById('conv-retentions').textContent=d.summary.retentions;
+
+    if(!convFiltersLoaded&&d.filter_options){
+      const st=document.getElementById('conv-tema');
+      d.filter_options.temas.forEach(t=>{if(t){const o=document.createElement('option');o.value=t;o.textContent=t;st.appendChild(o);}});
+      const sa=document.getElementById('conv-acao');
+      d.filter_options.acoes.forEach(a=>{if(a){const o=document.createElement('option');o.value=a;o.textContent=a;sa.appendChild(o);}});
+      convFiltersLoaded=true;
+    }
+
+    drawConvTemasChart(d.by_tema);
+    drawConvTimelineChart(d.by_day);
+    renderConvSubtemas(d.top_subtemas);
+    renderConvTable(d.details,d.details_total,d.details_page,d.details_per_page);
+  }catch(e){toast('Erro ao carregar conversas','error');console.error(e);}
+}
+
+function drawConvTemasChart(data){
+  const c=document.getElementById('conv-chart-temas');
+  const ctx=c.getContext('2d');
+  const W=c.width=c.parentElement.clientWidth-32;
+  const H=c.height=Math.max(260,data.length*32+40);
+  ctx.clearRect(0,0,W,H);
+  if(!data.length){ctx.fillStyle='#9ca3af';ctx.font='13px sans-serif';ctx.fillText('Sem dados',W/2-30,H/2);return;}
+  const max=Math.max(...data.map(d=>d.count));
+  const barH=22,gap=8,leftPad=130,rightPad=50;
+  const barArea=W-leftPad-rightPad;
+  const colors=['#6366f1','#8b5cf6','#a78bfa','#c4b5fd','#818cf8','#6d28d9','#4f46e5','#7c3aed','#5b21b6','#4338ca'];
+  data.slice(0,10).forEach((d,i)=>{
+    const y=20+i*(barH+gap);
+    const bw=max>0?(d.count/max)*barArea:0;
+    ctx.fillStyle='#f3f4f6';ctx.fillRect(leftPad,y,barArea,barH);
+    ctx.fillStyle=colors[i%colors.length];ctx.beginPath();
+    const r=4;ctx.moveTo(leftPad+r,y);ctx.lineTo(leftPad+bw-r,y);ctx.quadraticCurveTo(leftPad+bw,y,leftPad+bw,y+r);
+    ctx.lineTo(leftPad+bw,y+barH-r);ctx.quadraticCurveTo(leftPad+bw,y+barH,leftPad+bw-r,y+barH);
+    ctx.lineTo(leftPad+r,y+barH);ctx.quadraticCurveTo(leftPad,y+barH,leftPad,y+barH-r);
+    ctx.lineTo(leftPad,y+r);ctx.quadraticCurveTo(leftPad,y,leftPad+r,y);ctx.fill();
+    ctx.fillStyle='#374151';ctx.font='11px sans-serif';ctx.textAlign='right';ctx.textBaseline='middle';
+    const label=(d.tema||'N/A').length>18?(d.tema||'N/A').slice(0,18)+'…':d.tema||'N/A';
+    ctx.fillText(label,leftPad-8,y+barH/2);
+    ctx.fillStyle='#6b7280';ctx.textAlign='left';ctx.fillText(d.count,leftPad+bw+6,y+barH/2);
+  });
+}
+
+function drawConvTimelineChart(data){
+  const c=document.getElementById('conv-chart-timeline');
+  const ctx=c.getContext('2d');
+  const W=c.width=c.parentElement.clientWidth-32;
+  const H=c.height=260;
+  ctx.clearRect(0,0,W,H);
+  if(!data.length){ctx.fillStyle='#9ca3af';ctx.font='13px sans-serif';ctx.fillText('Sem dados',W/2-30,H/2);return;}
+  const max=Math.max(...data.map(d=>d.count),1);
+  const pad={t:20,b:50,l:40,r:20};
+  const gw=W-pad.l-pad.r,gh=H-pad.t-pad.b;
+  const step=gw/(data.length-1||1);
+
+  ctx.strokeStyle='#e5e7eb';ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){const y=pad.t+gh*(1-i/4);ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();
+    ctx.fillStyle='#9ca3af';ctx.font='10px sans-serif';ctx.textAlign='right';ctx.fillText(Math.round(max*i/4),pad.l-5,y+3);}
+
+  const grad=ctx.createLinearGradient(0,pad.t,0,H-pad.b);
+  grad.addColorStop(0,'rgba(99,102,241,0.15)');grad.addColorStop(1,'rgba(99,102,241,0)');
+  ctx.beginPath();ctx.moveTo(pad.l,pad.t+gh);
+  data.forEach((d,i)=>{const x=pad.l+i*step;const y=pad.t+gh*(1-d.count/max);ctx.lineTo(x,y);});
+  ctx.lineTo(pad.l+(data.length-1)*step,pad.t+gh);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+
+  ctx.beginPath();ctx.strokeStyle='#6366f1';ctx.lineWidth=2;ctx.lineJoin='round';
+  data.forEach((d,i)=>{const x=pad.l+i*step;const y=pad.t+gh*(1-d.count/max);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
+  ctx.stroke();
+
+  data.forEach((d,i)=>{const x=pad.l+i*step;const y=pad.t+gh*(1-d.count/max);
+    ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fillStyle='#6366f1';ctx.fill();ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();});
+
+  const labelStep=Math.max(1,Math.floor(data.length/7));
+  data.forEach((d,i)=>{if(i%labelStep===0||i===data.length-1){const x=pad.l+i*step;
+    ctx.save();ctx.translate(x,H-pad.b+12);ctx.rotate(-0.5);ctx.fillStyle='#6b7280';ctx.font='9px sans-serif';ctx.textAlign='right';
+    ctx.fillText(d.day.slice(5),0,0);ctx.restore();}});
+}
+
+function renderConvSubtemas(data){
+  const el=document.getElementById('conv-subtemas');
+  if(!data.length){el.innerHTML='<span class="text-xs text-gray-400">Sem dados</span>';return;}
+  el.innerHTML=data.map(d=>{
+    const bg=d.count>=5?'bg-indigo-100 text-indigo-700':d.count>=2?'bg-gray-100 text-gray-600':'bg-gray-50 text-gray-500';
+    return `<span class="text-xs px-2.5 py-1 rounded-full ${bg}">${esc(d.tema||'')} / ${esc(d.subtema||'')} <strong>${d.count}</strong></span>`;
+  }).join('');
+}
+
+function renderConvTable(data,total,page,perPage){
+  const tb=document.getElementById('conv-table-body');
+  if(!data.length){tb.innerHTML='<tr><td colspan="6" class="text-center py-8 text-gray-400">Nenhuma conversa encontrada</td></tr>';
+    document.getElementById('conv-table-info').textContent='0 resultados';document.getElementById('conv-pagination').innerHTML='';return;}
+
+  tb.innerHTML=data.map(d=>{
+    const dt=d.created_at?new Date(d.created_at).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
+    const resCls=d.resolvido==='sim'?'text-green-600':'text-gray-400';
+    const resIcon=d.resolvido==='sim'?'fa-check-circle':'fa-circle-xmark';
+    const resumo=(d.resumo||'').length>100?d.resumo.slice(0,100)+'…':d.resumo||'—';
+    return `<tr class="hover:bg-gray-50 cursor-pointer" onclick="this.nextElementSibling&&this.nextElementSibling.classList.toggle('hidden')">
+      <td class="px-4 py-2.5 whitespace-nowrap">${dt}</td>
+      <td class="px-4 py-2.5">${esc(d.student_name||'—')}</td>
+      <td class="px-4 py-2.5"><span class="font-medium">${esc(d.tema||'—')}</span></td>
+      <td class="px-4 py-2.5">${esc(d.subtema||'—')}</td>
+      <td class="px-4 py-2.5 text-center ${resCls}"><i class="fas ${resIcon}"></i></td>
+      <td class="px-4 py-2.5 text-gray-500">${esc(resumo)}</td>
+    </tr>
+    <tr class="hidden bg-indigo-50/50"><td colspan="6" class="px-6 py-3 text-xs text-gray-600 whitespace-pre-line">${esc(d.resumo||'Sem resumo')}</td></tr>`;
+  }).join('');
+
+  const totalPages=Math.ceil(total/perPage);
+  document.getElementById('conv-table-info').textContent=`${total} conversas (pág ${page}/${totalPages})`;
+  const pg=document.getElementById('conv-pagination');
+  if(totalPages<=1){pg.innerHTML='';return;}
+  let html='';
+  if(page>1)html+=`<button onclick="loadConversations(${page-1})" class="px-2.5 py-1 text-xs rounded bg-gray-100 hover:bg-gray-200">‹</button>`;
+  for(let i=1;i<=totalPages;i++){
+    if(i===1||i===totalPages||Math.abs(i-page)<=2){
+      html+=`<button onclick="loadConversations(${i})" class="px-2.5 py-1 text-xs rounded ${i===page?'bg-indigo-500 text-white':'bg-gray-100 hover:bg-gray-200'}">${i}</button>`;
+    }else if(Math.abs(i-page)===3){html+='<span class="text-gray-400">…</span>';}
+  }
+  if(page<totalPages)html+=`<button onclick="loadConversations(${page+1})" class="px-2.5 py-1 text-xs rounded bg-gray-100 hover:bg-gray-200">›</button>`;
+  pg.innerHTML=html;
 }
 </script>
 </body>

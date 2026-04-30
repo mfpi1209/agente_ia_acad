@@ -6,11 +6,13 @@ import os
 import re
 import io
 import csv
+import sys
 import time
 import json
 import hashlib
 import secrets
 import threading
+import subprocess
 import psycopg2
 import psycopg2.extras
 import requests as http_requests
@@ -393,14 +395,32 @@ def build_refs(results, min_score=0.5):
 
 def call_llm(question: str, system_prompt: str, model: str = 'gpt-4o-mini',
              temperature: float = 0.2, max_tokens: int = 400,
-             history: Optional[List[dict]] = None):
+             history: Optional[List[dict]] = None,
+             image_b64: str = None, image_mime: str = None):
     client = OpenAI(api_key=OPENAI_API_KEY)
+    if image_b64:
+        system_prompt += (
+            "\n\n## IMAGEM RECEBIDA:\n"
+            "O aluno enviou uma imagem. Analise-a cuidadosamente e use o conteúdo visual "
+            "para complementar sua resposta. Se for um print de tela, identifique o que aparece "
+            "e oriente o aluno. Se não conseguir interpretar, peça mais detalhes.\n"
+        )
     messages = [{'role': 'system', 'content': system_prompt}]
     if history:
         for h in history[-6:]:
             role = 'user' if h.get('role') == 'user' else 'assistant'
             messages.append({'role': role, 'content': h.get('text', '')})
-    messages.append({'role': 'user', 'content': question})
+    if image_b64:
+        user_content = [
+            {"type": "text", "text": question},
+            {"type": "image_url", "image_url": {
+                "url": f"data:{image_mime or 'image/jpeg'};base64,{image_b64}",
+                "detail": "low"
+            }}
+        ]
+        messages.append({'role': 'user', 'content': user_content})
+    else:
+        messages.append({'role': 'user', 'content': question})
     t0 = time.time()
     last_err = None
     for attempt in range(3):
@@ -507,6 +527,8 @@ class TestRequest(BaseModel):
     prompt_id: Optional[int] = None
     history: Optional[List[dict]] = None
     phone: Optional[str] = None
+    image_b64: Optional[str] = None
+    image_mime: Optional[str] = None
 
 
 # --- Routes: Static ---
@@ -951,6 +973,29 @@ def generate_flow_buttons(pergunta: str, confianca: float, history: list = None)
             ]
         }
 
+    # Retention (cancelamento / trancamento) — somente intenção real
+    retention_phrases = [
+        'quero cancelar', 'quero trancar', 'vou cancelar', 'vou trancar',
+        'cancelar meu curso', 'cancelar minha matrícula', 'cancelar minha matricula',
+        'trancar meu curso', 'trancar minha matrícula', 'trancar minha matricula',
+        'cancelar o curso', 'trancar o curso', 'quero desistir', 'vou desistir',
+        'preciso cancelar', 'preciso trancar', 'desejo cancelar', 'desejo trancar',
+        'quero realizar o cancelamento', 'quero fazer o cancelamento',
+        'cancelar matrícula', 'cancelar matricula', 'trancar matrícula', 'trancar matricula',
+    ]
+    retention_question_words = [
+        'prazo', 'data', 'quando', 'como funciona', 'como solicitar', 'quanto custa',
+        'valor', 'taxa', 'multa', 'processo', 'procedimento', 'posso solicitar',
+        'até que', 'ate que', 'qual o prazo',
+    ]
+    is_question_about = any(w in q for w in retention_question_words)
+    if not is_question_about and any(w in q for w in retention_phrases):
+        return {
+            'type': 'flow_retention',
+            'text': 'Entendi sua situação. Vou te encaminhar para nosso consultor especializado que poderá te ajudar. Um momento, por favor!',
+            'buttons': []
+        }
+
     # "Não, obrigado" / closing
     close_match = any(w in q for w in CLOSING_WORDS) or q in ('não obrigado', 'nao obrigado', 'encerrar', 'não', 'nao',
                                                                'não preciso', 'nao preciso', 'pode encerrar', 'fechar')
@@ -1007,18 +1052,49 @@ def generate_flow_buttons(pergunta: str, confianca: float, history: list = None)
 
 # --- Routes: Test / Playground ---
 
+def describe_image_for_rag(image_b64: str, image_mime: str, user_text: str = '') -> str:
+    """Usa GPT-4o-mini vision para descrever a imagem e gerar uma query de busca RAG."""
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    try:
+        prompt_text = user_text or ''
+        chat = client.chat.completions.create(
+            model='gpt-4o-mini',
+            messages=[
+                {'role': 'system', 'content': (
+                    'Você é um assistente de suporte acadêmico. O aluno enviou uma imagem (possivelmente um print de tela). '
+                    'Descreva em 1-2 frases curtas O QUE a imagem mostra (ex: "tela do portal do aluno mostrando erro de acesso ao Blackboard"). '
+                    'Foque em identificar: qual plataforma/tela é, qual problema ou dúvida o aluno pode ter. '
+                    'Responda APENAS com a descrição, sem saudação.'
+                )},
+                {'role': 'user', 'content': [
+                    {"type": "text", "text": prompt_text or "O que esta imagem mostra?"},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:{image_mime or 'image/jpeg'};base64,{image_b64}",
+                        "detail": "low"
+                    }}
+                ]}
+            ],
+            max_tokens=100, temperature=0.2
+        )
+        desc = chat.choices[0].message.content.strip()
+        return desc
+    except Exception as e:
+        return user_text or 'dúvida do aluno sobre plataforma acadêmica'
+
+
 @app.post("/api/test")
 async def test_question(data: TestRequest):
-    if not data.pergunta.strip(): raise HTTPException(400, "Pergunta é obrigatória")
+    if not data.pergunta.strip() and not data.image_b64:
+        raise HTTPException(400, "Pergunta ou imagem é obrigatória")
 
     try:
-        q = data.pergunta.strip()
+        q = data.pergunta.strip() or '[imagem enviada]'
         q_lower = q.lower().rstrip('!?.,').strip()
 
         # --- Pre-check: Flow-only responses (no LLM needed) ---
         pre_flow = generate_flow_buttons(q, 1.0, data.history)
 
-        if pre_flow and pre_flow.get('type') in ('flow_resolved', 'flow_close', 'flow_escalate', 'flow_submenu'):
+        if pre_flow and pre_flow.get('type') in ('flow_resolved', 'flow_close', 'flow_escalate', 'flow_submenu', 'flow_retention'):
             return {
                 'resposta': pre_flow['text'],
                 'confianca': 1.0,
@@ -1044,8 +1120,15 @@ async def test_question(data: TestRequest):
                 'referencias': []
             }
 
+        # --- Vision: se tem imagem, gera descrição para melhorar busca RAG ---
+        image_description = None
+        if data.image_b64:
+            image_description = describe_image_for_rag(data.image_b64, data.image_mime, q if q != '[imagem enviada]' else '')
+            if q == '[imagem enviada]':
+                q = image_description
+
         # --- Translate button clicks (L2/L3) to real questions for RAG ---
-        search_query = q
+        search_query = image_description or q
         stripped_q = q_lower
         for emoji in '🔑💰📚📄🔄👤🧾💳🤝💸🆕📱🖥️📅📖📝📋📎💲🏷️📈🔒💠⚠️📧🌐📨📊⏰':
             stripped_q = stripped_q.replace(emoji + ' ', '').replace(emoji, '')
@@ -1133,7 +1216,7 @@ async def test_question(data: TestRequest):
                 prompt_text = pv['system_prompt'].replace('{references}', refs).replace('{history}', history_text)
                 prompt_text = prompt_text.replace('{student_context}', student_ctx).replace('{memory_context}', memory_ctx).replace('{sentiment_context}', sentiment_ctx)
                 model = data.model or pv['model']
-                llm = call_llm(data.pergunta, prompt_text, model, pv['temperature'], pv['max_tokens'], data.history)
+                llm = call_llm(data.pergunta, prompt_text, model, pv['temperature'], pv['max_tokens'], data.history, image_b64=data.image_b64, image_mime=data.image_mime)
             else:
                 raise HTTPException(404, "Prompt não encontrado")
         else:
@@ -1141,7 +1224,7 @@ async def test_question(data: TestRequest):
             prompt_text = active['system_prompt'].replace('{references}', refs).replace('{history}', history_text)
             prompt_text = prompt_text.replace('{student_context}', student_ctx).replace('{memory_context}', memory_ctx).replace('{sentiment_context}', sentiment_ctx)
             model = data.model or active['model']
-            llm = call_llm(data.pergunta, prompt_text, model, active['temperature'], active['max_tokens'], data.history)
+            llm = call_llm(data.pergunta, prompt_text, model, active['temperature'], active['max_tokens'], data.history, image_b64=data.image_b64, image_mime=data.image_mime)
 
         # Determine follow-up buttons based on flow state
         flow_buttons = generate_flow_buttons(data.pergunta, llm['confianca'], data.history)
@@ -1989,6 +2072,123 @@ async def sentiment_dashboard(
         }
 
 
+# ===================== CONVERSAS ANALYTICS =====================
+
+@app.get("/api/conversations/analytics")
+async def conversations_analytics(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    tema: Optional[str] = None,
+    acao: Optional[str] = None,
+    sentimento: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+):
+    filters = " WHERE 1=1"
+    params = []
+
+    if start_date:
+        filters += " AND s.created_at >= %s"
+        params.append(start_date)
+    if end_date:
+        filters += " AND s.created_at <= %s"
+        params.append(end_date + ' 23:59:59')
+    if tema:
+        filters += " AND s.tema = %s"
+        params.append(tema)
+    if sentimento:
+        filters += " AND s.sentimento = %s"
+        params.append(sentimento)
+
+    log_filters = " WHERE 1=1"
+    log_params = []
+    if start_date:
+        log_filters += " AND created_at >= %s"
+        log_params.append(start_date)
+    if end_date:
+        log_filters += " AND created_at <= %s"
+        log_params.append(end_date + ' 23:59:59')
+    if acao:
+        log_filters += " AND acao = %s"
+        log_params.append(acao)
+
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        cur.execute(f"SELECT count(*) as total FROM interaction_summary s {filters}", params)
+        total = cur.fetchone()['total']
+
+        cur.execute(f"SELECT count(*) as cnt FROM interaction_summary s {filters} AND resolvido = 'sim'", params)
+        resolved = cur.fetchone()['cnt']
+
+        cur.execute(f"SELECT avg(nps_implicito) as avg_nps FROM interaction_summary s {filters} AND nps_implicito IS NOT NULL", params)
+        avg_nps = cur.fetchone()['avg_nps'] or 0
+
+        cur.execute(f"SELECT count(*) as cnt FROM ia_interaction_log {log_filters} AND acao = 'retention'", log_params)
+        retentions = cur.fetchone()['cnt']
+
+        cur.execute(f"""SELECT tema, count(*) as cnt FROM interaction_summary s {filters}
+            AND tema IS NOT NULL GROUP BY tema ORDER BY cnt DESC""", params)
+        by_tema = [{'tema': r['tema'], 'count': r['cnt']} for r in cur.fetchall()]
+
+        cur.execute(f"""SELECT acao, count(*) as cnt FROM ia_interaction_log {log_filters}
+            GROUP BY acao ORDER BY cnt DESC""", log_params)
+        by_acao = [{'acao': r['acao'], 'count': r['cnt']} for r in cur.fetchall()]
+
+        cur.execute(f"""SELECT date(s.created_at) as day, count(*) as cnt
+            FROM interaction_summary s {filters}
+            GROUP BY date(s.created_at) ORDER BY day""", params)
+        by_day = [{'day': str(r['day']), 'count': r['cnt']} for r in cur.fetchall()]
+
+        cur.execute(f"""SELECT sentimento, count(*) as cnt FROM interaction_summary s {filters}
+            AND sentimento IS NOT NULL GROUP BY sentimento ORDER BY cnt DESC""", params)
+        by_sentimento = [{'sentimento': r['sentimento'], 'count': r['cnt']} for r in cur.fetchall()]
+
+        cur.execute(f"""SELECT tema, subtema, count(*) as cnt FROM interaction_summary s {filters}
+            AND subtema IS NOT NULL GROUP BY tema, subtema ORDER BY cnt DESC LIMIT 15""", params)
+        top_subtemas = [{'tema': r['tema'], 'subtema': r['subtema'], 'count': r['cnt']} for r in cur.fetchall()]
+
+        offset = (page - 1) * per_page
+        cur.execute(f"""SELECT s.* FROM interaction_summary s {filters}
+            ORDER BY s.created_at DESC LIMIT %s OFFSET %s""", params + [per_page, offset])
+        details = []
+        for r in cur.fetchall():
+            item = dict(r)
+            if item.get('created_at'):
+                item['created_at'] = item['created_at'].isoformat()
+            details.append(item)
+
+        resolution_rate = round(resolved / total * 100, 1) if total > 0 else 0
+
+        temas_list = [t['tema'] for t in by_tema]
+        sentimentos_list = list(set(s['sentimento'] for s in by_sentimento))
+        acoes_list = [a['acao'] for a in by_acao]
+
+        return {
+            'summary': {
+                'total': total,
+                'resolved': resolved,
+                'resolution_rate': resolution_rate,
+                'avg_nps': round(float(avg_nps), 1),
+                'retentions': retentions,
+            },
+            'by_tema': by_tema,
+            'by_acao': by_acao,
+            'by_day': by_day,
+            'by_sentimento': by_sentimento,
+            'top_subtemas': top_subtemas,
+            'details': details,
+            'details_total': total,
+            'details_page': page,
+            'details_per_page': per_page,
+            'filter_options': {
+                'temas': temas_list,
+                'sentimentos': sentimentos_list,
+                'acoes': acoes_list,
+            }
+        }
+
+
 # ===================== BLOCO C: EQUIPE (SUPABASE) =====================
 
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
@@ -2454,6 +2654,73 @@ async def agent_reload():
         conn.commit()
     return {"reload_requested": True}
 
+
+_agent_process = None
+_agent_log_file = None
+_agent_test_phone = '11970617878'
+_AGENT_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'agent_live.log')
+
+@app.get("/api/agent/live/status")
+async def agent_live_status():
+    global _agent_process
+    running = _agent_process is not None and _agent_process.poll() is None
+    return {"running": running, "phone": _agent_test_phone if running else None, "pid": _agent_process.pid if running else None}
+
+@app.get("/api/agent/live/logs")
+async def agent_live_logs(lines: int = 80):
+    try:
+        with open(_AGENT_LOG_PATH, 'r', encoding='utf-8', errors='replace') as f:
+            all_lines = f.readlines()
+        return {"lines": all_lines[-lines:]}
+    except FileNotFoundError:
+        return {"lines": []}
+
+@app.post("/api/agent/live/start")
+async def agent_live_start():
+    global _agent_process, _agent_log_file
+    if _agent_process is not None and _agent_process.poll() is None:
+        return {"ok": False, "msg": "Agente já está rodando", "pid": _agent_process.pid}
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM msg_dedup WHERE processed_at > NOW() - INTERVAL '2 hours'")
+            conn.commit()
+            cur.close()
+    except Exception:
+        pass
+    env = os.environ.copy()
+    env['PHONE_TO_MONITOR'] = _agent_test_phone
+    _agent_log_file = open(_AGENT_LOG_PATH, 'w', encoding='utf-8', errors='replace')
+    creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+    _agent_process = subprocess.Popen(
+        [sys.executable, '-u', 'agente_ao_vivo_v4.py'],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        env=env,
+        stdout=_agent_log_file, stderr=subprocess.STDOUT,
+        creationflags=creation_flags,
+    )
+    return {"ok": True, "msg": f"Agente iniciado (phone={_agent_test_phone})", "pid": _agent_process.pid}
+
+@app.post("/api/agent/live/stop")
+async def agent_live_stop():
+    global _agent_process, _agent_log_file
+    if _agent_process is None or _agent_process.poll() is not None:
+        _agent_process = None
+        if _agent_log_file:
+            _agent_log_file.close()
+            _agent_log_file = None
+        return {"ok": True, "msg": "Agente não estava rodando"}
+    pid = _agent_process.pid
+    _agent_process.terminate()
+    try:
+        _agent_process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        _agent_process.kill()
+    _agent_process = None
+    if _agent_log_file:
+        _agent_log_file.close()
+        _agent_log_file = None
+    return {"ok": True, "msg": f"Agente parado (pid={pid})"}
 
 @app.post("/api/agent/restart")
 async def agent_restart():
