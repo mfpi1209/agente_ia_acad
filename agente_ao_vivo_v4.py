@@ -2770,6 +2770,18 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         waiting_for_client = True; inactivity_start = time.time()
         return
 
+    # === BLOQUEIO: aluno NÃO está na pipeline BASE DE ALUNOS ===
+    if _student_in_base is False:
+        p(f"  Aluno NÃO na base -> reapresentando opções de identificação")
+        msg = ("Para que eu possa te atender, preciso primeiro confirmar seus dados.\n\n"
+               "Por favor, escolha uma das opções abaixo: 👇")
+        meta_typing_on()
+        send_and_track(conv_id, msg, buttons=NOT_IN_BASE_BUTTONS)
+        conversation_messages.append({'role': 'bot', 'text': msg})
+        log_to_db(conv_id, question, msg, 1.0, 'not_in_base_block')
+        waiting_for_client = True; inactivity_start = time.time()
+        return
+
     # === RESOLVEU ===
     if any(w in q_lower for w in RESOLVED_WORDS):
         msg = f"Que bom que pude ajudar{name_suffix}! Se precisar de algo no futuro, estou à disposição. Até mais! 😊"
