@@ -2712,7 +2712,15 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             p(f"  Aluno NA BASE -> saudação + menu")
         else:
             _student_in_base = False
-            p(f"  Aluno NÃO está na pipeline BASE DE ALUNOS -> IGNORANDO (sem resposta)")
+            p(f"  Aluno NÃO encontrado na pipeline -> fluxo de identificação")
+            msg = ("👋 Oi, tudo bem?\n\n"
+                   "Não localizei este telefone que estamos conversando em nossa base de dados!\n\n"
+                   "Para continuarmos, por favor *digite* uma das opções abaixo: 👇")
+            meta_typing_on()
+            send_and_track(conv_id, msg, buttons=NOT_IN_BASE_BUTTONS)
+            conversation_messages.append({'role': 'bot', 'text': msg})
+            log_to_db(conv_id, question, msg, 1.0, 'not_in_base')
+            waiting_for_client = True; inactivity_start = time.time()
             return
 
         TOPIC_LABELS = {
@@ -2764,7 +2772,14 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
 
     # === BLOQUEIO: aluno NÃO está na pipeline BASE DE ALUNOS ===
     if _student_in_base is False:
-        p(f"  Aluno NÃO na pipeline BASE DE ALUNOS -> IGNORANDO (sem resposta)")
+        p(f"  Aluno NÃO na pipeline -> reapresentando opções de identificação")
+        msg = ("Para que eu possa te atender, preciso primeiro te localizar em nosso sistema.\n\n"
+               "Por favor, escolha uma das opções abaixo: 👇")
+        meta_typing_on()
+        send_and_track(conv_id, msg, buttons=NOT_IN_BASE_BUTTONS)
+        conversation_messages.append({'role': 'bot', 'text': msg})
+        log_to_db(conv_id, question, msg, 1.0, 'not_in_base_block')
+        waiting_for_client = True; inactivity_start = time.time()
         return
 
     # === RESOLVEU ===
