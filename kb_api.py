@@ -2690,6 +2690,7 @@ async def agent_live_start():
         pass
     env = os.environ.copy()
     env['PHONE_TO_MONITOR'] = _agent_test_phone
+    env['PYTHONUNBUFFERED'] = '1'
     _agent_log_file = open(_AGENT_LOG_PATH, 'w', encoding='utf-8', errors='replace')
     creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
     _agent_process = subprocess.Popen(

@@ -1992,6 +1992,15 @@ def _dcz_transfer_business(phone, attendant_name):
             json={'responsibleId': att_id}, timeout=10
         )
         p(f"  [DIST] Business {biz_id[:16]} -> responsibleId={att_id[:12]} (status={r2.status_code})")
+        # Mover para o stage de Atendimento
+        try:
+            r3 = requests.patch(
+                f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+                json={'stageId': STAGE_ATENDIMENTO_ID}, timeout=10
+            )
+            p(f"  [DIST] Business {biz_id[:16]} -> stageId=Atendimento (status={r3.status_code})")
+        except Exception:
+            pass
         return r2.status_code in (200, 201)
     except Exception as e:
         p(f"  [DIST] Erro business transfer: {e}")
@@ -3338,10 +3347,23 @@ def main():
             convs = convs_data.get('data', convs_data) if isinstance(convs_data, dict) else convs_data
             if not isinstance(convs, list) or not convs:
                 continue
-            convs.sort(key=lambda c: c.get('lastReceivedMessageDate', ''), reverse=True)
-            convs = convs[:20]
+
+            # Separar: conversas onde aluno espera resposta (prioridade) vs resto
+            waiting = []
+            rest = []
+            for c in convs:
+                recv = c.get('lastReceivedMessageDate', '') or ''
+                sent = c.get('lastSendedMessageDate', '') or ''
+                if recv > sent:
+                    waiting.append(c)
+                else:
+                    rest.append(c)
+            waiting.sort(key=lambda c: c.get('lastReceivedMessageDate', ''))
+            rest.sort(key=lambda c: c.get('lastReceivedMessageDate', ''), reverse=True)
+            convs = (waiting[:15] + rest[:5])[:20]
 
             for conv in convs:
+              try:
                 conv_id = conv.get('id', '')
                 if not conv_id:
                     continue
@@ -3393,6 +3415,9 @@ def main():
                     p(f"  >>> MSG [{conv_phone[-4:] if conv_phone else '????'}]: \"{msg_body[:80]}\"{' [+IMG]' if img_info else ''}")
                     handle_message(conv_id, msg_id, msg_body, is_click, image_info=img_info)
                     _save_conv_state(conv_id)
+              except Exception as conv_err:
+                p(f"  ERR conv {conv.get('id','?')[:12]}: {type(conv_err).__name__}: {conv_err}")
+                sys.stdout.flush()
 
             # === FOLLOW-UP & ENCERRAMENTO POR INATIVIDADE (para TODAS conversas) ===
             for cid, st in list(_conv_states.items()):
