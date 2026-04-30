@@ -113,7 +113,7 @@ GREETINGS = {
 }
 
 RESOLVED_WORDS = {'sim resolveu', 'resolveu', 'resolveu!', 'sim obrigado', 'sim obrigada', 'resolvido', 'era isso', 'ajudou', 'ajudou!'}
-ESCALATE_WORDS = {'falar com atendente', 'atendente', 'humano', 'falar com alguem', 'transferir'}
+ESCALATE_WORDS = {'falar com atendente', 'falar com atendimento', 'atendente', 'atendimento', 'humano', 'falar com alguem', 'transferir'}
 CLOSING_WORDS = {'obrigado', 'obrigada', 'valeu', 'vlw', 'tchau', 'até mais', 'ate mais', 'brigado', 'brigada'}
 
 FRUSTRATION_WORDS = [
@@ -647,6 +647,7 @@ def _load_conv_state(conv_id):
 
 def _save_conv_state(conv_id):
     """Salva o estado das variáveis globais de volta no dicionário."""
+    prev = _conv_states.get(conv_id, {})
     _conv_states[conv_id] = {
         'student_profile': student_profile,
         'conversation_messages': conversation_messages,
@@ -659,6 +660,7 @@ def _save_conv_state(conv_id):
         '_awaiting_polo_confirm': _awaiting_polo_confirm,
         'phone': _current_phone,
         'greeted': conv_id in conversation_greeted,
+        '_human_took_over': prev.get('_human_took_over', False),
     }
 
 # ===================== HELPERS =====================
@@ -1738,8 +1740,23 @@ def _track_sent_body(text):
 
 
 def _is_echo_of_sent(text):
-    """Verifica se texto é eco de algo enviado pelo bot recentemente."""
-    return _db_is_duplicate_body(text, window_seconds=120)
+    """Verifica se texto é eco de algo enviado pelo bot/agente recentemente.
+    Só consulta hashes originados de send_and_track (msg_id LIKE 'sent_%')."""
+    body_hash = hashlib.md5(text.strip().lower().encode()).hexdigest()
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM msg_dedup WHERE body_hash = %s AND msg_id LIKE 'sent_%%' "
+            "AND processed_at > NOW() - INTERVAL '120 seconds' LIMIT 1",
+            (body_hash,)
+        )
+        exists = cur.fetchone() is not None
+        cur.close()
+        conn.close()
+        return exists
+    except Exception:
+        return False
 
 
 def send_and_track(conv_id, text, buttons=None):
@@ -2166,17 +2183,37 @@ def trigger_retention(conv_id, lead_id, question):
         )
         p(f"  [RETENÇÃO] Nota interna enviada na conversa")
 
+        _dcz_transfer_chat(conv_id, 'Wesley')
+        p(f"  [RETENÇÃO] Chat transferido para Wesley")
+
+        if conv_id in _conv_states:
+            _conv_states[conv_id]['_human_took_over'] = True
+
     except Exception as e:
         p(f"  [RETENÇÃO] Erro: {e}")
 
 
+RETENTION_SINGLE_WORDS = [
+    'cancelar', 'trancar', 'cancelamento', 'trancamento', 'desistir',
+]
+RETENTION_URGENCY_PHRASES = [
+    'acionar a justiça', 'acionar a justica', 'acionar justiça', 'acionar justica',
+    'vou processar', 'entrar na justiça', 'entrar na justica',
+    'procon', 'reclame aqui', 'advogado', 'processo judicial',
+]
+
 def is_retention_intent(text):
     """Detecta intenção REAL de cancelar/trancar. Ignora perguntas sobre o processo."""
     t = text.lower().strip()
+    if any(u in t for u in RETENTION_URGENCY_PHRASES):
+        return True
     if any(q in t for q in RETENTION_QUESTION_WORDS):
         return False
     for phrase in RETENTION_PHRASES:
         if phrase in t:
+            return True
+    for word in RETENTION_SINGLE_WORDS:
+        if word in t:
             return True
     return False
 
@@ -2283,8 +2320,8 @@ def _wait_automation_finish(conv_id, max_wait=30, stable_time=5):
 
 def _check_human_took_over(conv_id):
     """Verifica se um consultor humano enviou mensagem na conversa.
-    Só analisa mensagens enviadas APÓS o startup do agente que NÃO foram
-    enviadas pelo próprio agente (via processed_msg_ids ou is_bot_message)."""
+    Só analisa mensagens enviadas APÓS o startup do agente que NÃO
+    foram enviadas pelo próprio agente (tracked por ID ou body hash)."""
     msgs = _cached_msgs.get(conv_id) or get_conversation_messages_api(conv_id, limit=10)
     for m in msgs:
         if m.get('received', True):
@@ -2296,8 +2333,8 @@ def _check_human_took_over(conv_id):
         if not msg_ts:
             continue
         try:
-            from datetime import datetime
-            dt = datetime.fromisoformat(str(msg_ts).replace('Z', '+00:00'))
+            from datetime import datetime as _dt
+            dt = _dt.fromisoformat(str(msg_ts).replace('Z', '+00:00'))
             if dt.timestamp() < _startup_ts:
                 continue
         except Exception:
@@ -2309,35 +2346,63 @@ def _check_human_took_over(conv_id):
             continue
         if is_bot_message(body):
             continue
+        if _db_is_duplicate_body(body, window_seconds=3600):
+            continue
+        p(f"  [HUMAN-DBG] conv={conv_id[:12]} mid={mid[:12]} body={body[:60]}")
         return True
     return False
 
 
 def get_new_client_message(conv_id):
-    """Retorna (msg_id, body, is_button_click, image_info)."""
+    """Retorna (msg_id, body, is_button_click, image_info).
+    Processa a mensagem mais recente do aluno que ainda não foi respondida."""
     msgs = get_conversation_messages_api(conv_id, limit=10)
     _cached_msgs[conv_id] = msgs
+
+    # Determinar se existe resposta REAL do bot APÓS a última msg do aluno.
+    # Compara timestamps: só conta como "respondido" se outgoing é mais recente que incoming.
+    has_outgoing_response = False
+    last_incoming_ts = ''
+    last_outgoing_ts = ''
+    for m in msgs:
+        body_check = (m.get('body', '') or '').strip()
+        if not body_check or m.get('isInternal', False):
+            continue
+        ts = m.get('createdAt', '') or m.get('timestamp', '') or ''
+        if m.get('received', False):
+            if not last_incoming_ts:
+                last_incoming_ts = ts
+        else:
+            if not last_outgoing_ts:
+                last_outgoing_ts = ts
+    if last_outgoing_ts and last_incoming_ts and last_outgoing_ts >= last_incoming_ts:
+        has_outgoing_response = True
+
     for m in msgs:
         mid = m.get('id', '')
         if mid in processed_msg_ids:
             continue
 
-        # Ignorar mensagens anteriores ao startup do agente
+        # Para msgs anteriores ao startup: processar se NÃO houver resposta do bot
+        # (aluno esperando). Limitar a 2h para evitar processar msgs muito antigas.
         if _startup_ts > 0:
             msg_ts = m.get('createdAt', '') or m.get('timestamp', '') or ''
             if msg_ts:
                 try:
                     from datetime import datetime
                     dt = datetime.fromisoformat(str(msg_ts).replace('Z', '+00:00'))
+                    msg_age = _startup_ts - dt.timestamp()
                     if dt.timestamp() < _startup_ts:
-                        processed_msg_ids.add(mid)
-                        continue
+                        if has_outgoing_response or msg_age > 7200:
+                            processed_msg_ids.add(mid)
+                            continue
                 except Exception:
                     pass
 
         received = m.get('received', False)
         if not received:
             processed_msg_ids.add(mid)
+            has_outgoing_response = True
             continue
 
         image_info = extract_image_from_message(m)
@@ -2377,10 +2442,6 @@ def get_new_client_message(conv_id):
             continue
         if _is_echo_of_sent(body):
             p(f"  SKIP echo: \"{body[:60]}\"")
-            processed_msg_ids.add(mid)
-            continue
-        if _db_is_duplicate_body(body, window_seconds=45):
-            p(f"  SKIP dup-body: \"{body[:60]}\"")
             processed_msg_ids.add(mid)
             continue
         if not _db_claim_message(mid, body):
@@ -3349,18 +3410,23 @@ def main():
                 continue
 
             # Separar: conversas onde aluno espera resposta (prioridade) vs resto
+            # Filtrar waiting para apenas as últimas 2h (matching limite em get_new_client_message)
+            from datetime import datetime, timezone
+            cutoff_iso = datetime.fromtimestamp(
+                time.time() - 7200, tz=timezone.utc
+            ).strftime('%Y-%m-%dT%H:%M:%S')
             waiting = []
             rest = []
             for c in convs:
                 recv = c.get('lastReceivedMessageDate', '') or ''
                 sent = c.get('lastSendedMessageDate', '') or ''
-                if recv > sent:
+                if recv > sent and recv >= cutoff_iso:
                     waiting.append(c)
                 else:
                     rest.append(c)
             waiting.sort(key=lambda c: c.get('lastReceivedMessageDate', ''))
             rest.sort(key=lambda c: c.get('lastReceivedMessageDate', ''), reverse=True)
-            convs = (waiting[:15] + rest[:5])[:20]
+            convs = waiting + rest[:5]
 
             for conv in convs:
               try:
