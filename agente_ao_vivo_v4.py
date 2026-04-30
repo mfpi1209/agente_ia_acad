@@ -3281,9 +3281,12 @@ def main():
             cycle += 1
             maybe_reload()
 
-            # Busca TODAS as conversas abertas recentes
-            r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
-                            params={'limit': 20, 'status': 'open'}, timeout=10)
+            # Busca conversas abertas recentes
+            try:
+                r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
+                                params={'limit': 20, 'status': 'open'}, timeout=10)
+            except Exception:
+                continue
             if r.status_code != 200:
                 continue
 
@@ -3291,6 +3294,8 @@ def main():
             convs = convs_data.get('data', convs_data) if isinstance(convs_data, dict) else convs_data
             if not isinstance(convs, list) or not convs:
                 continue
+            convs.sort(key=lambda c: c.get('lastReceivedMessageDate', ''), reverse=True)
+            convs = convs[:20]
 
             for conv in convs:
                 conv_id = conv.get('id', '')
@@ -3319,7 +3324,10 @@ def main():
                     _current_phone = conv_phone
                     _conv_states.setdefault(conv_id, _default_conv_state())['phone'] = conv_phone
 
-                msg_id, msg_body, is_click, img_info = get_new_client_message(conv_id)
+                try:
+                    msg_id, msg_body, is_click, img_info = get_new_client_message(conv_id)
+                except Exception:
+                    msg_id = msg_body = is_click = img_info = None
                 if msg_id and msg_body:
                     if not _current_phone and conv_phone:
                         _current_phone = conv_phone
