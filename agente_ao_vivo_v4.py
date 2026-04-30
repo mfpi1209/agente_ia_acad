@@ -622,6 +622,7 @@ def _default_conv_state():
         '_awaiting_polo_confirm': False,
         'phone': '',
         'greeted': False,
+        '_human_took_over': False,
     }
 
 def _load_conv_state(conv_id):
@@ -1988,9 +1989,9 @@ def _dcz_transfer_business(phone, attendant_name):
             return False
         r2 = requests.patch(
             f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
-            json={'attendantId': att_id}, timeout=10
+            json={'responsibleId': att_id}, timeout=10
         )
-        p(f"  [DIST] Business {biz_id[:16]} -> attendantId={att_id[:12]} (status={r2.status_code})")
+        p(f"  [DIST] Business {biz_id[:16]} -> responsibleId={att_id[:12]} (status={r2.status_code})")
         return r2.status_code in (200, 201)
     except Exception as e:
         p(f"  [DIST] Erro business transfer: {e}")
@@ -2091,6 +2092,8 @@ def distribute_to_attendant(conv_id, reason=''):
     send_and_track(conv_id, client_msg)
 
     p(f"  [DIST] ✅ Distribuição concluída para {nome}")
+    if conv_id in _conv_states:
+        _conv_states[conv_id]['_human_took_over'] = True
     return True
 
 
@@ -2267,6 +2270,38 @@ def _wait_automation_finish(conv_id, max_wait=30, stable_time=5):
             break
         time.sleep(2)
     p(f"    Automação estável após {time.time() - start:.0f}s ({prev_count} msgs saída)")
+
+
+def _check_human_took_over(conv_id):
+    """Verifica se um consultor humano enviou mensagem na conversa.
+    Só analisa mensagens enviadas APÓS o startup do agente que NÃO foram
+    enviadas pelo próprio agente (via processed_msg_ids ou is_bot_message)."""
+    msgs = _cached_msgs.get(conv_id) or get_conversation_messages_api(conv_id, limit=10)
+    for m in msgs:
+        if m.get('received', True):
+            continue
+        mid = m.get('id', '')
+        if mid in processed_msg_ids:
+            continue
+        msg_ts = m.get('createdAt', '') or m.get('timestamp', '') or ''
+        if not msg_ts:
+            continue
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(str(msg_ts).replace('Z', '+00:00'))
+            if dt.timestamp() < _startup_ts:
+                continue
+        except Exception:
+            continue
+        if m.get('isInternal', False):
+            continue
+        body = (m.get('body', '') or '').strip()
+        if not body:
+            continue
+        if is_bot_message(body):
+            continue
+        return True
+    return False
 
 
 def get_new_client_message(conv_id):
@@ -2710,6 +2745,15 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         time.sleep(wait)
 
     is_first = conv_id not in conversation_greeted
+    if is_first:
+        cached = _cached_msgs.get(conv_id) or []
+        for cm in cached:
+            if not cm.get('received', True):
+                body_check = (cm.get('body', '') or '').strip()
+                if body_check and is_bot_message(body_check):
+                    is_first = False
+                    p(f"  Conversa já tinha msgs do bot -> NÃO é primeira interação")
+                    break
     conversation_greeted.add(conv_id)
     conversation_messages.append({'role': 'user', 'text': question})
     q_lower = question.lower().strip().rstrip('!?.,').strip()
@@ -3324,10 +3368,25 @@ def main():
                     _current_phone = conv_phone
                     _conv_states.setdefault(conv_id, _default_conv_state())['phone'] = conv_phone
 
+                # Se consultor humano já assumiu, não processar mais nada
+                st = _conv_states.get(conv_id, {})
+                if st.get('_human_took_over'):
+                    continue
+
                 try:
                     msg_id, msg_body, is_click, img_info = get_new_client_message(conv_id)
                 except Exception:
                     msg_id = msg_body = is_click = img_info = None
+
+                # Detectar se consultor humano enviou mensagem nesta conversa
+                if _check_human_took_over(conv_id):
+                    p(f"  [HUMAN] [{conv_phone[-4:] if conv_phone else '????'}] Consultor humano detectado -> agente recuando")
+                    _conv_states.setdefault(conv_id, _default_conv_state())['_human_took_over'] = True
+                    if msg_id:
+                        processed_msg_ids.add(msg_id)
+                    _save_conv_state(conv_id)
+                    continue
+
                 if msg_id and msg_body:
                     if not _current_phone and conv_phone:
                         _current_phone = conv_phone
@@ -3337,6 +3396,8 @@ def main():
 
             # === FOLLOW-UP & ENCERRAMENTO POR INATIVIDADE (para TODAS conversas) ===
             for cid, st in list(_conv_states.items()):
+                if st.get('_human_took_over'):
+                    continue
                 if st.get('waiting_for_client') and st.get('inactivity_start', 0) > 0:
                     elapsed = time.time() - st['inactivity_start']
                     sp = st.get('student_profile')
