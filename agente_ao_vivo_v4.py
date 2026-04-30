@@ -599,11 +599,66 @@ last_response_time = 0
 RESPONSE_COOLDOWN = 1.0
 followup_stage = 0
 waiting_for_client = False
-inactivity_start = 0      # timestamp de quando o bot respondeu e começou a esperar o cliente
-_last_auto_skipped = False  # True se a última interação foi silenciada por automação DataCrazy
-_awaiting_cpf = False       # True quando aguardamos o aluno digitar o CPF
-_student_in_base = None     # None=nao verificado, True=confirmado, False=nao encontrado
-_awaiting_polo_confirm = False  # True quando perguntamos "Você é matriculado em algum dos polos acima?"
+inactivity_start = 0
+_last_auto_skipped = False
+_awaiting_cpf = False
+_student_in_base = None
+_awaiting_polo_confirm = False
+
+# Estado por conversa para modo multi-atendimento
+_conv_states = {}
+_current_phone = None  # telefone do aluno sendo processado neste ciclo
+
+def _default_conv_state():
+    return {
+        'student_profile': None,
+        'conversation_messages': [],
+        'followup_stage': 0,
+        'waiting_for_client': False,
+        'inactivity_start': 0,
+        '_last_auto_skipped': False,
+        '_awaiting_cpf': False,
+        '_student_in_base': None,
+        '_awaiting_polo_confirm': False,
+        'phone': '',
+        'greeted': False,
+    }
+
+def _load_conv_state(conv_id):
+    """Carrega o estado de uma conversa nas variáveis globais."""
+    global student_profile, conversation_messages, followup_stage, waiting_for_client
+    global inactivity_start, _last_auto_skipped, _awaiting_cpf, _student_in_base
+    global _awaiting_polo_confirm, active_conv_id, _current_phone
+    st = _conv_states.get(conv_id) or _default_conv_state()
+    student_profile = st['student_profile']
+    conversation_messages = st['conversation_messages']
+    followup_stage = st['followup_stage']
+    waiting_for_client = st['waiting_for_client']
+    inactivity_start = st['inactivity_start']
+    _last_auto_skipped = st['_last_auto_skipped']
+    _awaiting_cpf = st['_awaiting_cpf']
+    _student_in_base = st['_student_in_base']
+    _awaiting_polo_confirm = st['_awaiting_polo_confirm']
+    _current_phone = st.get('phone', '')
+    active_conv_id = conv_id
+    if st.get('greeted'):
+        conversation_greeted.add(conv_id)
+
+def _save_conv_state(conv_id):
+    """Salva o estado das variáveis globais de volta no dicionário."""
+    _conv_states[conv_id] = {
+        'student_profile': student_profile,
+        'conversation_messages': conversation_messages,
+        'followup_stage': followup_stage,
+        'waiting_for_client': waiting_for_client,
+        'inactivity_start': inactivity_start,
+        '_last_auto_skipped': _last_auto_skipped,
+        '_awaiting_cpf': _awaiting_cpf,
+        '_student_in_base': _student_in_base,
+        '_awaiting_polo_confirm': _awaiting_polo_confirm,
+        'phone': _current_phone,
+        'greeted': conv_id in conversation_greeted,
+    }
 
 # ===================== HELPERS =====================
 
@@ -1352,7 +1407,7 @@ def send_media_message(conv_id, media_item, caption=''):
             p(f"    Arquivo local nao encontrado: {local_path}")
             return 404
 
-    phone_full = f'55{PHONE_TO_MONITOR}'
+    phone_full = f'55{_current_phone or PHONE_TO_MONITOR}'
     wa_type = 'image' if media_type in ('IMAGE', 'image') else 'video' if media_type in ('VIDEO', 'video') else 'document'
 
     # 1) Se arquivo local, fazer upload para Meta e enviar por media_id
@@ -1565,7 +1620,7 @@ def fetch_wamid(phone):
 
 def meta_typing_on():
     """Envia typing indicator via Meta Graph API usando wamid do PostgreSQL."""
-    wamid = fetch_wamid(PHONE_TO_MONITOR)
+    wamid = fetch_wamid(_current_phone or PHONE_TO_MONITOR)
     if not wamid:
         return False
     try:
@@ -2008,7 +2063,7 @@ def distribute_to_attendant(conv_id, reason=''):
     p(f"  [DIST] Distribuindo para {nome}...")
 
     lead_id = student_profile.get('lead_id', '') if student_profile else ''
-    phone = PHONE_TO_MONITOR
+    phone = _current_phone or PHONE_TO_MONITOR
 
     _dcz_transfer_lead(lead_id, nome)
     _dcz_transfer_business(phone, nome)
@@ -2066,7 +2121,7 @@ def trigger_retention(conv_id, lead_id, question):
             try:
                 r_biz = requests.get(
                     f'{DCZ_CRM}/businesses', headers=H,
-                    params={'search': PHONE_TO_MONITOR, 'limit': 5}, timeout=10
+                    params={'search': _current_phone or PHONE_TO_MONITOR, 'limit': 5}, timeout=10
                 )
                 if r_biz.status_code == 200:
                     biz_data = r_biz.json()
@@ -2159,6 +2214,7 @@ def is_bot_message(body):
 
 _cached_msgs = {}
 _last_processed_msg_id = None
+_startup_ts = 0
 
 OUR_MSG_FINGERPRINTS = (
     'como posso te ajudar', 'escolha uma opção', 'selecione o assunto',
@@ -2221,6 +2277,20 @@ def get_new_client_message(conv_id):
         mid = m.get('id', '')
         if mid in processed_msg_ids:
             continue
+
+        # Ignorar mensagens anteriores ao startup do agente
+        if _startup_ts > 0:
+            msg_ts = m.get('createdAt', '') or m.get('timestamp', '') or ''
+            if msg_ts:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(str(msg_ts).replace('Z', '+00:00'))
+                    if dt.timestamp() < _startup_ts:
+                        processed_msg_ids.add(mid)
+                        continue
+                except Exception:
+                    pass
+
         received = m.get('received', False)
         if not received:
             processed_msg_ids.add(mid)
@@ -2499,16 +2569,18 @@ def _handle_cpf_input(conv_id, question, name_suffix):
 
     if not lead_id:
         p(f"  Lead não existe, criando...")
-        new_lead_id, new_biz_id = create_lead_and_business(PHONE_TO_MONITOR, name=lead_name)
+        cur_phone = _current_phone or PHONE_TO_MONITOR
+        new_lead_id, new_biz_id = create_lead_and_business(cur_phone, name=lead_name)
         if new_lead_id:
             lead_id = new_lead_id
             if student_profile:
                 student_profile['lead_id'] = new_lead_id
 
     biz_id = ''
+    cur_phone = _current_phone or PHONE_TO_MONITOR
     try:
         r_biz = requests.get(f'{DCZ_CRM}/businesses', headers=H,
-                            params={'search': PHONE_TO_MONITOR.replace('+','').replace(' ','').replace('-',''), 'limit': 5}, timeout=10)
+                            params={'search': cur_phone.replace('+','').replace(' ','').replace('-',''), 'limit': 5}, timeout=10)
         if r_biz.status_code == 200:
             biz_data = r_biz.json()
             biz_list = biz_data.get('data', biz_data) if isinstance(biz_data, dict) else biz_data
@@ -2517,7 +2589,7 @@ def _handle_cpf_input(conv_id, question, name_suffix):
     except Exception:
         pass
 
-    validate_student_cpf_webhook(cpf_raw, PHONE_TO_MONITOR, lead_id, biz_id, lead_name)
+    validate_student_cpf_webhook(cpf_raw, cur_phone, lead_id, biz_id, lead_name)
 
     p(f"  Aguardando resultado do webhook (polling campo Lead Existe?)...")
     lead_exists = None
@@ -2533,7 +2605,7 @@ def _handle_cpf_input(conv_id, question, name_suffix):
     if lead_exists is True:
         _student_in_base = True
         p(f"  ALUNO VALIDADO pelo CPF -> saudação + menu")
-        student_profile = identify_student(PHONE_TO_MONITOR)
+        student_profile = identify_student(_current_phone or PHONE_TO_MONITOR)
         fname = student_profile.get('first_name', '') if student_profile else ''
         if fname:
             greeting = f"*Em breve um de nossos consultores irá te chamar!*\n\nMe conta, sobre o que você deseja falar?\nPergunte de maneira simples que eu entendo melhor assim. 😊"
@@ -2642,11 +2714,12 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     conversation_messages.append({'role': 'user', 'text': question})
     q_lower = question.lower().strip().rstrip('!?.,').strip()
 
+    cur_phone = _current_phone or PHONE_TO_MONITOR
     if student_profile is None:
         p(f"  Identificando aluno...")
-        student_profile = identify_student(PHONE_TO_MONITOR)
+        student_profile = identify_student(cur_phone)
 
-    memory = load_memory(PHONE_TO_MONITOR)
+    memory = load_memory(cur_phone)
     sentiment = detect_sentiment(question)
     name_suffix = f", {student_profile['first_name']}" if student_profile and student_profile.get('first_name') else ""
 
@@ -2705,7 +2778,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     # === PRIMEIRA INTERAÇÃO: verifica se aluno está na pipeline BASE DE ALUNOS ===
     if is_first:
         p(f"  Primeira interação -> verificando se aluno está na pipeline BASE DE ALUNOS...")
-        in_pipeline = check_lead_has_pipeline(PHONE_TO_MONITOR)
+        in_pipeline = check_lead_has_pipeline(cur_phone)
 
         if in_pipeline:
             _student_in_base = True
@@ -2792,8 +2865,8 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
 
         summary = generate_conversation_summary(conversation_messages)
         topic = detect_topic_from_messages(conversation_messages)
-        save_memory(PHONE_TO_MONITOR, student_profile, topic, summary, sentiment)
-        tabulate_interaction(conversation_messages, student_profile, PHONE_TO_MONITOR)
+        save_memory(cur_phone, student_profile, topic, summary, sentiment)
+        tabulate_interaction(conversation_messages, student_profile, cur_phone)
         close_conversation_crm(conv_id)
         conversation_messages.clear()
         conversation_greeted.discard(conv_id)
@@ -2817,8 +2890,8 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
 
         summary = generate_conversation_summary(conversation_messages)
         topic = detect_topic_from_messages(conversation_messages)
-        save_memory(PHONE_TO_MONITOR, student_profile, topic, summary, sentiment)
-        tabulate_interaction(conversation_messages, student_profile, PHONE_TO_MONITOR)
+        save_memory(cur_phone, student_profile, topic, summary, sentiment)
+        tabulate_interaction(conversation_messages, student_profile, cur_phone)
         close_conversation_crm(conv_id)
         conversation_messages.clear()
         conversation_greeted.discard(conv_id)
@@ -2839,8 +2912,8 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         trigger_retention(conv_id, lead_id, question)
 
         summary = generate_conversation_summary(conversation_messages)
-        save_memory(PHONE_TO_MONITOR, student_profile, 'retencao', summary, sentiment)
-        tabulate_interaction(conversation_messages, student_profile, PHONE_TO_MONITOR)
+        save_memory(cur_phone, student_profile, 'retencao', summary, sentiment)
+        tabulate_interaction(conversation_messages, student_profile, cur_phone)
         waiting_for_client = False; inactivity_start = 0
         p(f"  [RETENÇÃO] Conversa encaminhada para Wesley - follow-ups desativados")
         return
@@ -2853,8 +2926,8 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         conversation_messages.append({'role': 'bot', 'text': ESCALATION_MSG})
 
         summary = generate_conversation_summary(conversation_messages)
-        save_memory(PHONE_TO_MONITOR, student_profile, 'escalacao', summary, sentiment)
-        tabulate_interaction(conversation_messages, student_profile, PHONE_TO_MONITOR)
+        save_memory(cur_phone, student_profile, 'escalacao', summary, sentiment)
+        tabulate_interaction(conversation_messages, student_profile, cur_phone)
         waiting_for_client = False; inactivity_start = 0
         p(f"  [ESCALADO] Distribuído={distributed} - Follow-ups desativados")
         return
@@ -3129,7 +3202,7 @@ def _init_phone(phone):
 
 def main():
     global active_conv_id, student_profile, followup_stage, waiting_for_client, inactivity_start, _last_auto_skipped
-    global _awaiting_cpf, _student_in_base, _awaiting_polo_confirm
+    global _awaiting_cpf, _student_in_base, _awaiting_polo_confirm, _current_phone
 
     load_agent_config_from_db()
     load_menus_from_db()
@@ -3137,14 +3210,16 @@ def main():
     p("")
     p("=" * 60)
     p("  AGENTE IA v4 - Identificacao + Memoria + Empatia + Tab")
-    p(f"  Monitorando: {PHONE_TO_MONITOR}")
+    p(f"  Modo: MULTI-ATENDIMENTO (todas as conversas)")
     p(f"  Polling: {POLL_INTERVAL}s | Threshold: {CONFIDENCE_THRESHOLD}")
     p(f"  Follow-up: {FOLLOWUP_1_DELAY}s / Close: {CLOSE_DELAY}s")
-    p(f"  Comandos: #testar (ativar), #sair (voltar), #help (todos)")
     p("=" * 60)
 
     ensure_memory_tables()
-    _init_phone(PHONE_TO_MONITOR)
+
+    global _startup_ts
+    _startup_ts = time.time()
+    p(f"  Startup: {time.strftime('%H:%M:%S')} (só processa mensagens novas a partir de agora)")
 
     p(f"")
     p(f"  >>> AGENTE v4 ATIVO <<<")
@@ -3209,8 +3284,9 @@ def main():
             cycle += 1
             maybe_reload()
 
+            # Busca TODAS as conversas abertas recentes
             r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
-                            params={'search': PHONE_TO_MONITOR, 'limit': 5}, timeout=10)
+                            params={'limit': 20, 'status': 'open'}, timeout=10)
             if r.status_code != 200:
                 continue
 
@@ -3219,50 +3295,90 @@ def main():
             if not isinstance(convs, list) or not convs:
                 continue
 
-            conv_id = convs[0].get('id', '')
-            msg_id, msg_body, is_click, img_info = get_new_client_message(conv_id)
-            if msg_id and msg_body:
-                p(f"  >>> MSG: \"{msg_body[:80]}\"{' [+IMAGEM]' if img_info else ''}")
-                handle_message(conv_id, msg_id, msg_body, is_click, image_info=img_info)
+            for conv in convs:
+                conv_id = conv.get('id', '')
+                if not conv_id:
+                    continue
 
-            # === FOLLOW-UP & ENCERRAMENTO POR INATIVIDADE ===
-            if waiting_for_client and active_conv_id and inactivity_start > 0:
-                elapsed = time.time() - inactivity_start
-                name_fmt = f", {student_profile['first_name']}" if student_profile and student_profile.get('first_name') else ""
+                # Extrair telefone do contato desta conversa
+                contact = conv.get('contact', {}) or {}
+                conv_phone = (contact.get('rawPhone', '') or contact.get('phone', '') or
+                              contact.get('number', '') or '')
+                if not conv_phone:
+                    lead_info = conv.get('lead', {}) or {}
+                    conv_phone = (lead_info.get('rawPhone', '') or lead_info.get('phone', '') or '')
+                if not conv_phone:
+                    conv_phone = (conv.get('contactPhone', '') or conv.get('phone', '') or
+                                  conv.get('number', '') or conv.get('from', '') or '')
+                conv_phone = str(conv_phone).replace('+', '').replace(' ', '').replace('-', '')
+                if conv_phone.startswith('55') and len(conv_phone) > 11:
+                    conv_phone = conv_phone[2:]
 
-                if followup_stage == 0 and elapsed >= FOLLOWUP_1_DELAY:
-                    msg1 = FOLLOWUP_1_MSG.format(name=name_fmt)
-                    p(f"  [FOLLOWUP-1] {int(elapsed)}s sem resposta")
-                    send_message_crm(active_conv_id, msg1, buttons=FOLLOWUP_1_BUTTONS)
-                    log_to_db(active_conv_id, '(inatividade)', msg1, 1.0, 'followup_1')
-                    followup_stage = 1
+                # Carregar estado da conversa
+                _load_conv_state(conv_id)
+                if _current_phone == '' and conv_phone:
+                    _current_phone = conv_phone
+                    _conv_states.setdefault(conv_id, _default_conv_state())['phone'] = conv_phone
 
-                elif followup_stage == 1 and elapsed >= CLOSE_DELAY:
-                    close_msg = CLOSE_INACTIVITY_MSG.format(name=name_fmt)
-                    p(f"  [AUTO-CLOSE] {int(elapsed)}s sem resposta -> encerrando")
-                    if conversation_messages:
-                        try:
-                            summary = generate_conversation_summary(conversation_messages)
-                            topic = detect_topic_from_messages(conversation_messages)
-                            save_memory(PHONE_TO_MONITOR, student_profile, topic, summary, 'neutro')
-                            tabulate_interaction(conversation_messages, student_profile, PHONE_TO_MONITOR)
-                        except Exception as e:
-                            p(f"  Erro ao salvar antes de fechar: {e}")
-                    send_message_crm(active_conv_id, close_msg, buttons=CLOSE_INACTIVITY_BUTTONS)
-                    log_to_db(active_conv_id, '(inatividade)', close_msg, 1.0, 'auto_close')
-                    close_conversation_crm(active_conv_id)
-                    conversation_messages.clear()
-                    conversation_greeted.discard(active_conv_id)
-                    waiting_for_client = False
-                    followup_stage = 0
-                    inactivity_start = 0
-                    p(f"  [AUTO-CLOSE] Conversa encerrada e estado resetado")
+                msg_id, msg_body, is_click, img_info = get_new_client_message(conv_id)
+                if msg_id and msg_body:
+                    if not _current_phone and conv_phone:
+                        _current_phone = conv_phone
+                    p(f"  >>> MSG [{conv_phone[-4:] if conv_phone else '????'}]: \"{msg_body[:80]}\"{' [+IMG]' if img_info else ''}")
+                    handle_message(conv_id, msg_id, msg_body, is_click, image_info=img_info)
+                    _save_conv_state(conv_id)
+
+            # === FOLLOW-UP & ENCERRAMENTO POR INATIVIDADE (para TODAS conversas) ===
+            for cid, st in list(_conv_states.items()):
+                if st.get('waiting_for_client') and st.get('inactivity_start', 0) > 0:
+                    elapsed = time.time() - st['inactivity_start']
+                    sp = st.get('student_profile')
+                    name_fmt = f", {sp['first_name']}" if sp and sp.get('first_name') else ""
+                    cur_phone = st.get('phone', '')
+
+                    if st.get('followup_stage', 0) == 0 and elapsed >= FOLLOWUP_1_DELAY:
+                        msg1 = FOLLOWUP_1_MSG.format(name=name_fmt)
+                        p(f"  [FOLLOWUP-1] [{cur_phone[-4:] if cur_phone else '????'}] {int(elapsed)}s sem resposta")
+                        send_message_crm(cid, msg1, buttons=FOLLOWUP_1_BUTTONS)
+                        log_to_db(cid, '(inatividade)', msg1, 1.0, 'followup_1')
+                        st['followup_stage'] = 1
+
+                    elif st.get('followup_stage', 0) == 1 and elapsed >= CLOSE_DELAY:
+                        close_msg = CLOSE_INACTIVITY_MSG.format(name=name_fmt)
+                        p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] {int(elapsed)}s -> encerrando")
+                        msgs_list = st.get('conversation_messages', [])
+                        if msgs_list:
+                            try:
+                                summary = generate_conversation_summary(msgs_list)
+                                topic = detect_topic_from_messages(msgs_list)
+                                save_memory(cur_phone, sp, topic, summary, 'neutro')
+                                tabulate_interaction(msgs_list, sp, cur_phone)
+                            except Exception as e:
+                                p(f"  Erro ao salvar antes de fechar: {e}")
+                        send_message_crm(cid, close_msg, buttons=CLOSE_INACTIVITY_BUTTONS)
+                        log_to_db(cid, '(inatividade)', close_msg, 1.0, 'auto_close')
+                        close_conversation_crm(cid)
+                        st['conversation_messages'] = []
+                        conversation_greeted.discard(cid)
+                        st['waiting_for_client'] = False
+                        st['followup_stage'] = 0
+                        st['inactivity_start'] = 0
+                        p(f"  [AUTO-CLOSE] Conversa encerrada e estado resetado")
 
             if cycle % 10 == 0:
-                fu_info = f" | followup={followup_stage}" if waiting_for_client else ""
-                p(f"  ...ativo ({cycle * POLL_INTERVAL}s | {len(processed_msg_ids)} msgs | conv={conv_id[:12]}{fu_info})")
+                active_count = sum(1 for s in _conv_states.values() if s.get('waiting_for_client'))
+                p(f"  ...ativo ({cycle * POLL_INTERVAL}s | {len(processed_msg_ids)} msgs | {len(_conv_states)} convs | {active_count} aguardando)")
             if cycle % 120 == 0:
                 _db_cleanup_dedup()
+                # Limpar estados de conversas inativas há mais de 1h
+                cutoff = time.time() - 3600
+                stale = [k for k, v in _conv_states.items()
+                         if v.get('inactivity_start', 0) > 0 and v['inactivity_start'] < cutoff
+                         and not v.get('waiting_for_client')]
+                for k in stale:
+                    del _conv_states[k]
+                if stale:
+                    p(f"  [CLEANUP] {len(stale)} conversas antigas removidas do estado")
 
         except KeyboardInterrupt:
             p("\n  Agente encerrado.")
