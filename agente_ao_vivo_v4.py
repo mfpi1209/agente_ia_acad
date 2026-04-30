@@ -603,6 +603,7 @@ inactivity_start = 0      # timestamp de quando o bot respondeu e começou a esp
 _last_auto_skipped = False  # True se a última interação foi silenciada por automação DataCrazy
 _awaiting_cpf = False       # True quando aguardamos o aluno digitar o CPF
 _student_in_base = None     # None=nao verificado, True=confirmado, False=nao encontrado
+_awaiting_polo_confirm = False  # True quando perguntamos "Você é matriculado em algum dos polos acima?"
 
 # ===================== HELPERS =====================
 
@@ -2478,7 +2479,7 @@ def handle_debug_command(conv_id, cmd):
 
 def _handle_cpf_input(conv_id, question, name_suffix):
     """Processa o CPF digitado pelo aluno no fluxo 'Já sou aluno'."""
-    global _awaiting_cpf, _student_in_base, student_profile, waiting_for_client, inactivity_start
+    global _awaiting_cpf, _student_in_base, _awaiting_polo_confirm, student_profile, waiting_for_client, inactivity_start
 
     cpf_raw = question.strip().replace('.', '').replace('-', '').replace(' ', '')
     if not cpf_raw.isdigit() or len(cpf_raw) < 10:
@@ -2545,6 +2546,7 @@ def _handle_cpf_input(conv_id, question, name_suffix):
         waiting_for_client = True; inactivity_start = time.time()
     else:
         _student_in_base = False
+        _awaiting_polo_confirm = True
         p(f"  Aluno NÃO encontrado na base acadêmica pelo CPF")
         msg_nf = (f"Não encontramos você em nossa *base de alunos*.\n\n"
                   f"Prestamos suporte para as unidades (polos) 👇")
@@ -2564,7 +2566,7 @@ def _handle_cpf_input(conv_id, question, name_suffix):
 def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=None):
     global active_conv_id, student_profile, conversation_messages, last_response_time
     global followup_stage, waiting_for_client, inactivity_start, _last_auto_skipped
-    global _awaiting_cpf, _student_in_base
+    global _awaiting_cpf, _student_in_base, _awaiting_polo_confirm
     processed_msg_ids.add(msg_id)
     followup_stage = 0
     waiting_for_client = False
@@ -2656,6 +2658,29 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         _handle_cpf_input(conv_id, question, name_suffix)
         return
 
+    # === AGUARDANDO CONFIRMAÇÃO DE POLO (Sim/Não após CPF não encontrado) ===
+    if _awaiting_polo_confirm:
+        _awaiting_polo_confirm = False
+        if q_lower in ('sim', 's'):
+            _awaiting_cpf = True
+            msg = ("Pode ser que o CPF informado anteriormente esteja com alguma divergência.\n\n"
+                   "Por favor, *digite novamente* seu *CPF* completo para que possamos localizar o seu cadastro.\n\n"
+                   "*Exemplo*: 12345678910")
+            meta_typing_on()
+            send_and_track(conv_id, msg)
+            conversation_messages.append({'role': 'bot', 'text': msg})
+            log_to_db(conv_id, question, msg, 1.0, 'polo_sim_retry_cpf')
+            waiting_for_client = True; inactivity_start = time.time()
+            return
+        else:
+            meta_typing_on()
+            send_and_track(conv_id, COMMERCIAL_REDIRECT_MSG)
+            conversation_messages.append({'role': 'bot', 'text': COMMERCIAL_REDIRECT_MSG})
+            log_to_db(conv_id, question, COMMERCIAL_REDIRECT_MSG, 1.0, 'polo_nao_commercial')
+            distribute_to_attendant(conv_id, 'Aluno não encontrado no polo - encaminhar para comercial')
+            waiting_for_client = False; inactivity_start = 0
+            return
+
     # === "JÁ SOU ALUNO" / "QUERO ME MATRICULAR" (resposta ao "não encontrado na base") ===
     if q_lower in ('já sou aluno', 'ja sou aluno'):
         _awaiting_cpf = True
@@ -2677,23 +2702,9 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         waiting_for_client = False; inactivity_start = 0
         return
 
-    # === SAUDAÇÃO ===
-    if is_greeting(question):
-        if not is_first:
-            p(f"  Saudação repetida -> mostrando menu")
-            msg = f"Claro{name_suffix}! Como posso te ajudar? Escolha uma opção abaixo 👇"
-            greeting_alert_text = build_greeting_alerts()
-            if greeting_alert_text:
-                msg += greeting_alert_text
-            meta_typing_on()
-            send_and_track(conv_id, msg, buttons=GREETING_BUTTONS)
-            conversation_messages.append({'role': 'bot', 'text': msg})
-            log_to_db(conv_id, question, msg, 1.0, 'greeting_repeat')
-            waiting_for_client = True; inactivity_start = time.time()
-            return
-
-        # Primeira saudação: verificar se aluno está na base
-        p(f"  Verificando se aluno está na base (pipeline)...")
+    # === PRIMEIRA INTERAÇÃO: sempre envia greeting + menu (ou fluxo de identificação) ===
+    if is_first:
+        p(f"  Primeira interação -> verificando se aluno está na base (pipeline)...")
         in_pipeline = check_lead_has_pipeline(PHONE_TO_MONITOR)
 
         if in_pipeline:
@@ -2742,6 +2753,20 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         send_and_track(conv_id, greeting, buttons=GREETING_BUTTONS)
         conversation_messages.append({'role': 'bot', 'text': greeting})
         log_to_db(conv_id, question, greeting, 1.0, 'greeting')
+        waiting_for_client = True; inactivity_start = time.time()
+        return
+
+    # === SAUDAÇÃO REPETIDA (não é a primeira vez) ===
+    if is_greeting(question):
+        p(f"  Saudação repetida -> mostrando menu")
+        msg = f"Claro{name_suffix}! Como posso te ajudar? Escolha uma opção abaixo 👇"
+        greeting_alert_text = build_greeting_alerts()
+        if greeting_alert_text:
+            msg += greeting_alert_text
+        meta_typing_on()
+        send_and_track(conv_id, msg, buttons=GREETING_BUTTONS)
+        conversation_messages.append({'role': 'bot', 'text': msg})
+        log_to_db(conv_id, question, msg, 1.0, 'greeting_repeat')
         waiting_for_client = True; inactivity_start = time.time()
         return
 
@@ -3092,7 +3117,7 @@ def _init_phone(phone):
 
 def main():
     global active_conv_id, student_profile, followup_stage, waiting_for_client, inactivity_start, _last_auto_skipped
-    global _awaiting_cpf, _student_in_base
+    global _awaiting_cpf, _student_in_base, _awaiting_polo_confirm
 
     load_agent_config_from_db()
     load_menus_from_db()
