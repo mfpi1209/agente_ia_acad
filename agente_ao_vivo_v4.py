@@ -3238,6 +3238,35 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             waiting_for_client = False; inactivity_start = 0
             return
 
+    # === RESPOSTA A TEMPLATE/DISPARO (ack simples -> encerrar) ===
+    TEMPLATE_ACK_WORDS = {
+        'ok', 'okay', 'tudo bem', 'tá', 'ta', 'beleza', 'certo', 'entendi',
+        'vou pagar', 'vou ver', 'vou verificar', 'pode deixar', 'blz',
+        'combinado', 'anotado', 'recebi', 'sim', 's',
+    }
+    _is_template_reply = False
+    cached_msgs = _cached_msgs.get(conv_id) or []
+    for cm_rev in reversed(cached_msgs):
+        if cm_rev.get('received', True):
+            continue
+        if _is_template_message(cm_rev):
+            _is_template_reply = True
+        break
+    if _is_template_reply and (q_lower in TEMPLATE_ACK_WORDS or any(w in q_lower for w in CLOSING_WORDS)):
+        p(f"  [TEMPLATE-ACK] Resposta simples a disparo: '{q_lower}' -> encerrando")
+        msg = f"Tudo certo{name_suffix}! Qualquer dúvida é só nos chamar. 😊"
+        meta_typing_on()
+        send_and_track(conv_id, msg)
+        conversation_messages.append({'role': 'bot', 'text': msg})
+        log_to_db(conv_id, question, msg, 1.0, 'template_ack_close')
+        close_conversation_crm(conv_id, phone=_current_phone)
+        try:
+            tabulate_interaction(conversation_messages, student_profile, cur_phone)
+        except Exception as e_tpl:
+            p(f"  [TEMPLATE-ACK] Erro tabulação: {e_tpl}")
+        waiting_for_client = False; inactivity_start = 0
+        return
+
     # === ESCALAÇÃO EXPLÍCITA (ANTES de is_first, para sempre distribuir) ===
     if any(w in q_lower for w in ESCALATE_WORDS):
         meta_typing_on()
