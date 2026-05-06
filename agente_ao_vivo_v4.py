@@ -381,7 +381,7 @@ Se não receber o e-mail, verifica a caixa de spam. Qualquer coisa, me avisa aqu
 # ===================== FOLLOW-UP & ENCERRAMENTO (defaults, sobrescritos pelo banco) =====================
 
 FOLLOWUP_1_DELAY = 300
-CLOSE_DELAY      = 600
+CLOSE_DELAY      = 900
 FOLLOWUP_1_MSG     = "Oi{name}! Ainda está por aí? Se tiver mais alguma dúvida, é só falar 😊"
 FOLLOWUP_1_BUTTONS = ['Tenho outra dúvida', 'Não, obrigado!']
 CLOSE_INACTIVITY_MSG     = "Como não tivemos retorno, vou finalizar o contato por aqui para te deixar seguir com seus compromissos. Estaremos à disposição caso precise retomar o assunto depois! ✨"
@@ -4227,6 +4227,7 @@ def main():
                         send_message_crm(cid, msg1, buttons=FOLLOWUP_1_BUTTONS)
                         log_to_db(cid, '(inatividade)', msg1, 1.0, 'followup_1')
                         st['followup_stage'] = 1
+                        st['inactivity_start'] = time.time()
 
                     elif st.get('followup_stage', 0) == 1 and elapsed >= CLOSE_DELAY:
                         # SEGURANÇA: sempre verificar via API se há atendente antes de fechar
