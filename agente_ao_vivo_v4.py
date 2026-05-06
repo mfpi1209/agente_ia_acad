@@ -2525,8 +2525,12 @@ def _is_template_message(msg):
 
 def is_bot_message(body):
     """Detect if a message is from a bot (ours or DataCrazy salesbot)."""
+    b = body.lower()
     for fp in BOT_RESPONSE_FINGERPRINTS:
-        if fp.lower() in body.lower():
+        if fp.lower() in b:
+            return True
+    for fp in OUR_MSG_FINGERPRINTS:
+        if fp in b:
             return True
     return False
 
@@ -2540,6 +2544,14 @@ OUR_MSG_FINGERPRINTS = (
     'assistente virtual', 'algo mais específico', 'ficou alguma dúvida',
     'que bom que pude ajudar', 'vou te transferir', 'vou te encaminhar',
     'claro!', 'claro,',
+    'ainda está por aí?', 'se tiver mais alguma dúvida, é só falar',
+    'não tivemos retorno', 'vou finalizar o contato',
+    'distribuição automática pelo agente ia',
+    'espero que tenha conseguido te ajudar',
+    'escolha uma opção abaixo para agilizar',
+    'muito obrigado por falar com a gente',
+    'encerrando esta conversa por aqui',
+    'obrigado pelo contato',
 )
 
 def _automation_already_responded(conv_id, user_msg_id):
