@@ -2511,7 +2511,20 @@ BOT_RESPONSE_FINGERPRINTS = [
     'Teria mais alguma dúvida',
     'clique em uma das opções',
     'teria mais alguma dúvida',
+    'tudo bom? passando para',
+    'tudo bom?\n\npassando para',
+    'passando para confirmar',
 ]
+
+
+def _is_disparo_bot_message(body):
+    """Detecta mensagens do bot de disparo (padrão: 'Olá, NOME, tudo bom? Passando para...')."""
+    b = body.strip().lower()
+    if b.startswith('olá,') and 'tudo bom' in b and 'passando para' in b:
+        return True
+    if b.startswith('oi,') and 'tudo bom' in b and 'passando para' in b:
+        return True
+    return False
 
 
 def is_bot_message(body):
@@ -2618,6 +2631,8 @@ def _check_human_took_over(conv_id):
         if not body:
             continue
         if is_bot_message(body):
+            continue
+        if _is_disparo_bot_message(body):
             continue
         if _db_is_duplicate_body(body, window_seconds=3600):
             continue
