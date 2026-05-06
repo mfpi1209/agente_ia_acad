@@ -91,6 +91,22 @@ ATTENDANT_MAP = {
     'beatriz': '6989ef9a6ae58a6435bd2438',
 }
 
+CRM_ATTENDANT_MAP = {
+    'julia':   'e85ac56f-0dbb-4233-9825-b6b1616d07f7',
+    'marilia': '79dc861b-152e-4e8d-8bcf-a99ff64090ba',
+    'gustavo': 'a19ff106-ca9b-42aa-b7cd-3d3ac5231b9f',
+    'mariana': 'eeb44e51-1193-4d77-812b-7b6873d011c8',
+    'debora':  '26882d34-6787-4a06-aa8a-691b42406570',
+    'joyce':   'b4a6025c-b5dc-4261-980f-fac1309637fd',
+    'emanuel': '0b7f49cb-6fba-4f7b-8de8-f838fa03ea08',
+    'jessica': 'b0335732-776e-4bf5-9d5b-44830cbca10d',
+    'camila':  'e8e5ddd9-796c-4f89-8670-c5cbf3a2f02f',
+    'danubia': 'ab86c173-3353-4c43-9a2e-0a90507bb7bf',
+    'wesley':  'dd6cbed7-7666-45d1-bd90-368c8b97e217',
+    'felipe':  '59039319-9f52-4ec8-8e12-e554bcd7a9ef',
+    'beatriz': 'ab65b480-1761-42d8-815f-c7e3c8a7b6b4',
+}
+
 ALMOCO_ANTE_MIN = 20
 ALMOCO_DURACAO_MIN = 60
 SAIDA_ANTE_MIN = 20
@@ -2054,12 +2070,12 @@ def get_available_consultant():
 
 
 def _dcz_transfer_lead(lead_id, attendant_name):
-    """Atribui o lead ao responsável no DataCrazy CRM."""
+    """Atribui o lead ao responsável no DataCrazy CRM via campo attendant."""
     nome_norm = attendant_name.strip().lower()
     nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm) if __import__('unicodedata').category(c) != 'Mn')
-    att_id = ATTENDANT_MAP.get(nome_norm)
-    if not att_id:
-        p(f"  [DIST] attendantId não encontrado para '{attendant_name}' (norm='{nome_norm}')")
+    crm_id = CRM_ATTENDANT_MAP.get(nome_norm)
+    if not crm_id:
+        p(f"  [DIST] CRM attendantId não encontrado para '{attendant_name}' (norm='{nome_norm}')")
         return False
     if not lead_id:
         p(f"  [DIST] lead_id vazio, skip lead transfer")
@@ -2067,9 +2083,9 @@ def _dcz_transfer_lead(lead_id, attendant_name):
     try:
         r = requests.patch(
             f'{DCZ_CRM}/leads/{lead_id}', headers=H,
-            json={'responsibleId': att_id}, timeout=10
+            json={'attendant': {'id': crm_id}}, timeout=10
         )
-        p(f"  [DIST] Lead {lead_id[:16]} -> responsibleId={att_id[:12]} (status={r.status_code})")
+        p(f"  [DIST] Lead {lead_id[:16]} -> attendant.id={crm_id[:12]} (status={r.status_code})")
         return r.status_code in (200, 201)
     except Exception as e:
         p(f"  [DIST] Erro lead transfer: {e}")
@@ -2080,9 +2096,9 @@ def _dcz_transfer_business(phone, attendant_name, lead_id=''):
     """Encontra o negócio correto do lead e atribui ao attendant + move para Atendimento."""
     nome_norm = attendant_name.strip().lower()
     nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm) if __import__('unicodedata').category(c) != 'Mn')
-    att_id = ATTENDANT_MAP.get(nome_norm)
-    if not att_id:
-        p(f"  [DIST-BIZ] attendantId não encontrado para '{attendant_name}'")
+    crm_id = CRM_ATTENDANT_MAP.get(nome_norm)
+    if not crm_id:
+        p(f"  [DIST-BIZ] CRM attendantId não encontrado para '{attendant_name}'")
         return False
 
     biz_id = ''
@@ -2188,7 +2204,7 @@ def _dcz_transfer_business(phone, attendant_name, lead_id=''):
             try:
                 r_new = requests.post(f'{DCZ_CRM}/businesses', headers=H,
                                       json={'leadId': lead_id, 'stageId': STAGE_ATENDIMENTO_ID,
-                                            'responsibleId': att_id}, timeout=10)
+                                            'attendant': {'id': crm_id}}, timeout=10)
                 if r_new.status_code in (200, 201):
                     biz_id = r_new.json().get('id', '')
                     p(f"  [DIST-BIZ] Business criado: {biz_id[:16]} (já no Atendimento)")
@@ -2202,12 +2218,12 @@ def _dcz_transfer_business(phone, attendant_name, lead_id=''):
             p(f"  [DIST-BIZ] Nenhum negócio encontrado/criado")
             return False
 
-        # PATCH 1: responsável
+        # PATCH 1: responsável (campo attendant com objeto {id: CRM_UUID})
         r_resp = requests.patch(
             f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
-            json={'responsibleId': att_id}, timeout=10
+            json={'attendant': {'id': crm_id}}, timeout=10
         )
-        p(f"  [DIST-BIZ] Business {biz_id[:16]} -> responsibleId (status={r_resp.status_code})")
+        p(f"  [DIST-BIZ] Business {biz_id[:16]} -> attendant.id={crm_id[:12]} (status={r_resp.status_code})")
 
         # PATCH 2: pipeline Atendimento
         r_stage = requests.patch(
@@ -2400,10 +2416,10 @@ def trigger_retention(conv_id, lead_id, question):
 
             r = requests.patch(
                 f'{DCZ_CRM}/leads/{lead_id}', headers=H,
-                json={'tags': existing_tags, 'responsibleId': RETENTION_WESLEY_CRM_ID},
+                json={'tags': existing_tags, 'attendant': {'id': RETENTION_WESLEY_CRM_ID}},
                 timeout=10
             )
-            p(f"  [RETENÇÃO] Lead: tag + responsável Wesley (status={r.status_code})")
+            p(f"  [RETENÇÃO] Lead: tag + attendant Wesley (status={r.status_code})")
 
             try:
                 r_biz = requests.get(
@@ -2420,9 +2436,9 @@ def trigger_retention(conv_id, lead_id, question):
                             biz_id = biz.get('id')
                             rb = requests.patch(
                                 f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
-                                json={'responsibleId': RETENTION_WESLEY_CRM_ID}, timeout=10
+                                json={'attendant': {'id': RETENTION_WESLEY_CRM_ID}}, timeout=10
                             )
-                            p(f"  [RETENÇÃO] Negócio responsável -> Wesley (status={rb.status_code})")
+                            p(f"  [RETENÇÃO] Negócio attendant -> Wesley (status={rb.status_code})")
                             break
             except Exception as e2:
                 p(f"  [RETENÇÃO] Erro ao atualizar negócio: {e2}")
