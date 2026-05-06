@@ -35,9 +35,9 @@ H = {'Authorization': f'Bearer {DCZ_TOKEN}', 'Content-Type': 'application/json'}
 PIPELINE_ALUNOS_ID = '7d1b30e3-b554-4225-8523-d2d21ffc7c35'
 INSTANCE_ACADEMICO_ID = '692a13008721fc1c4000859f'
 N8N_WEBHOOK_LEADS_CPF = 'https://n8n-new-n8n.ca31ey.easypanel.host/webhook/leads_cpf_csv'
-STAGE_ATENDIMENTO_ID = '7e89e4a3-09ca-4e5a-976b-35f7f041ccf6'
+STAGE_ATENDIMENTO_ID = 'ce42afe6-757f-405c-aa34-6668f4a75d07'
 STAGE_EM_ATENDIMENTO_ID = '742714eb-ac5a-435f-8680-97e6ab8f2f6e'
-STAGE_ENCERRAMENTO_ID = '582e3b39-4ab8-4204-9872-1715899adb0c'
+STAGE_ENCERRAMENTO_ID = '3016b9c8-3914-4bf5-8f7c-1fee44baea9c'
 
 POLOS_LIST = ("Barra Funda\nVila Prudente\nVila Mariana\nFreguesia do Ó (Moinho Velho)\n"
               "Vila Ema (Sapopemba)\nIbirapuera (Indianópolis)\nTaboão da Serra - Jardim Mituzi\n"
