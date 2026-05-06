@@ -4135,6 +4135,66 @@ def main():
             if cycle <= 10 or cycle % 10 == 0:
                 p(f"  [CICLO-{cycle}] Processadas={_conv_processed} | Respondidas={_conv_responded} | Sem msg={_conv_no_msg} | Skip humano={_conv_skipped_human}")
 
+            # === VARREDURA: respostas simples a templates/disparos WhatsApp -> encerrar ===
+            _TEMPLATE_ACK_WORDS = {
+                'ok', 'okay', 'tudo bem', 'tá', 'ta', 'beleza', 'certo', 'entendi',
+                'vou pagar', 'vou ver', 'vou verificar', 'pode deixar', 'blz',
+                'combinado', 'anotado', 'recebi', 'sim', 's', 'tá joia', 'ta joia',
+                'obrigado', 'obrigada', 'valeu', 'vlw', 'brigado', 'brigada',
+                'tá joia obg', 'ta joia obg', 'tá jóia obg',
+            }
+            _tpl_closed = 0
+            for _tpl_conv in waiting:
+                if _tpl_closed >= 3:
+                    break
+                _tpl_cid = _tpl_conv.get('id', '')
+                if not _tpl_cid:
+                    continue
+                _tpl_ct = _tpl_conv.get('contact', {}) or {}
+                _tpl_phone = (str(_tpl_ct.get('phoneNumber', '') or _tpl_ct.get('contactId', '') or '')
+                              .replace('+', '').replace(' ', '').replace('-', ''))
+                _tpl_name = (_tpl_ct.get('name', '') or '').split()[0] if _tpl_ct.get('name') else ''
+                try:
+                    _tpl_msgs = get_conversation_messages_api(_tpl_cid, limit=5)
+                    _cached_msgs[_tpl_cid] = _tpl_msgs
+                    if not _tpl_msgs:
+                        continue
+                    _tpl_last_recv_msg = None
+                    _tpl_last_out_msg = None
+                    for _tm in _tpl_msgs:
+                        if _tm.get('received', False) and _tpl_last_recv_msg is None:
+                            _tpl_last_recv_msg = _tm
+                        if not _tm.get('received', True) and _tpl_last_out_msg is None:
+                            _tpl_last_out_msg = _tm
+                        if _tpl_last_recv_msg and _tpl_last_out_msg:
+                            break
+                    if not _tpl_last_recv_msg or not _tpl_last_out_msg:
+                        continue
+                    if not _is_template_message(_tpl_last_out_msg):
+                        continue
+                    _tpl_body = (_tpl_last_recv_msg.get('body', '') or '').strip().lower().rstrip('!?.,').strip()
+                    if _tpl_body not in _TEMPLATE_ACK_WORDS and not any(w in _tpl_body for w in ('obrigad', 'valeu', 'vlw', 'brigad')):
+                        continue
+                    _tpl_name_sfx = f", {_tpl_name}" if _tpl_name else ""
+                    _tpl_resp = f"Tudo certo{_tpl_name_sfx}! Qualquer dúvida é só nos chamar. 😊"
+                    p(f"  [TPL-ACK] [{_tpl_phone[-4:] if _tpl_phone else '????'}] '{_tpl_body}' -> encerrando")
+                    send_message_crm(_tpl_cid, _tpl_resp)
+                    close_conversation_crm(_tpl_cid, phone=_tpl_phone)
+                    if _tpl_last_recv_msg.get('id'):
+                        processed_msg_ids.add(_tpl_last_recv_msg['id'])
+                    _conv_states.setdefault(_tpl_cid, _default_conv_state())['_human_took_over'] = True
+                    _conv_states[_tpl_cid]['waiting_for_client'] = False
+                    _save_conv_state(_tpl_cid)
+                    _tpl_closed += 1
+                    try:
+                        log_to_db(_tpl_cid, _tpl_body, _tpl_resp, 1.0, 'template_ack_close_sweep')
+                    except Exception:
+                        pass
+                except Exception as _tpl_err:
+                    p(f"  [TPL-ACK] Erro: {_tpl_err}")
+            if _tpl_closed > 0:
+                p(f"  [TPL-ACK] Encerradas {_tpl_closed} conversas de resposta a template neste ciclo")
+
             # === FOLLOW-UP & ENCERRAMENTO POR INATIVIDADE (para TODAS conversas) ===
             _closes_this_cycle = 0
             _MAX_CLOSES_PER_CYCLE = 5
