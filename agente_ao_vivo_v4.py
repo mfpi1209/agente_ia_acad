@@ -2511,18 +2511,14 @@ BOT_RESPONSE_FINGERPRINTS = [
     'Teria mais alguma dúvida',
     'clique em uma das opções',
     'teria mais alguma dúvida',
-    'tudo bom? passando para',
-    'tudo bom?\n\npassando para',
-    'passando para confirmar',
 ]
 
 
-def _is_disparo_bot_message(body):
-    """Detecta mensagens do bot de disparo (padrão: 'Olá, NOME, tudo bom? Passando para...')."""
-    b = body.strip().lower()
-    if b.startswith('olá,') and 'tudo bom' in b and 'passando para' in b:
-        return True
-    if b.startswith('oi,') and 'tudo bom' in b and 'passando para' in b:
+def _is_template_message(msg):
+    """Detecta mensagens de template/HSM do WhatsApp (disparos).
+    Templates possuem o campo 'header' preenchido na API do DataCrazy."""
+    header = msg.get('header')
+    if header and isinstance(header, str) and header.strip():
         return True
     return False
 
@@ -2630,13 +2626,13 @@ def _check_human_took_over(conv_id):
         body = (m.get('body', '') or '').strip()
         if not body:
             continue
-        if is_bot_message(body):
+        if _is_template_message(m):
             continue
-        if _is_disparo_bot_message(body):
+        if is_bot_message(body):
             continue
         if _db_is_duplicate_body(body, window_seconds=3600):
             continue
-        p(f"  [HUMAN-DBG] conv={conv_id[:12]} mid={mid[:12]} body={body[:60]}")
+        p(f"  [HUMAN-DBG] conv={conv_id[:12]} mid={mid[:12]} header={m.get('header')} att={bool(m.get('attendant'))} body={body[:60]}")
         return True
     return False
 
