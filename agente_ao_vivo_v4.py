@@ -155,6 +155,12 @@ RETENTION_PHRASES = [
     'quero cancelar', 'quero trancar', 'vou cancelar', 'vou trancar',
     'cancelar meu curso', 'cancelar minha matrícula', 'cancelar minha matricula',
     'trancar meu curso', 'trancar minha matrícula', 'trancar minha matricula',
+    'como faço para cancelar', 'como faco para cancelar',
+    'como faço para trancar', 'como faco para trancar',
+    'como cancelar', 'como trancar', 'como fazer o cancelamento',
+    'como fazer o trancamento', 'como solicitar cancelamento',
+    'como solicitar trancamento', 'como funciona o cancelamento',
+    'como funciona o trancamento', 'prazo para cancelar', 'prazo para trancar',
     'cancelar o curso', 'trancar o curso', 'cancelar a matrícula', 'cancelar a matricula',
     'trancar a matrícula', 'trancar a matricula',
     'quero desistir', 'vou desistir', 'desistir do curso',
@@ -164,11 +170,7 @@ RETENTION_PHRASES = [
     'quero realizar o trancamento', 'quero fazer o trancamento',
     'cancelar matrícula', 'cancelar matricula', 'trancar matrícula', 'trancar matricula',
 ]
-RETENTION_QUESTION_WORDS = [
-    'prazo', 'data', 'quando', 'como funciona', 'como solicitar', 'quanto custa',
-    'valor', 'taxa', 'multa', 'processo', 'procedimento', 'posso solicitar',
-    'até que', 'ate que', 'qual o prazo', 'como faço para solicitar',
-]
+RETENTION_QUESTION_WORDS = []
 RETENTION_MSG = "Entendi sua situação. Vou te encaminhar para nosso consultor especializado que poderá te ajudar. Um momento, por favor!"
 
 MAIN_MENU_BUTTONS = ['Acesso Portal/App', 'Financeiro', 'Aulas e Conteúdo', 'Documentos', 'Rematrícula', 'Falar com atendente']
