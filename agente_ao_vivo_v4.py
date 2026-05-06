@@ -3640,6 +3640,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         send_and_track(conv_id, msg, buttons=MAIN_MENU_BUTTONS)
         conversation_messages.append({'role': 'bot', 'text': msg})
         log_to_db(conv_id, question, msg, 0.0, 'fallback_short')
+        waiting_for_client = True; inactivity_start = time.time()
         return
 
     # === PIPELINE RAG ===
@@ -3883,7 +3884,7 @@ def main():
             # Busca conversas abertas recentes
             try:
                 r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
-                                params={'limit': 20, 'status': 'open'}, timeout=10)
+                                params={'limit': 80, 'status': 'open'}, timeout=15)
             except Exception:
                 continue
             if r.status_code != 200:
