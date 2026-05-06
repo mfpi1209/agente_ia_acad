@@ -2077,7 +2077,7 @@ def _dcz_transfer_lead(lead_id, attendant_name):
 
 
 def _dcz_transfer_business(phone, attendant_name, lead_id=''):
-    """Encontra o negócio via lead e atribui ao attendant + move para Atendimento."""
+    """Encontra o negócio correto do lead e atribui ao attendant + move para Atendimento."""
     nome_norm = attendant_name.strip().lower()
     nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm) if __import__('unicodedata').category(c) != 'Mn')
     att_id = ATTENDANT_MAP.get(nome_norm)
@@ -2086,55 +2086,93 @@ def _dcz_transfer_business(phone, attendant_name, lead_id=''):
         return False
 
     biz_id = ''
+    lead_name = ''
+    lead_phone = ''
     try:
-        # Busca via lead: GET /leads/{id} e pegar businesses
+        # 1) Pegar dados do lead para usar na busca
         if lead_id:
-            p(f"  [DIST-BIZ] Buscando business via lead {lead_id[:16]}")
             r = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
             if r.status_code == 200:
-                lead_data = r.json()
-                # Tentar pegar business do lead
-                bizs = lead_data.get('businesses') or []
-                if isinstance(bizs, list) and bizs:
-                    biz_id = bizs[0].get('id', '') if isinstance(bizs[0], dict) else str(bizs[0])
-                    p(f"  [DIST-BIZ] Business do lead: {biz_id[:16]}")
-                if not biz_id:
-                    biz_ref = lead_data.get('businessId') or lead_data.get('business_id') or ''
-                    if biz_ref:
-                        biz_id = biz_ref if isinstance(biz_ref, str) else str(biz_ref)
-                        p(f"  [DIST-BIZ] BusinessId do lead: {biz_id[:16]}")
-                if not biz_id:
-                    p(f"  [DIST-BIZ] Lead não retornou businesses, keys: {list(lead_data.keys())[:15]}")
+                ld = r.json()
+                lead_name = ld.get('name', '')
+                lead_phone = ld.get('rawPhone', '') or ld.get('phone', '')
+                p(f"  [DIST-BIZ] Lead: name='{lead_name}', rawPhone='{lead_phone}'")
 
-        # Fallback 1: busca GET /businesses?leadId=
+        # 2) Tentar GET /leads/{id}/businesses (sub-recurso)
         if not biz_id and lead_id:
             try:
-                p(f"  [DIST-BIZ] Buscando GET /businesses?leadId={lead_id[:16]}")
-                r = requests.get(f'{DCZ_CRM}/businesses', headers=H,
-                                 params={'leadId': lead_id, 'limit': 5}, timeout=10)
+                r = requests.get(f'{DCZ_CRM}/leads/{lead_id}/businesses', headers=H, timeout=10)
                 if r.status_code == 200:
                     data = r.json()
                     biz_list = data.get('data', data) if isinstance(data, dict) else data
                     if isinstance(biz_list, list) and biz_list:
-                        biz_id = biz_list[0].get('id', '')
-                        p(f"  [DIST-BIZ] Encontrado por leadId param: {biz_id[:16]}")
-                    else:
-                        p(f"  [DIST-BIZ] leadId param retornou vazio (type={type(biz_list).__name__})")
+                        biz_id = biz_list[0].get('id', '') if isinstance(biz_list[0], dict) else str(biz_list[0])
+                        p(f"  [DIST-BIZ] Via /leads/id/businesses: {biz_id[:16]}")
                 else:
-                    p(f"  [DIST-BIZ] leadId param status={r.status_code}")
-            except Exception as e_lid:
-                p(f"  [DIST-BIZ] Erro leadId param: {e_lid}")
+                    p(f"  [DIST-BIZ] /leads/id/businesses: status={r.status_code}")
+            except Exception as e_sub:
+                p(f"  [DIST-BIZ] /leads/id/businesses erro: {e_sub}")
 
-        # Fallback 2: busca por telefone (com e sem 55)
-        if not biz_id and phone:
-            search_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
-            phones_to_try = [search_phone]
-            if not search_phone.startswith('55'):
-                phones_to_try.append('55' + search_phone)
+        # 3) Buscar por nome do lead (mais preciso que leadId param)
+        if not biz_id and lead_name:
+            try:
+                r = requests.get(f'{DCZ_CRM}/businesses', headers=H,
+                                 params={'search': lead_name, 'limit': 10}, timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    biz_list = data.get('data', data) if isinstance(data, dict) else data
+                    if isinstance(biz_list, list):
+                        for b in biz_list:
+                            b_lead = b.get('leadId') or b.get('lead', {}).get('id', '') if isinstance(b.get('lead'), dict) else ''
+                            b_name = b.get('name', '') or ''
+                            if b_lead == lead_id:
+                                biz_id = b.get('id', '')
+                                p(f"  [DIST-BIZ] Match por leadId no resultado: {biz_id[:16]}")
+                                break
+                            if b_name.strip().lower() == lead_name.strip().lower() and not biz_id:
+                                biz_id = b.get('id', '')
+                                p(f"  [DIST-BIZ] Match por nome: {biz_id[:16]}")
+                        if not biz_id and biz_list:
+                            p(f"  [DIST-BIZ] Busca nome: {len(biz_list)} resultados, nenhum match. Primeiro: {biz_list[0].get('name','')[:40]}")
+            except Exception as e_name:
+                p(f"  [DIST-BIZ] Erro busca nome: {e_name}")
+
+        # 4) Buscar por rawPhone do lead
+        if not biz_id and lead_phone:
+            clean = lead_phone.replace('+', '').replace(' ', '').replace('-', '')
+            phones_to_try = [clean]
+            if not clean.startswith('55'):
+                phones_to_try.append('55' + clean)
+            if clean.startswith('55') and len(clean) > 4:
+                phones_to_try.append(clean[2:])
             for try_phone in phones_to_try:
                 if biz_id:
                     break
-                p(f"  [DIST-BIZ] Buscando por telefone {try_phone}")
+                r = requests.get(f'{DCZ_CRM}/businesses', headers=H,
+                                 params={'search': try_phone, 'limit': 10}, timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    biz_list = data.get('data', data) if isinstance(data, dict) else data
+                    if isinstance(biz_list, list):
+                        for b in biz_list:
+                            b_lead = b.get('leadId') or ''
+                            if b_lead == lead_id:
+                                biz_id = b.get('id', '')
+                                p(f"  [DIST-BIZ] Match leadId via phone search: {biz_id[:16]}")
+                                break
+                        if not biz_id and biz_list:
+                            biz_id = biz_list[0].get('id', '')
+                            p(f"  [DIST-BIZ] Primeiro resultado phone {try_phone[-4:]}: {biz_id[:16]} (sem leadId match)")
+
+        # 5) Fallback: phone do argumento
+        if not biz_id and phone and phone != lead_phone:
+            clean = phone.replace('+', '').replace(' ', '').replace('-', '')
+            phones_to_try = [clean]
+            if not clean.startswith('55'):
+                phones_to_try.append('55' + clean)
+            for try_phone in phones_to_try:
+                if biz_id:
+                    break
                 r = requests.get(f'{DCZ_CRM}/businesses', headers=H,
                                  params={'search': try_phone, 'limit': 5}, timeout=10)
                 if r.status_code == 200:
@@ -2142,26 +2180,26 @@ def _dcz_transfer_business(phone, attendant_name, lead_id=''):
                     biz_list = data.get('data', data) if isinstance(data, dict) else data
                     if isinstance(biz_list, list) and biz_list:
                         biz_id = biz_list[0].get('id', '')
-                        p(f"  [DIST-BIZ] Encontrado: {biz_id[:16]}")
+                        p(f"  [DIST-BIZ] Via phone arg {try_phone[-4:]}: {biz_id[:16]}")
 
+        # 6) Criar business se não encontrou
         if not biz_id and lead_id:
-            p(f"  [DIST-BIZ] Nenhum business encontrado, criando novo para lead {lead_id[:16]}")
+            p(f"  [DIST-BIZ] Nenhum business encontrado, criando para lead {lead_id[:16]}")
             try:
                 r_new = requests.post(f'{DCZ_CRM}/businesses', headers=H,
                                       json={'leadId': lead_id, 'stageId': STAGE_ATENDIMENTO_ID,
                                             'responsibleId': att_id}, timeout=10)
                 if r_new.status_code in (200, 201):
-                    biz_data = r_new.json()
-                    biz_id = biz_data.get('id', '')
+                    biz_id = r_new.json().get('id', '')
                     p(f"  [DIST-BIZ] Business criado: {biz_id[:16]} (já no Atendimento)")
                     return True
                 else:
-                    p(f"  [DIST-BIZ] Criar business falhou: {r_new.status_code} - {r_new.text[:200]}")
+                    p(f"  [DIST-BIZ] Criar falhou: {r_new.status_code} - {r_new.text[:200]}")
             except Exception as e_new:
-                p(f"  [DIST-BIZ] Erro criar business: {e_new}")
+                p(f"  [DIST-BIZ] Erro criar: {e_new}")
 
         if not biz_id:
-            p(f"  [DIST-BIZ] Nenhum negócio encontrado e não foi possível criar")
+            p(f"  [DIST-BIZ] Nenhum negócio encontrado/criado")
             return False
 
         # PATCH 1: responsável
