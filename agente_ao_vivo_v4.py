@@ -33,9 +33,11 @@ DCZ_TOKEN = os.environ.get('DCZ_TOKEN', '')
 H = {'Authorization': f'Bearer {DCZ_TOKEN}', 'Content-Type': 'application/json'}
 
 PIPELINE_ALUNOS_ID = '7d1b30e3-b554-4225-8523-d2d21ffc7c35'
+INSTANCE_ACADEMICO_ID = '692a13008721fc1c4000859f'
 N8N_WEBHOOK_LEADS_CPF = 'https://n8n-new-n8n.ca31ey.easypanel.host/webhook/leads_cpf_csv'
 STAGE_ATENDIMENTO_ID = '7e89e4a3-09ca-4e5a-976b-35f7f041ccf6'
 STAGE_EM_ATENDIMENTO_ID = '742714eb-ac5a-435f-8680-97e6ab8f2f6e'
+STAGE_ENCERRAMENTO_ID = '582e3b39-4ab8-4204-9872-1715899adb0c'
 
 POLOS_LIST = ("Barra Funda\nVila Prudente\nVila Mariana\nFreguesia do Ó (Moinho Velho)\n"
               "Vila Ema (Sapopemba)\nIbirapuera (Indianópolis)\nTaboão da Serra - Jardim Mituzi\n"
@@ -623,6 +625,7 @@ def _default_conv_state():
         'phone': '',
         'greeted': False,
         '_human_took_over': False,
+        '_last_responded_ts': 0,
     }
 
 def _load_conv_state(conv_id):
@@ -630,7 +633,9 @@ def _load_conv_state(conv_id):
     global student_profile, conversation_messages, followup_stage, waiting_for_client
     global inactivity_start, _last_auto_skipped, _awaiting_cpf, _student_in_base
     global _awaiting_polo_confirm, active_conv_id, _current_phone
-    st = _conv_states.get(conv_id) or _default_conv_state()
+    if conv_id not in _conv_states:
+        _conv_states[conv_id] = _default_conv_state()
+    st = _conv_states[conv_id]
     student_profile = st['student_profile']
     conversation_messages = st['conversation_messages']
     followup_stage = st['followup_stage']
@@ -648,6 +653,8 @@ def _load_conv_state(conv_id):
 def _save_conv_state(conv_id):
     """Salva o estado das variáveis globais de volta no dicionário."""
     prev = _conv_states.get(conv_id, {})
+    human_flag = prev.get('_human_took_over', False)
+    last_resp = prev.get('_last_responded_ts', 0)
     _conv_states[conv_id] = {
         'student_profile': student_profile,
         'conversation_messages': conversation_messages,
@@ -660,7 +667,8 @@ def _save_conv_state(conv_id):
         '_awaiting_polo_confirm': _awaiting_polo_confirm,
         'phone': _current_phone,
         'greeted': conv_id in conversation_greeted,
-        '_human_took_over': prev.get('_human_took_over', False),
+        '_human_took_over': human_flag,
+        '_last_responded_ts': last_resp,
     }
 
 # ===================== HELPERS =====================
@@ -902,9 +910,21 @@ def ensure_memory_tables():
             nps_implicito INT,
             resumo TEXT,
             mensagens_count INT DEFAULT 0,
+            pergunta_aluno TEXT,
+            resposta_agente TEXT,
+            avaliacao VARCHAR(20) DEFAULT NULL,
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
+    for col, coldef in [
+        ('pergunta_aluno', 'TEXT'),
+        ('resposta_agente', 'TEXT'),
+        ('avaliacao', "VARCHAR(20) DEFAULT NULL"),
+    ]:
+        try:
+            cur.execute(f"ALTER TABLE interaction_summary ADD COLUMN IF NOT EXISTS {col} {coldef}")
+        except Exception:
+            pass
     conn.commit()
     cur.close()
     conn.close()
@@ -991,9 +1011,19 @@ def generate_conversation_summary(messages):
 # ===================== FASE 4: TABULAÇÃO =====================
 
 def tabulate_interaction(messages, profile, phone):
-    """Classifica a interação automaticamente com GPT."""
+    """Classifica a interação automaticamente com GPT e salva Q&A."""
     if not messages or len(messages) < 2:
         return
+
+    # Extrair última dupla pergunta/resposta
+    pergunta_aluno = ''
+    resposta_agente = ''
+    for m in reversed(messages):
+        if not resposta_agente and m.get('role') == 'bot':
+            resposta_agente = m.get('text', '')
+        elif resposta_agente and m.get('role') == 'user':
+            pergunta_aluno = m.get('text', '')
+            break
 
     conv_text = '\n'.join([f"{'Aluno' if m['role']=='user' else 'IA'}: {m['text'][:150]}" for m in messages[-10:]])
 
@@ -1023,8 +1053,9 @@ Conversa:
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO interaction_summary
-            (phone, lead_id, student_name, tema, subtema, sentimento, resolvido, nps_implicito, resumo, mensagens_count)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (phone, lead_id, student_name, tema, subtema, sentimento, resolvido,
+             nps_implicito, resumo, mensagens_count, pergunta_aluno, resposta_agente)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             phone[-11:],
             profile.get('lead_id') if profile else None,
@@ -1035,7 +1066,9 @@ Conversa:
             tab.get('resolvido', 'parcial'),
             tab.get('nps', 5),
             generate_conversation_summary(messages),
-            len(messages)
+            len(messages),
+            pergunta_aluno[:2000],
+            resposta_agente[:2000],
         ))
         conn.commit()
         cur.close()
@@ -1796,18 +1829,80 @@ def log_to_db(conv_id, question, response, confidence, action):
         p(f"    Log DB erro: {e}")
 
 
-def close_conversation_crm(conv_id):
-    """Fecha/finaliza a conversa no DataCrazy via POST /finish."""
+def _move_business_to_encerramento(phone):
+    """Encontra o business pelo telefone e move para o stage de Encerramento."""
+    if not phone:
+        p(f"  [ENCERR] Sem telefone -> skip mover business")
+        return False
+    try:
+        search_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
+        phones_to_try = [search_phone]
+        if not search_phone.startswith('55'):
+            phones_to_try.append('55' + search_phone)
+        biz_id = ''
+        for try_phone in phones_to_try:
+            if biz_id:
+                break
+            p(f"  [ENCERR] Buscando business para ...{try_phone[-4:]} (len={len(try_phone)})")
+            r = requests.get(f'{DCZ_CRM}/businesses', headers=H,
+                             params={'search': try_phone, 'limit': 5}, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                biz_list = data.get('data', data) if isinstance(data, dict) else data
+                if isinstance(biz_list, list) and biz_list:
+                    biz_id = biz_list[0].get('id', '')
+        if not biz_id:
+            p(f"  [ENCERR] Nenhum business encontrado para ...{search_phone[-4:]}")
+            return False
+        if not biz_id:
+            p(f"  [ENCERR] Business sem ID")
+            return False
+        r2 = requests.patch(
+            f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+            json={'stageId': STAGE_ENCERRAMENTO_ID}, timeout=10
+        )
+        ok = r2.status_code in (200, 204)
+        p(f"  [ENCERR] Business {biz_id[:16]} -> Encerramento (status={r2.status_code}, ok={ok})")
+        return ok
+    except Exception as e:
+        p(f"  [ENCERR] Erro ao mover business: {e}")
+        return False
+
+
+def close_conversation_crm(conv_id, phone=''):
+    """Move business para Encerramento e finaliza a conversa no DataCrazy."""
+    biz_ok = False
+    if phone:
+        biz_ok = _move_business_to_encerramento(phone)
+    else:
+        p(f"  [CLOSE] Telefone vazio, business NÃO será movido para Encerramento")
+
+    fin_ok = False
     try:
         r = requests.post(
             f'{DCZ_API}/api/v1/conversations/{conv_id}/finish',
             headers=H, json={}, timeout=10
         )
-        p(f"  Conv {conv_id[:12]} finalizada no DataCrazy (status={r.status_code})")
-        return r.status_code
+        p(f"  [CLOSE] Finish via DCZ_API (status={r.status_code})")
+        if r.status_code in (200, 201, 204):
+            fin_ok = True
     except Exception as e:
-        p(f"  Erro ao fechar conv: {e}")
-        return 500
+        p(f"  [CLOSE] Erro DCZ_API finish: {e}")
+
+    if not fin_ok:
+        try:
+            r2 = requests.post(
+                f'{DCZ_MSG}/messaging/conversations/{conv_id}/finish',
+                headers=H, json={}, timeout=10
+            )
+            p(f"  [CLOSE] Finish via DCZ_MSG fallback (status={r2.status_code})")
+            if r2.status_code in (200, 201, 204):
+                fin_ok = True
+        except Exception as e2:
+            p(f"  [CLOSE] Erro DCZ_MSG fallback: {e2}")
+
+    p(f"  [CLOSE] Conv {conv_id[:16]} -> biz_encerr={biz_ok} | finish={fin_ok}")
+    return 200 if fin_ok else 500
 
 
 def transfer_to_human(conv_id, reason=''):
@@ -1981,65 +2076,137 @@ def _dcz_transfer_lead(lead_id, attendant_name):
         return False
 
 
-def _dcz_transfer_business(phone, attendant_name):
-    """Encontra o negócio do aluno e atribui ao attendant."""
+def _dcz_transfer_business(phone, attendant_name, lead_id=''):
+    """Encontra o negócio via lead e atribui ao attendant + move para Atendimento."""
     nome_norm = attendant_name.strip().lower()
     nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm) if __import__('unicodedata').category(c) != 'Mn')
     att_id = ATTENDANT_MAP.get(nome_norm)
     if not att_id:
+        p(f"  [DIST-BIZ] attendantId não encontrado para '{attendant_name}'")
         return False
+
+    biz_id = ''
     try:
-        search_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
-        r = requests.get(f'{DCZ_CRM}/businesses', headers=H,
-                         params={'search': search_phone, 'limit': 5}, timeout=10)
-        if r.status_code != 200:
-            p(f"  [DIST] Business search falhou: {r.status_code}")
-            return False
-        data = r.json()
-        biz_list = data.get('data', data) if isinstance(data, dict) else data
-        if not isinstance(biz_list, list) or not biz_list:
-            p(f"  [DIST] Nenhum negócio encontrado para {search_phone}")
-            return False
-        biz = biz_list[0]
-        biz_id = biz.get('id', '')
+        # Busca via lead: GET /leads/{id} e pegar businesses
+        if lead_id:
+            p(f"  [DIST-BIZ] Buscando business via lead {lead_id[:16]}")
+            r = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
+            if r.status_code == 200:
+                lead_data = r.json()
+                # Tentar pegar business do lead
+                bizs = lead_data.get('businesses') or []
+                if isinstance(bizs, list) and bizs:
+                    biz_id = bizs[0].get('id', '') if isinstance(bizs[0], dict) else str(bizs[0])
+                    p(f"  [DIST-BIZ] Business do lead: {biz_id[:16]}")
+                if not biz_id:
+                    biz_ref = lead_data.get('businessId') or lead_data.get('business_id') or ''
+                    if biz_ref:
+                        biz_id = biz_ref if isinstance(biz_ref, str) else str(biz_ref)
+                        p(f"  [DIST-BIZ] BusinessId do lead: {biz_id[:16]}")
+                if not biz_id:
+                    p(f"  [DIST-BIZ] Lead não retornou businesses, keys: {list(lead_data.keys())[:15]}")
+
+        # Fallback 1: busca GET /businesses?leadId=
+        if not biz_id and lead_id:
+            try:
+                p(f"  [DIST-BIZ] Buscando GET /businesses?leadId={lead_id[:16]}")
+                r = requests.get(f'{DCZ_CRM}/businesses', headers=H,
+                                 params={'leadId': lead_id, 'limit': 5}, timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    biz_list = data.get('data', data) if isinstance(data, dict) else data
+                    if isinstance(biz_list, list) and biz_list:
+                        biz_id = biz_list[0].get('id', '')
+                        p(f"  [DIST-BIZ] Encontrado por leadId param: {biz_id[:16]}")
+                    else:
+                        p(f"  [DIST-BIZ] leadId param retornou vazio (type={type(biz_list).__name__})")
+                else:
+                    p(f"  [DIST-BIZ] leadId param status={r.status_code}")
+            except Exception as e_lid:
+                p(f"  [DIST-BIZ] Erro leadId param: {e_lid}")
+
+        # Fallback 2: busca por telefone (com e sem 55)
+        if not biz_id and phone:
+            search_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
+            phones_to_try = [search_phone]
+            if not search_phone.startswith('55'):
+                phones_to_try.append('55' + search_phone)
+            for try_phone in phones_to_try:
+                if biz_id:
+                    break
+                p(f"  [DIST-BIZ] Buscando por telefone {try_phone}")
+                r = requests.get(f'{DCZ_CRM}/businesses', headers=H,
+                                 params={'search': try_phone, 'limit': 5}, timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    biz_list = data.get('data', data) if isinstance(data, dict) else data
+                    if isinstance(biz_list, list) and biz_list:
+                        biz_id = biz_list[0].get('id', '')
+                        p(f"  [DIST-BIZ] Encontrado: {biz_id[:16]}")
+
+        if not biz_id and lead_id:
+            p(f"  [DIST-BIZ] Nenhum business encontrado, criando novo para lead {lead_id[:16]}")
+            try:
+                r_new = requests.post(f'{DCZ_CRM}/businesses', headers=H,
+                                      json={'leadId': lead_id, 'stageId': STAGE_ATENDIMENTO_ID,
+                                            'responsibleId': att_id}, timeout=10)
+                if r_new.status_code in (200, 201):
+                    biz_data = r_new.json()
+                    biz_id = biz_data.get('id', '')
+                    p(f"  [DIST-BIZ] Business criado: {biz_id[:16]} (já no Atendimento)")
+                    return True
+                else:
+                    p(f"  [DIST-BIZ] Criar business falhou: {r_new.status_code} - {r_new.text[:200]}")
+            except Exception as e_new:
+                p(f"  [DIST-BIZ] Erro criar business: {e_new}")
+
         if not biz_id:
+            p(f"  [DIST-BIZ] Nenhum negócio encontrado e não foi possível criar")
             return False
-        r2 = requests.patch(
+
+        # PATCH 1: responsável
+        r_resp = requests.patch(
             f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
             json={'responsibleId': att_id}, timeout=10
         )
-        p(f"  [DIST] Business {biz_id[:16]} -> responsibleId={att_id[:12]} (status={r2.status_code})")
-        # Mover para o stage de Atendimento
-        try:
-            r3 = requests.patch(
-                f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
-                json={'stageId': STAGE_ATENDIMENTO_ID}, timeout=10
-            )
-            p(f"  [DIST] Business {biz_id[:16]} -> stageId=Atendimento (status={r3.status_code})")
-        except Exception:
-            pass
-        return r2.status_code in (200, 201)
+        p(f"  [DIST-BIZ] Business {biz_id[:16]} -> responsibleId (status={r_resp.status_code})")
+
+        # PATCH 2: pipeline Atendimento
+        r_stage = requests.patch(
+            f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+            json={'stageId': STAGE_ATENDIMENTO_ID}, timeout=10
+        )
+        stage_ok = r_stage.status_code in (200, 201, 204)
+        p(f"  [DIST-BIZ] Business {biz_id[:16]} -> Atendimento (status={r_stage.status_code}, ok={stage_ok})")
+        if not stage_ok:
+            p(f"  [DIST-BIZ] Resposta: {r_stage.text[:300]}")
+
+        return r_resp.status_code in (200, 201, 204) and stage_ok
     except Exception as e:
-        p(f"  [DIST] Erro business transfer: {e}")
+        p(f"  [DIST-BIZ] Erro: {e}")
         return False
 
 
 def _dcz_transfer_chat(conv_id, attendant_name):
-    """Transfere a conversa para o attendant via change-attendant."""
+    """Transfere a conversa para o attendant via change-attendant (fluxo padrão)."""
     nome_norm = attendant_name.strip().lower()
     nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm) if __import__('unicodedata').category(c) != 'Mn')
     att_id = ATTENDANT_MAP.get(nome_norm)
     if not att_id:
+        p(f"  [DIST-CHAT] attendantId não encontrado para '{attendant_name}' (norm='{nome_norm}')")
         return False
     try:
         r = requests.post(
             f'{DCZ_MSG}/messaging/conversations/{conv_id}/change-attendant',
-            headers=H, json={'attendantId': att_id}, timeout=10
+            headers=H, json={'attendantId': att_id}, timeout=15
         )
-        p(f"  [DIST] Chat {conv_id[:16]} -> attendant={att_id[:12]} (status={r.status_code})")
-        return r.status_code in (200, 201)
+        ok = r.status_code in (200, 201, 204)
+        p(f"  [DIST-CHAT] change-attendant -> {att_id[:12]} (status={r.status_code}, ok={ok})")
+        if not ok:
+            p(f"  [DIST-CHAT] Resposta: {r.text[:300]}")
+        return ok
     except Exception as e:
-        p(f"  [DIST] Erro chat transfer: {e}")
+        p(f"  [DIST-CHAT] Erro: {e}")
         return False
 
 
@@ -2092,9 +2259,59 @@ def distribute_to_attendant(conv_id, reason=''):
     lead_id = student_profile.get('lead_id', '') if student_profile else ''
     phone = _current_phone or PHONE_TO_MONITOR
 
-    _dcz_transfer_lead(lead_id, nome)
-    _dcz_transfer_business(phone, nome)
-    _dcz_transfer_chat(conv_id, nome)
+    if not lead_id and phone:
+        try:
+            search_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
+            r_lead = requests.get(f'{DCZ_CRM}/leads', headers=H,
+                                  params={'search': search_phone, 'limit': 5}, timeout=10)
+            if r_lead.status_code == 200:
+                ld = r_lead.json()
+                leads_list = ld.get('data', ld) if isinstance(ld, dict) else ld
+                if isinstance(leads_list, list) and leads_list:
+                    lead_id = leads_list[0].get('id', '')
+                    p(f"  [DIST] Lead encontrado por telefone: {lead_id[:16]}")
+        except Exception as e:
+            p(f"  [DIST] Erro buscando lead por telefone: {e}")
+
+    if not lead_id and phone:
+        contact_name = ''
+        if student_profile and student_profile.get('name'):
+            contact_name = student_profile['name']
+        else:
+            cached = _cached_msgs.get(conv_id, [])
+            for cm in cached:
+                cn = cm.get('contactName', '') or cm.get('senderName', '') or ''
+                if cn:
+                    contact_name = cn
+                    break
+        new_lead_id, new_biz_id = create_lead_and_business(phone, contact_name)
+        if new_lead_id:
+            lead_id = new_lead_id
+            p(f"  [DIST] Lead criado para distribuição: {lead_id[:16]}")
+
+    lead_ok = _dcz_transfer_lead(lead_id, nome)
+    biz_ok = _dcz_transfer_business(phone, nome, lead_id=lead_id)
+    chat_ok = _dcz_transfer_chat(conv_id, nome)
+
+    p(f"  [DIST] Resultado parcial: lead={lead_ok} biz={biz_ok} chat={chat_ok}")
+
+    if not chat_ok:
+        p(f"  [DIST] ALERTA: chat transfer FALHOU - tentando change-attendant direto")
+        nome_norm = nome.strip().lower()
+        nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm) if __import__('unicodedata').category(c) != 'Mn')
+        att_id = ATTENDANT_MAP.get(nome_norm, '')
+        if att_id:
+            try:
+                r_direct = requests.post(
+                    f'{DCZ_MSG}/messaging/conversations/{conv_id}/change-attendant',
+                    headers=H, json={'attendantId': att_id}, timeout=15
+                )
+                p(f"  [DIST] Change-attendant direto (status={r_direct.status_code})")
+                if r_direct.status_code in (200, 201, 204):
+                    chat_ok = True
+            except Exception as e_d:
+                p(f"  [DIST] Change-attendant direto erro: {e_d}")
+
     _supabase_increment_fila(consultant['id'], consultant['fila'])
 
     note = (f"🔔 *Distribuição automática pelo agente IA*\n"
@@ -2117,9 +2334,12 @@ def distribute_to_attendant(conv_id, reason=''):
     meta_typing_on()
     send_and_track(conv_id, client_msg)
 
-    p(f"  [DIST] ✅ Distribuição concluída para {nome}")
-    if conv_id in _conv_states:
-        _conv_states[conv_id]['_human_took_over'] = True
+    p(f"  [DIST] ✅ Distribuição concluída para {nome} (lead={lead_ok} biz={biz_ok} chat={chat_ok})")
+    _conv_states.setdefault(conv_id, _default_conv_state())['_human_took_over'] = True
+    _conv_states[conv_id]['waiting_for_client'] = False
+    _conv_states[conv_id]['inactivity_start'] = 0
+    _conv_states[conv_id]['followup_stage'] = 0
+    _conv_states[conv_id]['_last_responded_ts'] = time.time()
     return True
 
 
@@ -2186,8 +2406,11 @@ def trigger_retention(conv_id, lead_id, question):
         _dcz_transfer_chat(conv_id, 'Wesley')
         p(f"  [RETENÇÃO] Chat transferido para Wesley")
 
-        if conv_id in _conv_states:
-            _conv_states[conv_id]['_human_took_over'] = True
+        _conv_states.setdefault(conv_id, _default_conv_state())['_human_took_over'] = True
+        _conv_states[conv_id]['waiting_for_client'] = False
+        _conv_states[conv_id]['inactivity_start'] = 0
+        _conv_states[conv_id]['followup_stage'] = 0
+        _conv_states[conv_id]['_last_responded_ts'] = time.time()
 
     except Exception as e:
         p(f"  [RETENÇÃO] Erro: {e}")
@@ -2320,9 +2543,21 @@ def _wait_automation_finish(conv_id, max_wait=30, stable_time=5):
 
 def _check_human_took_over(conv_id):
     """Verifica se um consultor humano enviou mensagem na conversa.
-    Só analisa mensagens enviadas APÓS o startup do agente que NÃO
-    foram enviadas pelo próprio agente (tracked por ID ou body hash)."""
+    Padrões de distribuição só contam se foram enviados NESTA sessão."""
     msgs = _cached_msgs.get(conv_id) or get_conversation_messages_api(conv_id, limit=10)
+
+    DIST_PATTERNS = ['distribuição automática pelo agente ia', 'vou te transferir para',
+                     'em breve um de nossos consultores', 'encaminhada para wesley']
+    for m in msgs:
+        body = (m.get('body', '') or '').strip()
+        if not body:
+            continue
+        mid = m.get('id', '')
+        if mid.startswith('sent_'):
+            body_lower = body.lower()
+            if any(pat in body_lower for pat in DIST_PATTERNS):
+                return True
+
     for m in msgs:
         if m.get('received', True):
             continue
@@ -2353,14 +2588,13 @@ def _check_human_took_over(conv_id):
     return False
 
 
-def get_new_client_message(conv_id):
+def get_new_client_message(conv_id, force=False):
     """Retorna (msg_id, body, is_button_click, image_info).
-    Processa a mensagem mais recente do aluno que ainda não foi respondida."""
+    Processa a mensagem mais recente do aluno que ainda não foi respondida.
+    force=True bypassa o filtro de startup (para conversas WAITING)."""
     msgs = get_conversation_messages_api(conv_id, limit=10)
     _cached_msgs[conv_id] = msgs
 
-    # Determinar se existe resposta REAL do bot APÓS a última msg do aluno.
-    # Compara timestamps: só conta como "respondido" se outgoing é mais recente que incoming.
     has_outgoing_response = False
     last_incoming_ts = ''
     last_outgoing_ts = ''
@@ -2383,19 +2617,15 @@ def get_new_client_message(conv_id):
         if mid in processed_msg_ids:
             continue
 
-        # Para msgs anteriores ao startup: processar se NÃO houver resposta do bot
-        # (aluno esperando). Limitar a 2h para evitar processar msgs muito antigas.
-        if _startup_ts > 0:
+        if not force and _startup_ts > 0:
             msg_ts = m.get('createdAt', '') or m.get('timestamp', '') or ''
             if msg_ts:
                 try:
                     from datetime import datetime
                     dt = datetime.fromisoformat(str(msg_ts).replace('Z', '+00:00'))
-                    msg_age = _startup_ts - dt.timestamp()
-                    if dt.timestamp() < _startup_ts:
-                        if has_outgoing_response or msg_age > 7200:
-                            processed_msg_ids.add(mid)
-                            continue
+                    if dt.timestamp() < _startup_ts and has_outgoing_response:
+                        processed_msg_ids.add(mid)
+                        continue
                 except Exception:
                     pass
 
@@ -2407,6 +2637,25 @@ def get_new_client_message(conv_id):
 
         image_info = extract_image_from_message(m)
         img_caption = image_info.get('caption', '') if image_info else ''
+
+        # Detectar áudio
+        _is_audio = False
+        _attachments = m.get('attachments', [])
+        if isinstance(_attachments, list):
+            for _att in _attachments:
+                if isinstance(_att, dict):
+                    _att_type = (_att.get('type', '') or _att.get('mimeType', '')).lower()
+                    if 'audio' in _att_type or 'ogg' in _att_type or 'voice' in _att_type:
+                        _is_audio = True
+                        break
+        if not _is_audio:
+            _src = m.get('sourceData', m.get('meta', m.get('payload', {})))
+            if isinstance(_src, dict):
+                _src_type = (_src.get('type', '') or '').lower()
+                if _src_type in ('audio', 'ptt', 'voice'):
+                    _is_audio = True
+                if _src.get('audio') or _src.get('ptt'):
+                    _is_audio = True
 
         body = (m.get('body', '') or '').strip()
         is_button_click = False
@@ -2431,6 +2680,9 @@ def get_new_client_message(conv_id):
 
         if not body and image_info:
             body = '[imagem enviada pelo aluno]'
+
+        if not body and _is_audio:
+            body = '[audio]'
 
         if not body:
             p(f"  SKIP vazio: mid={mid[:20]} keys={list(m.keys())[:8]}")
@@ -2833,6 +3085,42 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         p(f"  Identificando aluno...")
         student_profile = identify_student(cur_phone)
 
+    # === ÁUDIO: identificar aluno + criar lead se necessário + distribuir ===
+    if msg_body == '[audio]':
+        p(f"  [AUDIO] Áudio detectado -> distribuindo para consultor")
+        if not student_profile:
+            contact_name = ''
+            cached = _cached_msgs.get(conv_id, [])
+            for cm in cached:
+                cn = cm.get('contactName', '') or cm.get('senderName', '') or ''
+                if cn:
+                    contact_name = cn
+                    break
+            new_lead_id, _ = create_lead_and_business(cur_phone, contact_name)
+            if new_lead_id:
+                student_profile = {'lead_id': new_lead_id, 'name': contact_name,
+                                   'first_name': contact_name.split()[0] if contact_name else ''}
+                p(f"  [AUDIO] Lead criado: {new_lead_id}")
+        msg_audio = ("Recebi seu áudio! Como sou uma assistente virtual, "
+                     "não consigo ouvir áudios. Vou te transferir para um "
+                     "de nossos consultores que poderá te atender. Um momento! 😊")
+        meta_typing_on()
+        send_and_track(conv_id, msg_audio)
+        conversation_messages.append({'role': 'user', 'text': '[Áudio enviado]'})
+        conversation_messages.append({'role': 'bot', 'text': msg_audio})
+        distributed = distribute_to_attendant(conv_id, reason='Áudio recebido')
+        if distributed:
+            log_to_db(conv_id, '[audio]', msg_audio, 1.0, 'audio_distribute')
+        else:
+            log_to_db(conv_id, '[audio]', msg_audio, 1.0, 'audio_no_consultant')
+            waiting_for_client = True
+            inactivity_start = time.time()
+        try:
+            tabulate_interaction(conversation_messages, student_profile, cur_phone)
+        except Exception as e_tab:
+            p(f"    Erro tabulação áudio: {e_tab}")
+        return
+
     memory = load_memory(cur_phone)
     sentiment = detect_sentiment(question)
     name_suffix = f", {student_profile['first_name']}" if student_profile and student_profile.get('first_name') else ""
@@ -2864,9 +3152,101 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             send_and_track(conv_id, COMMERCIAL_REDIRECT_MSG)
             conversation_messages.append({'role': 'bot', 'text': COMMERCIAL_REDIRECT_MSG})
             log_to_db(conv_id, question, COMMERCIAL_REDIRECT_MSG, 1.0, 'polo_nao_commercial')
+            if not student_profile:
+                new_lead_id, _ = create_lead_and_business(_current_phone or '', '')
+                if new_lead_id:
+                    student_profile = {'lead_id': new_lead_id, 'name': '', 'first_name': ''}
+                    p(f"  Lead criado para polo não encontrado: {new_lead_id}")
             distribute_to_attendant(conv_id, 'Aluno não encontrado no polo - encaminhar para comercial')
             waiting_for_client = False; inactivity_start = 0
             return
+
+    # === ESCALAÇÃO EXPLÍCITA (ANTES de is_first, para sempre distribuir) ===
+    if any(w in q_lower for w in ESCALATE_WORDS):
+        meta_typing_on()
+        log_to_db(conv_id, question, ESCALATION_MSG, 1.0, 'escalate_request')
+        distributed = distribute_to_attendant(conv_id, f'Solicitação explícita do aluno: "{question[:80]}"')
+        conversation_messages.append({'role': 'bot', 'text': ESCALATION_MSG})
+        try:
+            summary = generate_conversation_summary(conversation_messages)
+            save_memory(cur_phone, student_profile, 'escalacao', summary, sentiment)
+            tabulate_interaction(conversation_messages, student_profile, cur_phone)
+        except Exception as e_esc:
+            p(f"  [ESCALADO] Erro na tabulação/memória: {e_esc}")
+        waiting_for_client = False; inactivity_start = 0
+        p(f"  [ESCALADO] Distribuído={distributed} - Follow-ups desativados")
+        return
+
+    # === ENCERRAMENTO EXPLÍCITO (ANTES de is_first, para sempre encerrar) ===
+    close_match = any(w in q_lower for w in CLOSING_WORDS) or q_lower in (
+        'não obrigado', 'nao obrigado', 'encerrar', 'não', 'nao',
+        'pode encerrar', 'pode fechar', 'fechar', 'encerrar atendimento',
+        'não preciso', 'nao preciso', 'não preciso de mais nada', 'nao preciso de mais nada',
+    )
+    if close_match:
+        msg = CLOSING_RESPONSE_TPL.format(name_suffix=name_suffix)
+        meta_typing_on()
+        send_and_track(conv_id, msg)
+        conversation_messages.append({'role': 'bot', 'text': msg})
+        log_to_db(conv_id, question, msg, 1.0, 'closing')
+
+        close_conversation_crm(conv_id, phone=_current_phone)
+        try:
+            summary = generate_conversation_summary(conversation_messages)
+            topic = detect_topic_from_messages(conversation_messages)
+            save_memory(cur_phone, student_profile, topic, summary, sentiment)
+            tabulate_interaction(conversation_messages, student_profile, cur_phone)
+        except Exception as e_close:
+            p(f"  [ENCERR] Erro na tabulação/memória: {e_close}")
+        conversation_messages.clear()
+        conversation_greeted.discard(conv_id)
+        waiting_for_client = False
+        followup_stage = 0
+        inactivity_start = 0
+        return
+
+    # === RESOLVEU (ANTES de is_first, para sempre encerrar) ===
+    if any(w in q_lower for w in RESOLVED_WORDS):
+        msg = f"Que bom que pude ajudar{name_suffix}! Se precisar de algo no futuro, estou à disposição. Até mais! 😊"
+        meta_typing_on()
+        send_and_track(conv_id, msg)
+        conversation_messages.append({'role': 'bot', 'text': msg})
+        log_to_db(conv_id, question, msg, 1.0, 'resolved')
+
+        close_conversation_crm(conv_id, phone=_current_phone)
+        try:
+            summary = generate_conversation_summary(conversation_messages)
+            topic = detect_topic_from_messages(conversation_messages)
+            save_memory(cur_phone, student_profile, topic, summary, sentiment)
+            tabulate_interaction(conversation_messages, student_profile, cur_phone)
+        except Exception as e_resolved:
+            p(f"  [RESOLVEU] Erro na tabulação/memória: {e_resolved}")
+        conversation_messages.clear()
+        conversation_greeted.discard(conv_id)
+        waiting_for_client = False
+        followup_stage = 0
+        inactivity_start = 0
+        return
+
+    # === RETENÇÃO (cancelamento / trancamento) — ANTES de is_first ===
+    if is_retention_intent(question):
+        p(f"  [RETENÇÃO] Intenção detectada: \"{question[:80]}\"")
+        meta_typing_on()
+        send_and_track(conv_id, RETENTION_MSG)
+        conversation_messages.append({'role': 'bot', 'text': RETENTION_MSG})
+        log_to_db(conv_id, question, RETENTION_MSG, 1.0, 'retention')
+
+        lead_id = student_profile.get('lead_id') if student_profile else None
+        trigger_retention(conv_id, lead_id, question)
+        try:
+            summary = generate_conversation_summary(conversation_messages)
+            save_memory(cur_phone, student_profile, 'retencao', summary, sentiment)
+            tabulate_interaction(conversation_messages, student_profile, cur_phone)
+        except Exception as e_ret:
+            p(f"  [RETENÇÃO] Erro na tabulação/memória: {e_ret}")
+        waiting_for_client = False; inactivity_start = 0
+        p(f"  [RETENÇÃO] Conversa encaminhada para Wesley - follow-ups desativados")
+        return
 
     # === "JÁ SOU ALUNO" / "QUERO ME MATRICULAR" (resposta ao "não encontrado na base") ===
     if q_lower in ('já sou aluno', 'ja sou aluno'):
@@ -2885,6 +3265,20 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         send_and_track(conv_id, COMMERCIAL_REDIRECT_MSG)
         conversation_messages.append({'role': 'bot', 'text': COMMERCIAL_REDIRECT_MSG})
         log_to_db(conv_id, question, COMMERCIAL_REDIRECT_MSG, 1.0, 'commercial_redirect')
+        if not student_profile:
+            contact_name = ''
+            cached = _cached_msgs.get(conv_id) or []
+            for cm in cached:
+                cn = cm.get('contactName', '') or cm.get('senderName', '') or ''
+                if cn:
+                    contact_name = cn
+                    break
+            new_lead_id, new_biz_id = create_lead_and_business(
+                _current_phone or '', contact_name
+            )
+            if new_lead_id:
+                student_profile = {'lead_id': new_lead_id, 'name': contact_name, 'first_name': contact_name.split()[0] if contact_name else ''}
+                p(f"  Lead criado para interessado em matrícula: {new_lead_id}")
         distribute_to_attendant(conv_id, 'Interessado em matrícula - encaminhar para comercial')
         waiting_for_client = False; inactivity_start = 0
         return
@@ -2896,7 +3290,23 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             p(f"  Lead existe no CRM -> saudação + menu (sem mencionar matrícula)")
         else:
             _student_in_base = False
-            p(f"  Lead NÃO encontrado no CRM -> fluxo de identificação")
+            p(f"  Lead NÃO encontrado no CRM -> criando lead + fluxo de identificação")
+            contact_name = ''
+            cached = _cached_msgs.get(conv_id, [])
+            for cm in cached:
+                cn = cm.get('contactName', '') or cm.get('senderName', '') or ''
+                if cn:
+                    contact_name = cn
+                    break
+            new_lead_id, new_biz_id = create_lead_and_business(
+                _current_phone or '', contact_name
+            )
+            if new_lead_id:
+                student_profile = {
+                    'lead_id': new_lead_id, 'name': contact_name,
+                    'first_name': contact_name.split()[0] if contact_name else ''
+                }
+                p(f"  Lead criado para contato novo: {new_lead_id}")
             msg = ("👋 Oi, tudo bem?\n\n"
                    "Não localizei este telefone em nosso sistema.\n\n"
                    "Para continuarmos, por favor *escolha* uma das opções abaixo: 👇")
@@ -2954,9 +3364,25 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         waiting_for_client = True; inactivity_start = time.time()
         return
 
-    # === BLOQUEIO: lead NÃO encontrado no CRM ===
+    # === LEAD NÃO ENCONTRADO: criar lead e reapresentar opções ===
     if _student_in_base is False and student_profile is None:
-        p(f"  Lead não encontrado -> reapresentando opções de identificação")
+        contact_name = ''
+        cached = _cached_msgs.get(conv_id, [])
+        for cm in cached:
+            cn = cm.get('contactName', '') or cm.get('senderName', '') or ''
+            if cn:
+                contact_name = cn
+                break
+        new_lead_id, new_biz_id = create_lead_and_business(
+            _current_phone or '', contact_name
+        )
+        if new_lead_id:
+            student_profile = {
+                'lead_id': new_lead_id, 'name': contact_name,
+                'first_name': contact_name.split()[0] if contact_name else ''
+            }
+            p(f"  Lead criado automaticamente: {new_lead_id}")
+        p(f"  Lead não encontrado no CRM -> opções de identificação")
         msg = ("Para que eu possa te atender, preciso primeiro te localizar em nosso sistema.\n\n"
                "Por favor, escolha uma das opções abaixo: 👇")
         meta_typing_on()
@@ -2964,83 +3390,6 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         conversation_messages.append({'role': 'bot', 'text': msg})
         log_to_db(conv_id, question, msg, 1.0, 'not_in_base_block')
         waiting_for_client = True; inactivity_start = time.time()
-        return
-
-    # === RESOLVEU ===
-    if any(w in q_lower for w in RESOLVED_WORDS):
-        msg = f"Que bom que pude ajudar{name_suffix}! Se precisar de algo no futuro, estou à disposição. Até mais! 😊"
-        meta_typing_on()
-        send_and_track(conv_id, msg)
-        conversation_messages.append({'role': 'bot', 'text': msg})
-        log_to_db(conv_id, question, msg, 1.0, 'resolved')
-
-        summary = generate_conversation_summary(conversation_messages)
-        topic = detect_topic_from_messages(conversation_messages)
-        save_memory(cur_phone, student_profile, topic, summary, sentiment)
-        tabulate_interaction(conversation_messages, student_profile, cur_phone)
-        close_conversation_crm(conv_id)
-        conversation_messages.clear()
-        conversation_greeted.discard(conv_id)
-        waiting_for_client = False
-        followup_stage = 0
-        inactivity_start = 0
-        return
-
-    # === ENCERRAMENTO ===
-    close_match = any(w in q_lower for w in CLOSING_WORDS) or q_lower in (
-        'não obrigado', 'nao obrigado', 'encerrar', 'não', 'nao',
-        'pode encerrar', 'pode fechar', 'fechar', 'encerrar atendimento',
-        'não preciso', 'nao preciso', 'não preciso de mais nada', 'nao preciso de mais nada',
-    )
-    if close_match and not is_first:
-        msg = CLOSING_RESPONSE_TPL.format(name_suffix=name_suffix)
-        meta_typing_on()
-        send_and_track(conv_id, msg)
-        conversation_messages.append({'role': 'bot', 'text': msg})
-        log_to_db(conv_id, question, msg, 1.0, 'closing')
-
-        summary = generate_conversation_summary(conversation_messages)
-        topic = detect_topic_from_messages(conversation_messages)
-        save_memory(cur_phone, student_profile, topic, summary, sentiment)
-        tabulate_interaction(conversation_messages, student_profile, cur_phone)
-        close_conversation_crm(conv_id)
-        conversation_messages.clear()
-        conversation_greeted.discard(conv_id)
-        waiting_for_client = False
-        followup_stage = 0
-        inactivity_start = 0
-        return
-
-    # === RETENÇÃO (cancelamento / trancamento) — ANTES da escalação ===
-    if is_retention_intent(question):
-        p(f"  [RETENÇÃO] Intenção detectada: \"{question[:80]}\"")
-        meta_typing_on()
-        send_and_track(conv_id, RETENTION_MSG)
-        conversation_messages.append({'role': 'bot', 'text': RETENTION_MSG})
-        log_to_db(conv_id, question, RETENTION_MSG, 1.0, 'retention')
-
-        lead_id = student_profile.get('lead_id') if student_profile else None
-        trigger_retention(conv_id, lead_id, question)
-
-        summary = generate_conversation_summary(conversation_messages)
-        save_memory(cur_phone, student_profile, 'retencao', summary, sentiment)
-        tabulate_interaction(conversation_messages, student_profile, cur_phone)
-        waiting_for_client = False; inactivity_start = 0
-        p(f"  [RETENÇÃO] Conversa encaminhada para Wesley - follow-ups desativados")
-        return
-
-    # === ESCALAÇÃO EXPLÍCITA ===
-    if any(w in q_lower for w in ESCALATE_WORDS):
-        meta_typing_on()
-        log_to_db(conv_id, question, ESCALATION_MSG, 1.0, 'escalate_request')
-        distributed = distribute_to_attendant(conv_id, f'Solicitação explícita do aluno: "{question[:80]}"')
-        conversation_messages.append({'role': 'bot', 'text': ESCALATION_MSG})
-
-        summary = generate_conversation_summary(conversation_messages)
-        save_memory(cur_phone, student_profile, 'escalacao', summary, sentiment)
-        tabulate_interaction(conversation_messages, student_profile, cur_phone)
-        waiting_for_client = False; inactivity_start = 0
-        p(f"  [ESCALADO] Distribuído={distributed} - Follow-ups desativados")
         return
 
     # === SIM (resposta ao "algo mais específico?") ===
@@ -3151,6 +3500,11 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         send_and_track(conv_id, "Ficou alguma dúvida sobre o assunto? 😊\nDigite *Resolveu* ou me conte sua dúvida!")
         conversation_messages.append({'role': 'bot', 'text': direct_text})
         log_to_db(conv_id, question, direct_text, 1.0, 'menu_direct')
+        cur_phone = _current_phone or PHONE_TO_MONITOR
+        try:
+            tabulate_interaction(conversation_messages, student_profile, cur_phone)
+        except Exception as e_tab:
+            p(f"    Erro tabulação menu direto: {e_tab}")
         waiting_for_client = True; inactivity_start = time.time()
         return
 
@@ -3201,6 +3555,11 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         send_and_track(conv_id, msg, buttons=['Tentar de novo', 'Falar com atendente', 'Ver opções'])
         conversation_messages.append({'role': 'bot', 'text': msg})
         log_to_db(conv_id, question, msg, top_score, 'escalate_low_sim')
+        cur_phone = _current_phone or PHONE_TO_MONITOR
+        try:
+            tabulate_interaction(conversation_messages, student_profile, cur_phone)
+        except Exception as e_tab:
+            p(f"    Erro tabulação low_sim: {e_tab}")
         waiting_for_client = True; inactivity_start = time.time()
         return
 
@@ -3255,6 +3614,12 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
 
     conversation_messages.append({'role': 'bot', 'text': clean})
     log_to_db(conv_id, question, clean, confidence, 'auto_reply')
+
+    cur_phone = _current_phone or PHONE_TO_MONITOR
+    try:
+        tabulate_interaction(conversation_messages, student_profile, cur_phone)
+    except Exception as e_tab:
+        p(f"    Erro tabulação RAG: {e_tab}")
 
     waiting_for_client = True; inactivity_start = time.time()
 
@@ -3330,6 +3695,18 @@ def main():
 
     global _startup_ts
     _startup_ts = time.time()
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM msg_dedup WHERE processed_at < NOW() - INTERVAL '5 minutes'")
+        deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        if deleted:
+            p(f"  Dedup cleanup: {deleted} entradas antigas removidas")
+    except Exception:
+        pass
     p(f"  Startup: {time.strftime('%H:%M:%S')} (só processa mensagens novas a partir de agora)")
 
     p(f"")
@@ -3405,34 +3782,151 @@ def main():
                 continue
 
             convs_data = r.json()
-            convs = convs_data.get('data', convs_data) if isinstance(convs_data, dict) else convs_data
-            if not isinstance(convs, list) or not convs:
+            convs_raw = convs_data.get('data', convs_data) if isinstance(convs_data, dict) else convs_data
+            if not isinstance(convs_raw, list) or not convs_raw:
                 continue
 
-            # Separar: conversas onde aluno espera resposta (prioridade) vs resto
-            # Filtrar waiting para apenas as últimas 2h (matching limite em get_new_client_message)
-            from datetime import datetime, timezone
-            cutoff_iso = datetime.fromtimestamp(
-                time.time() - 7200, tz=timezone.utc
-            ).strftime('%Y-%m-%dT%H:%M:%S')
+            # FILTRO: Não Iniciados (unstarted) do pipeline Base de Alunos + instância CSV_ACADEMICO_OFICIAL
+            # Somente conversas recentes (até 4h) para não pegar conversas antigas
+            _MAX_CONV_AGE_S = 8 * 3600
+            _now_utc = time.time()
+            convs_nao_iniciados = []
+            convs_opened = []
+            _other_pipeline = 0
+            _other_instance = 0
+            _finished_count = 0
+            _too_old = 0
+            _with_attendant = 0
+            _no_pipeline = 0
+            for _cf in convs_raw:
+                _inst = _cf.get('instance', {}) or {}
+                _inst_id = _inst.get('id', '') if isinstance(_inst, dict) else str(_inst)
+                if _inst_id != INSTANCE_ACADEMICO_ID:
+                    _other_instance += 1
+                    continue
+                _ct = _cf.get('contact', {}) or {}
+                _ext = _ct.get('externalInfo', {}) or {}
+                _pids = _ext.get('pipelineIds', []) or []
+                if not _pids:
+                    _no_pipeline += 1
+                elif PIPELINE_ALUNOS_ID not in _pids:
+                    _other_pipeline += 1
+                    continue
+                _statuses = _cf.get('statuses', []) or []
+                if 'finished' in _statuses:
+                    _finished_count += 1
+                    continue
+                if _cf.get('attendants', []):
+                    _with_attendant += 1
+                    continue
+                _last_recv = _cf.get('lastReceivedMessageDate', '') or _cf.get('lastMessageDate', '') or ''
+                if _last_recv:
+                    try:
+                        from datetime import datetime as _dtf
+                        _dt_recv = _dtf.fromisoformat(str(_last_recv).replace('Z', '+00:00'))
+                        if (_now_utc - _dt_recv.timestamp()) > _MAX_CONV_AGE_S:
+                            _too_old += 1
+                            continue
+                    except Exception:
+                        pass
+                if 'unstarted' in _statuses or 'hidden' in _statuses:
+                    convs_nao_iniciados.append(_cf)
+                elif 'opened' in _statuses:
+                    convs_opened.append(_cf)
+            if cycle <= 5 or cycle % 10 == 0:
+                p(f"  [FILTRO] Total API={len(convs_raw)} | Outra instancia={_other_instance} | Outro pipeline={_other_pipeline} | Sem pipeline={_no_pipeline} | Finished={_finished_count} | Com atendente={_with_attendant} | Antigas(>8h)={_too_old} | Nao Iniciados={len(convs_nao_iniciados)} | Opened={len(convs_opened)}")
+
+            # Separar Não Iniciados: aluno espera resposta (prioridade) vs resto
             waiting = []
             rest = []
-            for c in convs:
+            for c in convs_nao_iniciados:
                 recv = c.get('lastReceivedMessageDate', '') or ''
                 sent = c.get('lastSendedMessageDate', '') or ''
-                if recv > sent and recv >= cutoff_iso:
+                if recv > sent:
                     waiting.append(c)
                 else:
                     rest.append(c)
-            waiting.sort(key=lambda c: c.get('lastReceivedMessageDate', ''))
-            rest.sort(key=lambda c: c.get('lastReceivedMessageDate', ''), reverse=True)
-            convs = waiting + rest[:5]
+            waiting.sort(key=lambda c: c.get('lastReceivedMessageDate', '') or '')
+            rest.sort(key=lambda c: c.get('lastSendedMessageDate', '') or '')
+            convs = waiting + rest
+            if cycle <= 5 or cycle % 10 == 0 or len(waiting) > 0:
+                _oldest_info = ''
+                if waiting:
+                    _w0 = waiting[0]
+                    _w0_ct = _w0.get('contact', {}) or {}
+                    _w0_name = (_w0_ct.get('name', '') or '')[:15]
+                    _w0_recv = _w0.get('lastReceivedMessageDate', '') or ''
+                    if _w0_recv:
+                        try:
+                            from datetime import datetime as _dtq
+                            _w0_dt = _dtq.fromisoformat(str(_w0_recv).replace('Z', '+00:00'))
+                            _w0_age = int((time.time() - _w0_dt.timestamp()) / 60)
+                            _oldest_info = f" | Mais antigo: {_w0_name} ({_w0_age}min)"
+                        except Exception:
+                            _oldest_info = f" | Mais antigo: {_w0_name}"
+                p(f"  [QUEUE] waiting={len(waiting)} rest={len(rest)} -> processando {len(convs)}{_oldest_info}")
 
+            # === MONITORAR FOLLOW-UP: conversas onde agente respondeu E aluno NÃO respondeu ===
+            # Só monitora se sent > recv (agente enviou a última mensagem)
+            _fu_candidates = list(convs_opened) + [c for c in rest if (c.get('lastSendedMessageDate','') or '') > (c.get('lastReceivedMessageDate','') or '')]
+            _fu_tracked = 0
+            for _oc in _fu_candidates:
+                _oc_id = _oc.get('id', '')
+                if not _oc_id:
+                    continue
+                if _oc_id in _conv_states and _conv_states[_oc_id].get('waiting_for_client'):
+                    continue
+                if _oc_id in _conv_states and _conv_states[_oc_id].get('_human_took_over'):
+                    continue
+                _oc_sent = _oc.get('lastSendedMessageDate', '') or ''
+                _oc_recv = _oc.get('lastReceivedMessageDate', '') or ''
+                if not _oc_sent:
+                    continue
+                if _oc_recv and _oc_recv > _oc_sent:
+                    continue
+                _oc_contact = _oc.get('contact', {}) or {}
+                _oc_name = _oc_contact.get('name', '') or ''
+                _oc_fname = _oc_name.split()[0] if _oc_name else ''
+                _oc_phone = (_oc_contact.get('phoneNumber', '') or _oc_contact.get('contactId', '') or '').replace('+','').replace(' ','')
+                _oc_start = time.time()
+                try:
+                    from datetime import datetime as _dtoc
+                    _oc_dt = _dtoc.fromisoformat(str(_oc_sent).replace('Z', '+00:00'))
+                    _oc_start = _oc_dt.timestamp()
+                except Exception:
+                    pass
+                _conv_states.setdefault(_oc_id, _default_conv_state())
+                _conv_states[_oc_id]['phone'] = _oc_phone
+                _conv_states[_oc_id]['student_profile'] = {'name': _oc_name, 'first_name': _oc_fname} if _oc_name else None
+                _conv_states[_oc_id]['waiting_for_client'] = True
+                _conv_states[_oc_id]['inactivity_start'] = _oc_start
+                _lm_raw = _oc.get('lastMessage', '') or ''
+                _last_msg = (_lm_raw.get('body', '') if isinstance(_lm_raw, dict) else str(_lm_raw)).lower()
+                if 'ainda est' in _last_msg and 'por a' in _last_msg:
+                    _conv_states[_oc_id]['followup_stage'] = 1
+                else:
+                    _conv_states[_oc_id]['followup_stage'] = 0
+                _fu_tracked += 1
+            def _get_last_msg_body(c):
+                lm = c.get('lastMessage', '') or ''
+                return (lm.get('body', '') if isinstance(lm, dict) else str(lm)).lower()
+            _fu_with_followup = sum(1 for c in _fu_candidates if 'ainda est' in _get_last_msg_body(c) and 'por a' in _get_last_msg_body(c))
+            if cycle <= 3 and _fu_tracked > 0:
+                p(f"  [FOLLOW-UP] {_fu_tracked} monitoradas | {_fu_with_followup} ja com follow-up (auto-close direto)")
+
+            _conv_processed = 0
+            _conv_skipped_human = 0
+            _conv_no_msg = 0
+            _conv_responded = 0
+            _is_waiting_set = set(id(c) for c in waiting)
             for conv in convs:
               try:
                 conv_id = conv.get('id', '')
                 if not conv_id:
                     continue
+
+                _in_waiting = id(conv) in _is_waiting_set
+                _conv_processed += 1
 
                 # Extrair telefone do contato desta conversa
                 contact = conv.get('contact', {}) or {}
@@ -3456,13 +3950,47 @@ def main():
                     _current_phone = conv_phone
                     _conv_states.setdefault(conv_id, _default_conv_state())['phone'] = conv_phone
 
-                # Se consultor humano já assumiu, não processar mais nada
-                st = _conv_states.get(conv_id, {})
-                if st.get('_human_took_over'):
+                # Se a conversa já tem atendente humano atribuído, ignorar
+                conv_attendants = conv.get('attendants', [])
+                if conv_attendants:
+                    _conv_states.setdefault(conv_id, _default_conv_state())['_human_took_over'] = True
+                    _conv_skipped_human += 1
                     continue
 
+                # Se consultor humano já assumiu nesta sessão, não processar
+                st = _conv_states.get(conv_id, {})
+                if st.get('_human_took_over'):
+                    _conv_skipped_human += 1
+                    continue
+
+                # Para conversas WAITING: limpar dedup da msg MAIS RECENTE (apenas 1)
+                if _in_waiting:
+                    _lr = _conv_states.get(conv_id, {}).get('_last_responded_ts', 0)
+                    if _lr and (time.time() - _lr) < 60:
+                        _conv_no_msg += 1
+                        continue
+                    try:
+                        _pre_msgs = get_conversation_messages_api(conv_id, limit=5)
+                        _latest_recv = None
+                        for m in _pre_msgs:
+                            if m.get('id') and m.get('received', False):
+                                _latest_recv = m.get('id')
+                                break
+                        if _latest_recv:
+                            conn = get_db()
+                            cur = conn.cursor()
+                            cur.execute("DELETE FROM msg_dedup WHERE msg_id = %s", (_latest_recv,))
+                            _pre_cleared = cur.rowcount
+                            conn.commit()
+                            cur.close()
+                            conn.close()
+                            if _pre_cleared > 0:
+                                processed_msg_ids.discard(_latest_recv)
+                    except Exception:
+                        pass
+
                 try:
-                    msg_id, msg_body, is_click, img_info = get_new_client_message(conv_id)
+                    msg_id, msg_body, is_click, img_info = get_new_client_message(conv_id, force=_in_waiting)
                 except Exception:
                     msg_id = msg_body = is_click = img_info = None
 
@@ -3473,19 +4001,35 @@ def main():
                     if msg_id:
                         processed_msg_ids.add(msg_id)
                     _save_conv_state(conv_id)
+                    _conv_skipped_human += 1
                     continue
 
                 if msg_id and msg_body:
+                    _lr = _conv_states.get(conv_id, {}).get('_last_responded_ts', 0)
+                    if _lr and (time.time() - _lr) < 60:
+                        _conv_no_msg += 1
+                        continue
                     if not _current_phone and conv_phone:
                         _current_phone = conv_phone
                     p(f"  >>> MSG [{conv_phone[-4:] if conv_phone else '????'}]: \"{msg_body[:80]}\"{' [+IMG]' if img_info else ''}")
                     handle_message(conv_id, msg_id, msg_body, is_click, image_info=img_info)
+                    _conv_states.setdefault(conv_id, _default_conv_state())['_last_responded_ts'] = time.time()
                     _save_conv_state(conv_id)
+                    _conv_responded += 1
+                else:
+                    _conv_no_msg += 1
+                    if _in_waiting:
+                        _ct_name = contact.get('name', '') or ''
+                        p(f"  [WAITING-SEM-MSG] [{conv_phone[-4:] if conv_phone else '????'}] {_ct_name[:20]} - nenhuma mensagem nova encontrada")
               except Exception as conv_err:
                 p(f"  ERR conv {conv.get('id','?')[:12]}: {type(conv_err).__name__}: {conv_err}")
                 sys.stdout.flush()
+            if cycle <= 10 or cycle % 10 == 0:
+                p(f"  [CICLO-{cycle}] Processadas={_conv_processed} | Respondidas={_conv_responded} | Sem msg={_conv_no_msg} | Skip humano={_conv_skipped_human}")
 
             # === FOLLOW-UP & ENCERRAMENTO POR INATIVIDADE (para TODAS conversas) ===
+            _closes_this_cycle = 0
+            _MAX_CLOSES_PER_CYCLE = 5
             for cid, st in list(_conv_states.items()):
                 if st.get('_human_took_over'):
                     continue
@@ -3496,6 +4040,20 @@ def main():
                     cur_phone = st.get('phone', '')
 
                     if st.get('followup_stage', 0) == 0 and elapsed >= FOLLOWUP_1_DELAY:
+                        # Verificar se tem atendente antes de enviar follow-up
+                        try:
+                            r_fu_check = requests.get(
+                                f'{DCZ_MSG}/messaging/conversations/{cid}',
+                                headers=H, timeout=8)
+                            if r_fu_check.status_code == 200:
+                                fu_data = r_fu_check.json()
+                                if fu_data.get('attendants', []):
+                                    p(f"  [FOLLOWUP-1] [{cur_phone[-4:] if cur_phone else '????'}] Atendente presente -> cancelando follow-up")
+                                    st['_human_took_over'] = True
+                                    st['waiting_for_client'] = False
+                                    continue
+                        except Exception:
+                            pass
                         msg1 = FOLLOWUP_1_MSG.format(name=name_fmt)
                         p(f"  [FOLLOWUP-1] [{cur_phone[-4:] if cur_phone else '????'}] {int(elapsed)}s sem resposta")
                         send_message_crm(cid, msg1, buttons=FOLLOWUP_1_BUTTONS)
@@ -3503,8 +4061,40 @@ def main():
                         st['followup_stage'] = 1
 
                     elif st.get('followup_stage', 0) == 1 and elapsed >= CLOSE_DELAY:
+                        # SEGURANÇA: sempre verificar via API se há atendente antes de fechar
+                        _safe_to_close = False
+                        try:
+                            r_check = requests.get(
+                                f'{DCZ_MSG}/messaging/conversations/{cid}',
+                                headers=H, timeout=8)
+                            if r_check.status_code == 200:
+                                conv_data = r_check.json()
+                                if conv_data.get('attendants', []):
+                                    p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Atendente presente -> cancelando close")
+                                    st['_human_took_over'] = True
+                                    st['waiting_for_client'] = False
+                                    continue
+                                # Verificar se última msg recebida é depois do follow-up (aluno respondeu)
+                                recv_ts = conv_data.get('lastReceivedMessageDate', '') or ''
+                                sent_ts = conv_data.get('lastSendedMessageDate', '') or ''
+                                if recv_ts and sent_ts and recv_ts > sent_ts:
+                                    p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Aluno respondeu depois do follow-up -> cancelando close")
+                                    st['waiting_for_client'] = False
+                                    st['inactivity_start'] = 0
+                                    st['followup_stage'] = 0
+                                    continue
+                                _safe_to_close = True
+                            else:
+                                p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] API retornou {r_check.status_code} -> adiando close")
+                        except Exception as e_check:
+                            p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Erro ao verificar API: {e_check} -> adiando close")
+                        if not _safe_to_close:
+                            continue
+                        if _closes_this_cycle >= _MAX_CLOSES_PER_CYCLE:
+                            continue
                         close_msg = CLOSE_INACTIVITY_MSG.format(name=name_fmt)
                         p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] {int(elapsed)}s -> encerrando")
+                        _closes_this_cycle += 1
                         msgs_list = st.get('conversation_messages', [])
                         if msgs_list:
                             try:
@@ -3516,13 +4106,32 @@ def main():
                                 p(f"  Erro ao salvar antes de fechar: {e}")
                         send_message_crm(cid, close_msg, buttons=CLOSE_INACTIVITY_BUTTONS)
                         log_to_db(cid, '(inatividade)', close_msg, 1.0, 'auto_close')
-                        close_conversation_crm(cid)
+                        close_conversation_crm(cid, phone=cur_phone)
                         st['conversation_messages'] = []
                         conversation_greeted.discard(cid)
                         st['waiting_for_client'] = False
                         st['followup_stage'] = 0
                         st['inactivity_start'] = 0
                         p(f"  [AUTO-CLOSE] Conversa encerrada e estado resetado")
+
+            # === VARREDURA PROFUNDA A CADA ~5 MIN: limpar dedup antigos (NÃO limpar processed_msg_ids global) ===
+            if cycle % 100 == 0 and len(waiting) > 0:
+                _deep_cleared = 0
+                try:
+                    conn = get_db()
+                    cur = conn.cursor()
+                    cur.execute("SELECT msg_id FROM msg_dedup WHERE processed_at < NOW() - INTERVAL '10 minutes'")
+                    _old_ids = [row[0] for row in cur.fetchall()]
+                    if _old_ids:
+                        cur.execute("DELETE FROM msg_dedup WHERE msg_id = ANY(%s)", (_old_ids,))
+                        _deep_cleared = cur.rowcount
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                    if _deep_cleared:
+                        p(f"  [DEEP-SCAN] Limpeza: {_deep_cleared} dedup >10min removidos (processed_msg_ids preservado)")
+                except Exception as e_deep:
+                    p(f"  [DEEP-SCAN] Erro: {e_deep}")
 
             if cycle % 10 == 0:
                 active_count = sum(1 for s in _conv_states.values() if s.get('waiting_for_client'))
