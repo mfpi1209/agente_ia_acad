@@ -1033,17 +1033,43 @@ def tabulate_interaction(messages, profile, phone):
     if not messages or len(messages) < 2:
         return
 
-    # Extrair última dupla pergunta/resposta
+    _skip_user = {
+        'oi', 'olá', 'ola', 'oii', 'oiii', 'oi!', 'olá!', 'bom dia', 'boa tarde',
+        'boa noite', 'hello', 'hi', 'hey', 'fala', 'salve', 'opa', 'eae',
+        'tudo bem', 'tudo bom', 'como vai', 'oie', 'oiee', 'bom dia!', 'boa tarde!',
+        'boa noite!', 'oi boa tarde', 'oi bom dia', 'oi boa noite',
+    }
+    _skip_bot_patterns = [
+        'selecione uma opção', 'veja as opções', 'como posso te ajudar',
+        'bem-vindo', 'ainda está por aí', 'ficou alguma dúvida',
+        'não tivemos retorno', 'obrigado pelo contato',
+        'que bom que pude ajudar', 'qualquer dúvida é só nos chamar',
+    ]
+
+    def _is_skip_user(text):
+        return text.strip().lower().rstrip('!?.,').strip() in _skip_user
+
+    def _is_skip_bot(text):
+        t = text.strip().lower()
+        return any(p in t for p in _skip_bot_patterns)
+
     pergunta_aluno = ''
     resposta_agente = ''
     for m in reversed(messages):
+        txt = m.get('text', '') or ''
         if not resposta_agente and m.get('role') == 'bot':
-            resposta_agente = m.get('text', '')
+            if not _is_skip_bot(txt):
+                resposta_agente = txt
         elif resposta_agente and m.get('role') == 'user':
-            pergunta_aluno = m.get('text', '')
-            break
+            if not _is_skip_user(txt):
+                pergunta_aluno = txt
+                break
 
-    conv_text = '\n'.join([f"{'Aluno' if m['role']=='user' else 'IA'}: {m['text'][:150]}" for m in messages[-10:]])
+    relevant = [m for m in messages if not (
+        (m.get('role') == 'user' and _is_skip_user(m.get('text', ''))) or
+        (m.get('role') == 'bot' and _is_skip_bot(m.get('text', '')))
+    )]
+    conv_text = '\n'.join([f"{'Aluno' if m['role']=='user' else 'IA'}: {m['text'][:150]}" for m in relevant[-10:]])
 
     try:
         client = OpenAI(api_key=OPENAI_API_KEY)
@@ -1067,13 +1093,16 @@ Conversa:
 
         tab = json.loads(match.group())
 
+        from datetime import datetime, timezone, timedelta
+        now_sp = datetime.now(timezone(timedelta(hours=-3)))
+
         conn = get_db()
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO interaction_summary
             (phone, lead_id, student_name, tema, subtema, sentimento, resolvido,
-             nps_implicito, resumo, mensagens_count, pergunta_aluno, resposta_agente)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             nps_implicito, resumo, mensagens_count, pergunta_aluno, resposta_agente, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             phone[-11:],
             profile.get('lead_id') if profile else None,
@@ -1087,6 +1116,7 @@ Conversa:
             len(messages),
             pergunta_aluno[:2000],
             resposta_agente[:2000],
+            now_sp,
         ))
         conn.commit()
         cur.close()
@@ -3194,10 +3224,6 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             log_to_db(conv_id, '[audio]', msg_audio, 1.0, 'audio_no_consultant')
             waiting_for_client = True
             inactivity_start = time.time()
-        try:
-            tabulate_interaction(conversation_messages, student_profile, cur_phone)
-        except Exception as e_tab:
-            p(f"    Erro tabulação áudio: {e_tab}")
         return
 
     memory = load_memory(cur_phone)
@@ -3262,10 +3288,6 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         conversation_messages.append({'role': 'bot', 'text': msg})
         log_to_db(conv_id, question, msg, 1.0, 'template_ack_close')
         close_conversation_crm(conv_id, phone=_current_phone)
-        try:
-            tabulate_interaction(conversation_messages, student_profile, cur_phone)
-        except Exception as e_tpl:
-            p(f"  [TEMPLATE-ACK] Erro tabulação: {e_tpl}")
         waiting_for_client = False; inactivity_start = 0
         return
 
@@ -3278,9 +3300,8 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         try:
             summary = generate_conversation_summary(conversation_messages)
             save_memory(cur_phone, student_profile, 'escalacao', summary, sentiment)
-            tabulate_interaction(conversation_messages, student_profile, cur_phone)
         except Exception as e_esc:
-            p(f"  [ESCALADO] Erro na tabulação/memória: {e_esc}")
+            p(f"  [ESCALADO] Erro na memória: {e_esc}")
         waiting_for_client = False; inactivity_start = 0
         p(f"  [ESCALADO] Distribuído={distributed} - Follow-ups desativados")
         return
@@ -3303,9 +3324,8 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             summary = generate_conversation_summary(conversation_messages)
             topic = detect_topic_from_messages(conversation_messages)
             save_memory(cur_phone, student_profile, topic, summary, sentiment)
-            tabulate_interaction(conversation_messages, student_profile, cur_phone)
         except Exception as e_close:
-            p(f"  [ENCERR] Erro na tabulação/memória: {e_close}")
+            p(f"  [ENCERR] Erro na memória: {e_close}")
         conversation_messages.clear()
         conversation_greeted.discard(conv_id)
         waiting_for_client = False
@@ -3326,9 +3346,8 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             summary = generate_conversation_summary(conversation_messages)
             topic = detect_topic_from_messages(conversation_messages)
             save_memory(cur_phone, student_profile, topic, summary, sentiment)
-            tabulate_interaction(conversation_messages, student_profile, cur_phone)
         except Exception as e_resolved:
-            p(f"  [RESOLVEU] Erro na tabulação/memória: {e_resolved}")
+            p(f"  [RESOLVEU] Erro na memória: {e_resolved}")
         conversation_messages.clear()
         conversation_greeted.discard(conv_id)
         waiting_for_client = False
@@ -3349,9 +3368,8 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         try:
             summary = generate_conversation_summary(conversation_messages)
             save_memory(cur_phone, student_profile, 'retencao', summary, sentiment)
-            tabulate_interaction(conversation_messages, student_profile, cur_phone)
         except Exception as e_ret:
-            p(f"  [RETENÇÃO] Erro na tabulação/memória: {e_ret}")
+            p(f"  [RETENÇÃO] Erro na memória: {e_ret}")
         waiting_for_client = False; inactivity_start = 0
         p(f"  [RETENÇÃO] Conversa encaminhada para Wesley - follow-ups desativados")
         return
@@ -4271,7 +4289,6 @@ def main():
                                 summary = generate_conversation_summary(msgs_list)
                                 topic = detect_topic_from_messages(msgs_list)
                                 save_memory(cur_phone, sp, topic, summary, 'neutro')
-                                tabulate_interaction(msgs_list, sp, cur_phone)
                             except Exception as e:
                                 p(f"  Erro ao salvar antes de fechar: {e}")
                         send_message_crm(cid, close_msg, buttons=CLOSE_INACTIVITY_BUTTONS)
