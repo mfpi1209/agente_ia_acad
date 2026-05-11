@@ -13,6 +13,7 @@ import io
 import os
 import re
 import time
+import random
 import hashlib
 import base64
 from datetime import datetime
@@ -38,6 +39,7 @@ N8N_WEBHOOK_LEADS_CPF = 'https://n8n-new-n8n.ca31ey.easypanel.host/webhook/leads
 STAGE_ATENDIMENTO_ID = 'ce42afe6-757f-405c-aa34-6668f4a75d07'
 STAGE_BASE_ALUNOS_ID = '742714eb-ac5a-435f-8680-97e6ab8f2f6e'
 STAGE_ENCERRAMENTO_ID = '3016b9c8-3914-4bf5-8f7c-1fee44baea9c'
+PIPELINE_ENCERRAMENTO_ID = '16638d55-b556-4792-8e11-f67c04ecf94c'
 
 POLOS_LIST = ("Barra Funda\nVila Prudente\nVila Mariana\nFreguesia do Ó (Moinho Velho)\n"
               "Vila Ema (Sapopemba)\nIbirapuera (Indianópolis)\nTaboão da Serra - Jardim Mituzi\n"
@@ -146,8 +148,14 @@ FRUSTRATION_WORDS = [
 FOLLOWUP_HIGH_BUTTONS = ['Resolveu!', 'Tenho outra dúvida', 'Falar com atendente']
 FOLLOWUP_MED_BUTTONS = ['Resolveu!', 'Tenho outra dúvida', 'Falar com atendente']
 RESOLVED_BUTTONS = ['Tenho outra dúvida', 'Não, obrigado!']
-CLOSING_RESPONSE_TPL = "Obrigado pelo contato{name_suffix}! Qualquer dúvida é só nos chamar novamente. Até mais! 😊"
-ESCALATION_MSG = "Entendi sua situação. Vou te transferir para um atendente que pode te ajudar diretamente. Um momento, por favor."
+_CLOSING_RESPONSES = [
+    "Foi ótimo poder te ajudar{name_suffix}! Se precisar, é só chamar de novo. Até mais! 😊",
+    "Fico feliz em ter ajudado{name_suffix}! Qualquer coisa, estou por aqui. Até a próxima! 😊",
+    "Tudo certo então{name_suffix}! Se surgir algo mais, pode contar comigo. Até mais! 😊",
+    "Que bom que deu tudo certo{name_suffix}! Estou sempre por aqui caso precise. Até logo! 😊",
+]
+CLOSING_RESPONSE_TPL = _CLOSING_RESPONSES[0]
+ESCALATION_MSG = "Entendi! Vou te conectar com um dos nossos atendentes que vai poder te ajudar direitinho. Só um instante! 😊"
 
 RETENTION_TAG_ID = '6fcefbd5-3c33-4e5c-b139-7f89718f6f0c'
 RETENTION_WESLEY_CRM_ID = 'dd6cbed7-7666-45d1-bd90-368c8b97e217'
@@ -304,8 +312,9 @@ SUBMENU_TO_QUESTION = {
 
 # ===================== SYSTEM PROMPT =====================
 
-SYSTEM_PROMPT = """Você é a consultora virtual de suporte da Cruzeiro do Sul Educacional.
-Fale de forma natural e humana, como um consultor real pelo WhatsApp. Converse, não despeje informação.
+SYSTEM_PROMPT = """Você é uma consultora de suporte da Cruzeiro do Sul Educacional. Seu nome não importa — você é uma pessoa real conversando pelo WhatsApp.
+
+Sua personalidade: simpática, paciente, fala de um jeito leve e natural. Você NÃO é um robô. Você é alguém que realmente quer ajudar e conversa como gente de verdade.
 
 {student_context}
 
@@ -320,49 +329,69 @@ Fale de forma natural e humana, como um consultor real pelo WhatsApp. Converse, 
 2. **NUNCA afirme status de sistemas** (instabilidade, fora do ar) A MENOS que exista um ALERTA ATIVO.
 3. **NUNCA INVENTE** URLs, valores, prazos ou procedimentos que NÃO estejam nas referências.
 4. **NUNCA forneça dados pessoais** (RGM, e-mail acadêmico, senhas).
-5. **NUNCA use nomes de atendentes** das referências (Joyce, Camila, Emanuel etc).
-6. Use o nome do aluno ao longo da conversa.
-7. Se a referência tiver links ou vídeos, **INCLUA**.
-8. **IGNORE** cumprimentos genéricos de atendentes, transcrições "Audio:", e pedidos de CPF. Extraia só informação útil.
-9. **NUNCA ofereça transferir para atendente** por conta própria. Isso é controlado pelos botões do sistema.
+5. **DADOS ACADÊMICOS**: Você pode ter acesso a curso, semestre e polo do aluno. NUNCA mencione esses dados proativamente. Use APENAS internamente para dar respostas mais precisas (ex: estágio, TCC, grade). NUNCA diga "Sei que você cursa X" ou "Você está no semestre Y" — use a info para calibrar a resposta sem revelar a fonte.
+6. **NUNCA use nomes de atendentes** das referências (Joyce, Camila, Emanuel etc).
+7. Use o nome do aluno ao longo da conversa de forma natural (não toda mensagem).
+8. Se a referência tiver links ou vídeos, **INCLUA**.
+9. **IGNORE** cumprimentos genéricos de atendentes, transcrições "Audio:", e pedidos de CPF. Extraia só informação útil.
+10. **NUNCA ofereça transferir para atendente** por conta própria. Isso é controlado pelos botões do sistema.
 
 ## COMO CONVERSAR (REGRA MAIS IMPORTANTE):
-Você conversa pelo WhatsApp. Ninguém manda um textão no WhatsApp. Separe sua resposta em blocos curtos usando \\n\\n (dois enters).
+Você tá no WhatsApp. Ninguém manda textão no zap. Seja breve, natural e direta.
+
+### Jeito de falar:
+- Use contrações naturais: "tá", "pra", "vou te", "aí", "aqui", "pro"
+- NUNCA comece com "Ei". Em vez disso, varie bastante os inícios: "Opa", "Olá", "Oii", "Ah", "Olha", "Bom", "Então", "Boa pergunta", "Claro", "Com certeza", "Pode deixar"
+- NÃO seja formal demais. Nada de "Compreendo", "Informo que", "Segue abaixo" ou "Entendo sua frustração"
+- Fale como uma amiga que trabalha na faculdade e tá te ajudando
+- Pode usar expressões tipo "tranquilo", "sem stress", "show", "fechou", "beleza"
+- Emoji com moderação (1-2 por resposta)
+- Seja acolhedora e calorosa. Mostre que se importa com o aluno, não apenas responda a pergunta
 
 ### Fluxo de uma PRIMEIRA resposta sobre um problema:
-1. **Acolhida + verificação** (1-2 frases): cumprimente, diga que vai verificar, cheque alertas.
-2. **Pergunta investigativa**: ANTES de dar a solução, pergunte o que está acontecendo.
-   Não despeje todas as soluções possíveis de uma vez. Investigue.
+1. **Acolhida rápida** (1 frase): algo leve, tipo "Opa, deixa eu ver isso pra você"
+2. **Pergunta investigativa**: ANTES de dar a solução, pergunte o que tá acontecendo.
+   Não despeje todas as soluções possíveis de uma vez. Investigue primeiro.
 
 Exemplo - aluno diz "não consigo acessar o portal":
 
-RUIM (textão com tudo de uma vez):
+RUIM (textão robótico):
 "Opa Marcelo! Vamos resolver. Não há instabilidade. Pelo computador acesse https://novoportal... Pelo celular use o DUDA... Se esqueceu a senha clique em Esqueci... Se trocou de celular revogue o Authenticator..."
 
-BOM (conversa, pergunta primeiro):
-"Opa Marcelo, deixa eu verificar aqui... Não tem nenhum alerta de instabilidade, então o portal tá funcionando normal.
+BOM (conversa real):
+"Opa Marcelo! Deixa eu dar uma olhada aqui... Não tem nenhum alerta de instabilidade, então tá tudo normal com o portal.
 
-Me conta, o que acontece quando você tenta acessar? Aparece alguma mensagem de erro, a página não carrega, ou você esqueceu a senha?"
+Me conta, o que acontece quando você tenta entrar? Dá algum erro, a página não abre, ou esqueceu a senha?"
 
 ### Fluxo após o aluno responder com mais detalhes:
-Aí sim, dê a orientação ESPECÍFICA pro problema dele, de forma curta e direta.
+Aí sim, dê a orientação ESPECÍFICA pro problema dele. Curta e direta.
 Não repita o que já disse. Vá direto ao ponto.
 
 ### Quando o aluno já ESPECIFICOU o problema (ex: "esqueci minha senha"):
-Ele JÁ te disse o que precisa. Não pergunte de volta. Resolva direto:
-"Opa Marcelo, sem problemas! Vou te ajudar a redefinir sua senha.
+Ele JÁ te disse o que precisa. Não pergunte de volta. Resolve direto, mas com carinho:
+"Opa, Marcelo! Pode ficar tranquilo que vou te ajudar com isso 😊
 
-Na tela de login do portal, clica em *Esqueci minha senha*. Vai pedir seu CPF e e-mail cadastrado. Você vai receber um link pra criar uma senha nova.
+Lá na tela de login, clica em *Esqueci minha senha*. Vai pedir seu CPF e e-mail cadastrado, aí você recebe um link pra criar uma senha nova.
 
-Se não receber o e-mail, verifica a caixa de spam. Qualquer coisa, me avisa aqui!"
+Se o e-mail não chegar, dá uma olhada no spam. Tô por aqui se precisar de mais alguma coisa!"
 
-### Tom:
-- Nunca "Entendo sua frustração". Seja natural: "Opa", "Vamos resolver", "Deixa eu ver"
-- Fale com confiança, como quem sabe o que está fazendo
-- Emoji com moderação (máximo 1 por bloco)
+### Quando o aluno pede um link ou caminho específico:
+Dê a orientação completa e acolhedora. Não responda de forma seca tipo "Acesse X > Y > Z":
+"Olá, Jeniffer! Vou te explicar direitinho como acessar 😊
+
+Pra chegar na prova A1, você vai entrar na sua *Área do Aluno*, depois clica em *Vida Acadêmica* e lá dentro vai ter a *Plataforma de Prova*.
+
+É lá que ficam todas as avaliações regimentais! Se tiver qualquer dificuldade pra encontrar, me manda um print que te ajudo!"
+
+### VARIAÇÃO (muito importante):
+- NÃO comece todas as respostas com "Opa". Varie: "Olá", "Oii", "Ah", "Olha", "Bom", "Então", "Com certeza", "Pode deixar", "Claro"
+- NUNCA use "Ei" para iniciar — é informal demais para atendimento
+- NÃO termine todas com "Qualquer coisa me avisa". Varie: "Tô por aqui se precisar!", "Conta comigo!", "Qualquer dúvida é só chamar!", "Espero ter ajudado! 😊"
+- NÃO use as mesmas frases de transição. Seja criativa
+- Quando o aluno já disse o que precisa, dê a resposta COMPLETA e acolhedora, não apenas o caminho seco
 
 ## FORMATO:
-- Separe parágrafos com \\n\\n para ficarem como mensagens separadas no WhatsApp.
+- Separe parágrafos com \\n\\n para ficarem como balões separados no WhatsApp.
 - Cada bloco deve ter NO MÁXIMO 2-3 frases.
 - Use *negrito* para termos-chave.
 - Última linha OBRIGATÓRIA (fica oculta pro aluno): [CONFIANCA:X.X]
@@ -382,9 +411,9 @@ Se não receber o e-mail, verifica a caixa de spam. Qualquer coisa, me avisa aqu
 
 FOLLOWUP_1_DELAY = 300
 CLOSE_DELAY      = 900
-FOLLOWUP_1_MSG     = "Oi{name}! Ainda está por aí? Se tiver mais alguma dúvida, é só falar 😊"
+FOLLOWUP_1_MSG     = "Oii{name}, tá tudo certo por aí? Se precisar de mais alguma coisa, pode mandar! 😊"
 FOLLOWUP_1_BUTTONS = ['Tenho outra dúvida', 'Não, obrigado!']
-CLOSE_INACTIVITY_MSG     = "Como não tivemos retorno, vou finalizar o contato por aqui para te deixar seguir com seus compromissos. Estaremos à disposição caso precise retomar o assunto depois! ✨"
+CLOSE_INACTIVITY_MSG     = "Como você não respondeu, vou encerrar por aqui pra não te incomodar, tá? Se precisar de algo depois, é só me chamar de novo! Até mais ✨"
 CLOSE_INACTIVITY_BUTTONS = None
 
 # ===================== SAUDAÇÕES (defaults, sobrescritos pelo banco) =====================
@@ -782,6 +811,89 @@ def identify_student(phone):
         return None
 
 
+def fetch_academic_data(cpf, phone=None):
+    """Busca dados acadêmicos do aluno na mm_matriculados (dcz_sync, atualizada diariamente)."""
+    if not cpf and not phone:
+        return None
+    try:
+        acad_config = DB_CONFIG.copy()
+        acad_config['dbname'] = 'dcz_sync'
+        conn = psycopg2.connect(**acad_config)
+        cur = conn.cursor()
+
+        _ACAD_COLS = "nome, curso_limpo, serie, polo_aulas, situacao, tipo_matricula, email_ad, ano_tri_ingresso, tipo, curso_raw"
+        _ACAD_KEYS = ['nome', 'curso', 'serie', 'polo', 'situacao', 'tipo_matricula',
+                      'email_academico', 'ciclo', 'nivel', 'curso_raw']
+
+        rows = []
+
+        if cpf:
+            clean_cpf = cpf.replace('.', '').replace('-', '').replace(' ', '').strip()
+            if clean_cpf.isdigit() and len(clean_cpf) < 11:
+                clean_cpf = clean_cpf.zfill(11)
+            if len(clean_cpf) >= 9:
+                cur.execute(f"""
+                    SELECT {_ACAD_COLS} FROM mm_matriculados
+                    WHERE cpf = %s AND situacao = 'Matriculado'
+                    ORDER BY serie DESC
+                """, (clean_cpf,))
+                rows = cur.fetchall()
+                if not rows:
+                    cur.execute(f"""
+                        SELECT {_ACAD_COLS} FROM mm_matriculados
+                        WHERE cpf = %s
+                        ORDER BY serie DESC LIMIT 1
+                    """, (clean_cpf,))
+                    rows = cur.fetchall()
+
+        if not rows and phone:
+            clean_phone = phone.replace('+', '').replace(' ', '').replace('-', '').strip()
+            clean_phone = clean_phone[-11:] if len(clean_phone) >= 11 else clean_phone
+            if len(clean_phone) >= 10:
+                cur.execute(f"""
+                    SELECT {_ACAD_COLS} FROM mm_matriculados
+                    WHERE (fone_cel LIKE %s OR fone_res LIKE %s OR fone_com LIKE %s)
+                    AND situacao = 'Matriculado'
+                    ORDER BY serie DESC
+                """, (f'%{clean_phone}', f'%{clean_phone}', f'%{clean_phone}'))
+                rows = cur.fetchall()
+
+        conn.close()
+
+        if not rows:
+            return None
+
+        def _extract_grau(curso_raw):
+            if not curso_raw:
+                return ''
+            cr = curso_raw.strip().upper()
+            if cr.startswith('CST '):
+                return 'CST (Tecnólogo)'
+            if '(BACHARELADO)' in cr:
+                return 'Bacharelado'
+            if '(LICENCIATURA)' in cr:
+                return 'Licenciatura'
+            return ''
+
+        courses = []
+        for row in rows:
+            acad = dict(zip(_ACAD_KEYS, row))
+            if acad.get('polo'):
+                acad['polo'] = (acad['polo'] or '').strip()
+            acad['grau'] = _extract_grau(acad.pop('curso_raw', ''))
+            courses.append(acad)
+
+        result = courses[0].copy()
+        if len(courses) > 1:
+            result['_all_courses'] = courses
+        p(f"    [ACAD] {result.get('curso','?')[:40]} | {result.get('grau','')} | Sem {result.get('serie','?')} | {result.get('situacao','?')} | Polo: {result.get('polo','?')[:20]}" +
+          (f" (+{len(courses)-1} cursos)" if len(courses) > 1 else ""))
+        return result
+    except Exception as e:
+        p(f"    [ACAD] Erro ao buscar dados academicos: {e}")
+        return None
+
+
 def check_lead_has_pipeline(phone, pipeline_id=None):
     """Verifica se o lead tem negócio no pipeline de alunos ativos."""
     if pipeline_id is None:
@@ -938,6 +1050,7 @@ def ensure_memory_tables():
         ('pergunta_aluno', 'TEXT'),
         ('resposta_agente', 'TEXT'),
         ('avaliacao', "VARCHAR(20) DEFAULT NULL"),
+        ('conv_id', 'VARCHAR(50)'),
     ]:
         try:
             cur.execute(f"ALTER TABLE interaction_summary ADD COLUMN IF NOT EXISTS {col} {coldef}")
@@ -1028,7 +1141,7 @@ def generate_conversation_summary(messages):
 
 # ===================== FASE 4: TABULAÇÃO =====================
 
-def tabulate_interaction(messages, profile, phone):
+def tabulate_interaction(messages, profile, phone, conv_id=''):
     """Classifica a interação automaticamente com GPT e salva Q&A."""
     if not messages or len(messages) < 2:
         return
@@ -1044,6 +1157,15 @@ def tabulate_interaction(messages, profile, phone):
         'bem-vindo', 'ainda está por aí', 'ficou alguma dúvida',
         'não tivemos retorno', 'obrigado pelo contato',
         'que bom que pude ajudar', 'qualquer dúvida é só nos chamar',
+        'consegui te ajudar com isso', 'espero que tenha ajudado',
+        'ficou tudo certo por aí', 'me conta melhor o que precisa',
+        'me ajuda a te ajudar', 'pode me explicar um pouco mais',
+        'não consegui pegar direito', 'não consegui entender',
+        'tá tudo certo por aí', 'pode mandar',
+        'fico feliz que deu certo', 'oba, que ótimo',
+        'foi ótimo poder te ajudar', 'fico feliz em ter ajudado',
+        'tudo certo então', 'que bom que deu tudo certo',
+        'vou encerrar por aqui', 'até a próxima',
     ]
 
     def _is_skip_user(text):
@@ -1094,15 +1216,15 @@ Conversa:
         tab = json.loads(match.group())
 
         from datetime import datetime, timezone, timedelta
-        now_sp = datetime.now(timezone(timedelta(hours=-3)))
+        now_sp = datetime.now(timezone(timedelta(hours=-3))).replace(tzinfo=None)
 
         conn = get_db()
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO interaction_summary
             (phone, lead_id, student_name, tema, subtema, sentimento, resolvido,
-             nps_implicito, resumo, mensagens_count, pergunta_aluno, resposta_agente, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             nps_implicito, resumo, mensagens_count, pergunta_aluno, resposta_agente, conv_id, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             phone[-11:],
             profile.get('lead_id') if profile else None,
@@ -1116,6 +1238,7 @@ Conversa:
             len(messages),
             pergunta_aluno[:2000],
             resposta_agente[:2000],
+            conv_id or '',
             now_sp,
         ))
         conn.commit()
@@ -1197,6 +1320,53 @@ def build_student_context(profile):
         parts.append(f"- Email: {profile['email']}")
     fname = profile.get('first_name') or 'aluno'
     parts.append(f"\nChame o aluno de *{fname}*.")
+
+    acad = profile.get('academic')
+    if acad:
+        parts.append(f"\n## DADOS ACADÊMICOS (contexto interno - NÃO revelar proativamente):")
+        all_courses = acad.get('_all_courses')
+        if all_courses and len(all_courses) > 1:
+            for i, c in enumerate(all_courses, 1):
+                nivel = (c.get('nivel') or '').upper()
+                sem_label = 'Semestre' if 'GRAD' in nivel else 'Período/Módulo'
+                grau = c.get('grau', '')
+                grau_info = f" ({grau})" if grau else ''
+                parts.append(f"- Curso {i}: {c.get('curso','?')}{grau_info} | {sem_label}: {c.get('serie','?')} | Polo: {c.get('polo','?')} | Situação: {c.get('situacao','?')}")
+            parts.append(
+                "\nATENÇÃO MÚLTIPLOS CURSOS: O aluno possui mais de um curso/matrícula."
+                "\nQuando a pergunta depender do curso específico, diga algo natural como:"
+                "\n'Verifiquei aqui que você possui mais de um curso conosco! Sobre qual deles você gostaria de falar?'"
+                "\nListe os nomes dos cursos para o aluno escolher. NÃO revele semestre, polo ou grau nessa pergunta."
+            )
+        else:
+            if acad.get('curso'):
+                grau = acad.get('grau', '')
+                grau_info = f" ({grau})" if grau else ''
+                parts.append(f"- Curso: {acad['curso']}{grau_info}")
+            if acad.get('serie'):
+                nivel = (acad.get('nivel') or '').upper()
+                sem_label = 'Semestre' if 'GRAD' in nivel else 'Período/Módulo'
+                parts.append(f"- {sem_label}: {acad['serie']}")
+            if acad.get('polo'):
+                parts.append(f"- Polo: {acad['polo']}")
+            if acad.get('situacao'):
+                parts.append(f"- Situação: {acad['situacao']}")
+            if acad.get('tipo_matricula'):
+                parts.append(f"- Tipo matrícula: {acad['tipo_matricula']}")
+        if acad.get('email_academico'):
+            parts.append(f"- Email acadêmico: {acad['email_academico']}")
+        parts.append(
+            "\nREGRA CRÍTICA DE PRIVACIDADE:"
+            "\n- NUNCA mencione dados acadêmicos na saudação ou proativamente."
+            "\n- Use SOMENTE quando a pergunta EXIGIR (estágio, TCC, grade, provas do curso, semestre)."
+            "\n- NUNCA diga 'Sei que você está no Xo semestre de Y'. Use a informação internamente para dar a resposta correta sem expor que consultou."
+            "\n- Se o aluno perguntar sobre estágio/TCC, use o semestre e o GRAU DO CURSO para contextualizar:"
+            "\n  * CST (Tecnólogo): cursos de 2-3 anos, NEM SEMPRE possuem estágio obrigatório na grade. Oriente o aluno a verificar a grade curricular do curso."
+            "\n  * Bacharelado: cursos de 4-5 anos, geralmente possuem estágio obrigatório."
+            "\n  * Licenciatura: cursos de 4 anos, possuem estágio obrigatório."
+            "\n  NUNCA afirme com certeza se o curso tem ou não estágio — oriente a verificar a grade."
+        )
+
     return '\n'.join(parts)
 
 
@@ -1877,6 +2047,41 @@ def log_to_db(conv_id, question, response, confidence, action):
         p(f"    Log DB erro: {e}")
 
 
+def _move_business_to_base_alunos(phone):
+    """Move o business de volta para Base de Alunos (ex: aluno retornou após encerramento)."""
+    if not phone:
+        return False
+    try:
+        search_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
+        phones_to_try = [search_phone]
+        if not search_phone.startswith('55'):
+            phones_to_try.append('55' + search_phone)
+        biz_id = ''
+        for try_phone in phones_to_try:
+            if biz_id:
+                break
+            r = requests.get(f'{DCZ_CRM}/businesses', headers=H,
+                             params={'search': try_phone, 'limit': 5}, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                biz_list = data.get('data', data) if isinstance(data, dict) else data
+                if isinstance(biz_list, list) and biz_list:
+                    biz_id = biz_list[0].get('id', '')
+        if not biz_id:
+            p(f"  [REABRIR] Nenhum business encontrado para ...{search_phone[-4:]}")
+            return False
+        r2 = requests.patch(
+            f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+            json={'stageId': STAGE_BASE_ALUNOS_ID}, timeout=10
+        )
+        ok = r2.status_code in (200, 204)
+        p(f"  [REABRIR] Business {biz_id[:16]} -> Base de Alunos (status={r2.status_code}, ok={ok})")
+        return ok
+    except Exception as e:
+        p(f"  [REABRIR] Erro: {e}")
+        return False
+
+
 def _move_business_to_encerramento(phone):
     """Encontra o business pelo telefone e move para o stage de Encerramento."""
     if not phone:
@@ -1925,11 +2130,13 @@ def close_conversation_crm(conv_id, phone=''):
     else:
         p(f"  [CLOSE] Telefone vazio, business NÃO será movido para Encerramento")
 
+    time.sleep(2)
+
     fin_ok = False
     try:
         r = requests.post(
             f'{DCZ_API}/api/v1/conversations/{conv_id}/finish',
-            headers=H, json={}, timeout=10
+            headers=H, json={}, timeout=15
         )
         p(f"  [CLOSE] Finish via DCZ_API (status={r.status_code})")
         if r.status_code in (200, 201, 204):
@@ -1941,7 +2148,7 @@ def close_conversation_crm(conv_id, phone=''):
         try:
             r2 = requests.post(
                 f'{DCZ_MSG}/messaging/conversations/{conv_id}/finish',
-                headers=H, json={}, timeout=10
+                headers=H, json={}, timeout=15
             )
             p(f"  [CLOSE] Finish via DCZ_MSG fallback (status={r2.status_code})")
             if r2.status_code in (200, 201, 204):
@@ -2332,8 +2539,8 @@ def distribute_to_attendant(conv_id, reason=''):
     consultant = get_available_consultant()
     if not consultant:
         p(f"  [DIST] Nenhum consultor disponível -> fallback nota interna")
-        msg = ("No momento, todos os nossos atendentes estão ocupados. "
-               "Mas não se preocupe — em breve um deles irá te atender! 😊")
+        msg = ("Nossos atendentes estão todos em atendimento agora, mas fica tranquilo! "
+               "Em pouquinho alguém vai te chamar aqui 😊")
         meta_typing_on()
         send_and_track(conv_id, msg)
         transfer_to_human(conv_id, reason)
@@ -2421,7 +2628,8 @@ def distribute_to_attendant(conv_id, reason=''):
     send_and_track(conv_id, client_msg)
 
     p(f"  [DIST] ✅ Distribuição concluída para {nome} (lead={lead_ok} biz={biz_ok} chat={chat_ok})")
-    _conv_states.setdefault(conv_id, _default_conv_state())['_human_took_over'] = True
+    _conv_states.setdefault(conv_id, _default_conv_state())['_last_distributed_to'] = nome
+    _conv_states[conv_id]['_human_took_over'] = True
     _conv_states[conv_id]['waiting_for_client'] = False
     _conv_states[conv_id]['inactivity_start'] = 0
     _conv_states[conv_id]['followup_stage'] = 0
@@ -2471,6 +2679,11 @@ def trigger_retention(conv_id, lead_id, question):
                                 json={'attendant': {'id': RETENTION_WESLEY_CRM_ID}}, timeout=10
                             )
                             p(f"  [RETENÇÃO] Negócio attendant -> Wesley (status={rb.status_code})")
+                            rb2 = requests.patch(
+                                f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+                                json={'stageId': STAGE_ATENDIMENTO_ID}, timeout=10
+                            )
+                            p(f"  [RETENÇÃO] Negócio -> Atendimento (status={rb2.status_code})")
                             break
             except Exception as e2:
                 p(f"  [RETENÇÃO] Erro ao atualizar negócio: {e2}")
@@ -2530,18 +2743,19 @@ def is_retention_intent(text):
 def get_conversation_messages_api(conv_id, limit=15):
     try:
         r = requests.get(f'{DCZ_MSG}/messaging/conversations/{conv_id}/messages',
-                        headers=H, params={'limit': limit}, timeout=10)
+                        headers=H, params={'limit': limit}, timeout=20)
         if r.status_code != 200:
             return []
         return r.json().get('messages', [])
     except Exception as e:
-        p(f"  Erro msgs: {e}")
+        p(f"  Erro msgs conv={conv_id[:12]}: {e}")
         return []
 
 
 BOT_RESPONSE_FINGERPRINTS = [
     'Essa é uma dúvida que precisa de um atendente',
     'Vou te transferir para um atendente',
+    'Vou te conectar com um dos nossos atendentes',
     'Bem-vindo(a) ao Suporte',
     'Bem-vindo ao Suporte',
     'Como posso te ajudar?',
@@ -2554,11 +2768,22 @@ BOT_RESPONSE_FINGERPRINTS = [
     'Selecione para dar andamento',
     'não encontrei uma resposta exata',
     'Não entendi',
+    'Não consegui entender',
+    'Não consegui pegar direito',
+    'Me ajuda a te ajudar',
     'Posso te ajudar de outra forma',
     'Clique em uma das opções disponíveis',
     'Teria mais alguma dúvida',
     'clique em uma das opções',
     'teria mais alguma dúvida',
+    'Consegui te ajudar com isso',
+    'Espero que tenha ajudado',
+    'Ficou tudo certo por aí',
+    'Fico feliz que deu certo',
+    'Fico feliz em ter ajudado',
+    'Foi ótimo poder te ajudar',
+    'Tudo certo então',
+    'Que bom que deu tudo certo',
 ]
 
 
@@ -2600,6 +2825,17 @@ OUR_MSG_FINGERPRINTS = (
     'muito obrigado por falar com a gente',
     'encerrando esta conversa por aqui',
     'obrigado pelo contato',
+    'ficamos 5 minutos sem interagir',
+    'ficamos sem interagir',
+    'este atendimento está sendo encerrado',
+    'encerramento automático',
+    'moveu para o departamento',
+    'finalizou o atendimento',
+    'essa conversa foi encerrada devido',
+    'falta de interação',
+    'percebi que você não respondeu',
+    'nenhuma nova mensagem foi recebida',
+    'vou encerrar esta conversa',
 )
 
 def _automation_already_responded(conv_id, user_msg_id):
@@ -2701,7 +2937,7 @@ def get_new_client_message(conv_id, force=False):
     """Retorna (msg_id, body, is_button_click, image_info).
     Processa a mensagem mais recente do aluno que ainda não foi respondida.
     force=True bypassa o filtro de startup (para conversas WAITING)."""
-    msgs = get_conversation_messages_api(conv_id, limit=10)
+    msgs = _cached_msgs.get(conv_id) or get_conversation_messages_api(conv_id, limit=10)
     _cached_msgs[conv_id] = msgs
 
     has_outgoing_response = False
@@ -2726,17 +2962,16 @@ def get_new_client_message(conv_id, force=False):
         if mid in processed_msg_ids:
             continue
 
-        if not force and _startup_ts > 0:
-            msg_ts = m.get('createdAt', '') or m.get('timestamp', '') or ''
-            if msg_ts:
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(str(msg_ts).replace('Z', '+00:00'))
-                    if dt.timestamp() < _startup_ts and has_outgoing_response:
-                        processed_msg_ids.add(mid)
-                        continue
-                except Exception:
-                    pass
+        msg_ts = m.get('createdAt', '') or m.get('timestamp', '') or ''
+        if msg_ts and has_outgoing_response and not force:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(str(msg_ts).replace('Z', '+00:00'))
+                if dt.timestamp() < _startup_ts:
+                    processed_msg_ids.add(mid)
+                    continue
+            except Exception:
+                pass
 
         received = m.get('received', False)
         if not received:
@@ -3194,6 +3429,16 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         p(f"  Identificando aluno...")
         student_profile = identify_student(cur_phone)
 
+    # TODO: Ativar dados academicos quando autorizado
+    # if student_profile and not student_profile.get('_acad_loaded'):
+    #     _acad_cpf = student_profile.get('cpf')
+    #     _acad_phone = _current_phone or cur_phone
+    #     if _acad_cpf or _acad_phone:
+    #         acad = fetch_academic_data(_acad_cpf, phone=_acad_phone)
+    #         if acad:
+    #             student_profile['academic'] = acad
+    #     student_profile['_acad_loaded'] = True
+
     # === ÁUDIO: identificar aluno + criar lead se necessário + distribuir ===
     if msg_body == '[audio]':
         p(f"  [AUDIO] Áudio detectado -> distribuindo para consultor")
@@ -3294,8 +3539,27 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     # === ESCALAÇÃO EXPLÍCITA (ANTES de is_first, para sempre distribuir) ===
     if any(w in q_lower for w in ESCALATE_WORDS):
         meta_typing_on()
+
+        # Extrair dúvida real do aluno (mensagens anteriores, ignorando saudações e cliques de menu)
+        _esc_skip = {'oi', 'olá', 'ola', 'oii', 'bom dia', 'boa tarde', 'boa noite', 'opa',
+                     'falar com atendente', 'atendente', 'atendimento', 'humano', 'transferir',
+                     'falar com alguem', 'falar com alguém'}
+        _student_doubt = ''
+        for _m in reversed(conversation_messages):
+            if _m.get('role') == 'user':
+                _mtxt = (_m.get('text', '') or '').strip()
+                if _mtxt.lower().rstrip('!?.,').strip() not in _esc_skip and len(_mtxt) > 3:
+                    _student_doubt = _mtxt
+                    break
+
+        if _student_doubt:
+            _esc_reason = f'Dúvida do aluno: "{_student_doubt[:200]}"'
+        else:
+            _esc_reason = ''
+
         log_to_db(conv_id, question, ESCALATION_MSG, 1.0, 'escalate_request')
-        distributed = distribute_to_attendant(conv_id, f'Solicitação explícita do aluno: "{question[:80]}"')
+        distributed = distribute_to_attendant(conv_id, _esc_reason)
+
         conversation_messages.append({'role': 'bot', 'text': ESCALATION_MSG})
         try:
             summary = generate_conversation_summary(conversation_messages)
@@ -3313,7 +3577,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         'não preciso', 'nao preciso', 'não preciso de mais nada', 'nao preciso de mais nada',
     )
     if close_match:
-        msg = CLOSING_RESPONSE_TPL.format(name_suffix=name_suffix)
+        msg = random.choice(_CLOSING_RESPONSES).format(name_suffix=name_suffix)
         meta_typing_on()
         send_and_track(conv_id, msg)
         conversation_messages.append({'role': 'bot', 'text': msg})
@@ -3335,7 +3599,13 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
 
     # === RESOLVEU (ANTES de is_first, para sempre encerrar) ===
     if any(w in q_lower for w in RESOLVED_WORDS):
-        msg = f"Que bom que pude ajudar{name_suffix}! Se precisar de algo no futuro, estou à disposição. Até mais! 😊"
+        _resolved_msgs = [
+            f"Fico feliz que deu certo{name_suffix}! Qualquer coisa, me chama. Até mais! 😊",
+            f"Que bom{name_suffix}! Se precisar no futuro, estou por aqui. Até! 😊",
+            f"Oba, que ótimo{name_suffix}! Sempre que precisar, pode contar comigo. Até logo! 😊",
+            f"Show{name_suffix}! Fico à disposição pro que precisar. Até a próxima! 😊",
+        ]
+        msg = random.choice(_resolved_msgs)
         meta_typing_on()
         send_and_track(conv_id, msg)
         conversation_messages.append({'role': 'bot', 'text': msg})
@@ -3365,6 +3635,15 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
 
         lead_id = student_profile.get('lead_id') if student_profile else None
         trigger_retention(conv_id, lead_id, question)
+
+        # Apresentação do Wesley enviada pelo agente
+        _fname = (student_profile.get('first_name') or '').strip() if student_profile else ''
+        _wesley_intro = (f"Olá{', *' + _fname + '*' if _fname else ''}! "
+                         f"Sou o Wesley e irei seguir com o seu atendimento 😊")
+        time.sleep(1)
+        send_and_track(conv_id, _wesley_intro)
+        p(f"  [RETENÇÃO] Apresentação do Wesley enviada pelo agente")
+
         try:
             summary = generate_conversation_summary(conversation_messages)
             save_memory(cur_phone, student_profile, 'retencao', summary, sentiment)
@@ -3628,7 +3907,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         log_to_db(conv_id, question, direct_text, 1.0, 'menu_direct')
         cur_phone = _current_phone or PHONE_TO_MONITOR
         try:
-            tabulate_interaction(conversation_messages, student_profile, cur_phone)
+            tabulate_interaction(conversation_messages, student_profile, cur_phone, conv_id=conv_id)
         except Exception as e_tab:
             p(f"    Erro tabulação menu direto: {e_tab}")
         waiting_for_client = True; inactivity_start = time.time()
@@ -3653,7 +3932,13 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     has_image_context = bool(image_desc)
     if len(stripped) <= 3 and not _matched_rag_key and not has_image_context:
         p(f"  Msg muito curta sem match, mostrando menu")
-        msg = "Não entendi 🤔 Selecione uma opção:"
+        _short_fallbacks = [
+            "Hmm, não consegui entender 😅 Me conta melhor o que precisa, ou escolhe uma opção aqui:",
+            "Opa, pode me explicar um pouco mais? Ou se preferir, seleciona uma opção:",
+            "Não consegui pegar direito 🤔 Pode detalhar mais ou escolher aqui embaixo?",
+            "Me ajuda a te ajudar 😊 Pode descrever melhor ou escolher uma opção:",
+        ]
+        msg = random.choice(_short_fallbacks)
         meta_typing_on()
         send_and_track(conv_id, msg, buttons=MAIN_MENU_BUTTONS)
         conversation_messages.append({'role': 'bot', 'text': msg})
@@ -3684,7 +3969,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         log_to_db(conv_id, question, msg, top_score, 'escalate_low_sim')
         cur_phone = _current_phone or PHONE_TO_MONITOR
         try:
-            tabulate_interaction(conversation_messages, student_profile, cur_phone)
+            tabulate_interaction(conversation_messages, student_profile, cur_phone, conv_id=conv_id)
         except Exception as e_tab:
             p(f"    Erro tabulação low_sim: {e_tab}")
         waiting_for_client = True; inactivity_start = time.time()
@@ -3734,8 +4019,14 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         confidence < 0.40
     )
     if not _is_asking_question:
+        _followup_opts = [
+            "Consegui te ajudar com isso? Se tiver mais alguma dúvida é só falar! 😊",
+            "Espero que tenha ajudado! Qualquer coisa, me chama aqui 😉",
+            "Ficou tudo certo por aí? Se precisar de mais alguma coisa, estou aqui!",
+            "Resolveu? Se tiver mais alguma dúvida, pode mandar! 😊",
+        ]
         time.sleep(1)
-        send_and_track(conv_id, "Ficou alguma dúvida sobre o assunto? 😊\nDigite *Resolveu* ou me conte sua dúvida!")
+        send_and_track(conv_id, random.choice(_followup_opts))
     else:
         p(f"  Resposta é pergunta/pede mais info (conf={confidence:.2f}) -> sem follow-up 'ficou alguma dúvida'")
 
@@ -3744,7 +4035,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
 
     cur_phone = _current_phone or PHONE_TO_MONITOR
     try:
-        tabulate_interaction(conversation_messages, student_profile, cur_phone)
+        tabulate_interaction(conversation_messages, student_profile, cur_phone, conv_id=conv_id)
     except Exception as e_tab:
         p(f"    Erro tabulação RAG: {e_tab}")
 
@@ -3893,19 +4184,93 @@ def main():
 
     p(f"  Entrando no loop principal... (PID {os.getpid()})")
 
+    # === VARREDURA ÚNICA: mover alunos presos em Encerramento/outro pipeline de volta para Base de Alunos ===
+    try:
+        p(f"  [VARREDURA] Buscando conversas presas em outros pipelines...")
+        _sweep_r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
+                                params={'limit': 80, 'status': 'unstarted'}, timeout=15)
+        _sweep_convs = []
+        if _sweep_r.status_code == 200:
+            _sweep_data = _sweep_r.json()
+            _sweep_convs = _sweep_data.get('data', _sweep_data) if isinstance(_sweep_data, dict) else _sweep_data
+        _sweep_count = 0
+        _MAX_SWEEP = 5
+        for _sc in (_sweep_convs if isinstance(_sweep_convs, list) else []):
+            if _sweep_count >= _MAX_SWEEP:
+                break
+            _s_inst = _sc.get('instance', {}) or {}
+            _s_inst_id = _s_inst.get('id', '') if isinstance(_s_inst, dict) else str(_s_inst)
+            if _s_inst_id != INSTANCE_ACADEMICO_ID:
+                continue
+            if _sc.get('attendants', []):
+                continue
+            _s_ct = _sc.get('contact', {}) or {}
+            _s_ext = _s_ct.get('externalInfo', {}) or {}
+            _s_pids = _s_ext.get('pipelineIds', []) or []
+            if not _s_pids or PIPELINE_ALUNOS_ID in _s_pids:
+                continue
+            _s_recv = _sc.get('lastReceivedMessageDate', '') or ''
+            _s_sent = _sc.get('lastSendedMessageDate', '') or ''
+            if _s_recv and (_s_recv > _s_sent if _s_sent else True):
+                _s_phone = _s_ct.get('phone', '') or _s_ct.get('number', '') or ''
+                _s_name = _s_ct.get('name', '???')
+                if _s_phone:
+                    p(f"  [VARREDURA] {_s_name} (...{_s_phone[-4:]}) preso em outro pipeline -> movendo p/ Base de Alunos")
+                    _move_business_to_base_alunos(_s_phone)
+                    _sweep_count += 1
+        # Também buscar conversas com status 'opened'
+        try:
+            _sweep_r2 = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
+                                     params={'limit': 80, 'status': 'opened'}, timeout=15)
+            _sweep_convs2 = []
+            if _sweep_r2.status_code == 200:
+                _sweep_data2 = _sweep_r2.json()
+                _sweep_convs2 = _sweep_data2.get('data', _sweep_data2) if isinstance(_sweep_data2, dict) else _sweep_data2
+            for _sc2 in (_sweep_convs2 if isinstance(_sweep_convs2, list) else []):
+                if _sweep_count >= _MAX_SWEEP:
+                    break
+                _s_inst2 = _sc2.get('instance', {}) or {}
+                _s_inst_id2 = _s_inst2.get('id', '') if isinstance(_s_inst2, dict) else str(_s_inst2)
+                if _s_inst_id2 != INSTANCE_ACADEMICO_ID:
+                    continue
+                if _sc2.get('attendants', []):
+                    continue
+                _s_ct2 = _sc2.get('contact', {}) or {}
+                _s_ext2 = _s_ct2.get('externalInfo', {}) or {}
+                _s_pids2 = _s_ext2.get('pipelineIds', []) or []
+                if not _s_pids2 or PIPELINE_ALUNOS_ID in _s_pids2:
+                    continue
+                _s_recv2 = _sc2.get('lastReceivedMessageDate', '') or ''
+                _s_sent2 = _sc2.get('lastSendedMessageDate', '') or ''
+                if _s_recv2 and (_s_recv2 > _s_sent2 if _s_sent2 else True):
+                    _s_phone2 = _s_ct2.get('phone', '') or _s_ct2.get('number', '') or ''
+                    _s_name2 = _s_ct2.get('name', '???')
+                    if _s_phone2:
+                        p(f"  [VARREDURA] {_s_name2} (...{_s_phone2[-4:]}) preso em outro pipeline (opened) -> movendo p/ Base de Alunos")
+                        _move_business_to_base_alunos(_s_phone2)
+                        _sweep_count += 1
+        except Exception as e_sw2:
+            p(f"  [VARREDURA] Erro ao buscar opened: {e_sw2}")
+        p(f"  [VARREDURA] Concluída! {_sweep_count} alunos movidos de volta para Base de Alunos")
+    except Exception as e_sweep:
+        p(f"  [VARREDURA] Erro na varredura: {e_sweep}")
+
     while True:
         try:
             time.sleep(POLL_INTERVAL)
             cycle += 1
+            _cached_msgs.clear()
             maybe_reload()
 
             # Busca conversas abertas recentes
             try:
                 r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
-                                params={'limit': 80, 'status': 'open'}, timeout=15)
-            except Exception:
+                                params={'limit': 300, 'status': 'open'}, timeout=60)
+            except Exception as _e_conv:
+                p(f"  [ERRO] Falha ao buscar conversas: {_e_conv}")
                 continue
             if r.status_code != 200:
+                p(f"  [ERRO] API retornou {r.status_code}")
                 continue
 
             convs_data = r.json()
@@ -3913,14 +4278,15 @@ def main():
             if not isinstance(convs_raw, list) or not convs_raw:
                 continue
 
-            # FILTRO: Não Iniciados (unstarted) do pipeline Base de Alunos + instância CSV_ACADEMICO_OFICIAL
-            # Somente conversas recentes (até 4h) para não pegar conversas antigas
-            _MAX_CONV_AGE_S = 8 * 3600
+            # ============================================================
+            # FILTRO: Instância X + Base de Alunos + sem atendente + Não Iniciados
+            # ============================================================
+            _MAX_CONV_AGE_S = 72 * 3600
             _now_utc = time.time()
             convs_nao_iniciados = []
             convs_opened = []
-            _other_pipeline = 0
             _other_instance = 0
+            _other_pipeline = 0
             _finished_count = 0
             _too_old = 0
             _with_attendant = 0
@@ -3931,20 +4297,27 @@ def main():
                 if _inst_id != INSTANCE_ACADEMICO_ID:
                     _other_instance += 1
                     continue
-                _ct = _cf.get('contact', {}) or {}
-                _ext = _ct.get('externalInfo', {}) or {}
-                _pids = _ext.get('pipelineIds', []) or []
-                if not _pids:
-                    _no_pipeline += 1
-                elif PIPELINE_ALUNOS_ID not in _pids:
-                    _other_pipeline += 1
-                    continue
                 _statuses = _cf.get('statuses', []) or []
                 if 'finished' in _statuses:
                     _finished_count += 1
                     continue
                 if _cf.get('attendants', []):
                     _with_attendant += 1
+                    continue
+                _ct = _cf.get('contact', {}) or {}
+                _ext = _ct.get('externalInfo', {}) or {}
+                _pids = _ext.get('pipelineIds', []) or []
+                if not _pids:
+                    _cf_recv = _cf.get('lastReceivedMessageDate', '') or ''
+                    _cf_sent = _cf.get('lastSendedMessageDate', '') or ''
+                    _has_new = bool(_cf_recv and (_cf_recv > _cf_sent if _cf_sent else True))
+                    if _has_new:
+                        _no_pipeline += 1
+                    else:
+                        _no_pipeline += 1
+                        continue
+                elif PIPELINE_ALUNOS_ID not in _pids:
+                    _other_pipeline += 1
                     continue
                 _last_recv = _cf.get('lastReceivedMessageDate', '') or _cf.get('lastMessageDate', '') or ''
                 if _last_recv:
@@ -3961,21 +4334,84 @@ def main():
                 elif 'opened' in _statuses:
                     convs_opened.append(_cf)
             if cycle <= 5 or cycle % 10 == 0:
-                p(f"  [FILTRO] Total API={len(convs_raw)} | Outra instancia={_other_instance} | Outro pipeline={_other_pipeline} | Sem pipeline={_no_pipeline} | Finished={_finished_count} | Com atendente={_with_attendant} | Antigas(>8h)={_too_old} | Nao Iniciados={len(convs_nao_iniciados)} | Opened={len(convs_opened)}")
+                p(f"  [FILTRO] Total={len(convs_raw)} | OutraInst={_other_instance} | OutroPipe={_other_pipeline} | SemPipe={_no_pipeline} | Finished={_finished_count} | ComAtend={_with_attendant} | Antigas={_too_old} | NaoInic={len(convs_nao_iniciados)} | Opened={len(convs_opened)}")
 
-            # Separar Não Iniciados: aluno espera resposta (prioridade) vs resto
-            waiting = []
+            # ============================================================
+            # PRIORIDADE 1: Encerrar follow-ups > 15 min (antes de tudo)
+            # ============================================================
+            _fu_close_count = 0
+            _MAX_FU_CLOSE = 10
+            _all_bot_last = list(convs_opened) + [c for c in convs_nao_iniciados
+                if (c.get('lastSendedMessageDate','') or '') > (c.get('lastReceivedMessageDate','') or '')]
+            for _fc in _all_bot_last:
+                if _fu_close_count >= _MAX_FU_CLOSE:
+                    break
+                _fc_id = _fc.get('id', '')
+                if not _fc_id:
+                    continue
+                _fc_sent = _fc.get('lastSendedMessageDate', '') or ''
+                if not _fc_sent:
+                    continue
+                _lm_raw = _fc.get('lastMessage', '') or ''
+                _lm_body = (_lm_raw.get('body', '') if isinstance(_lm_raw, dict) else str(_lm_raw)).lower()
+                _is_fu = any(fp in _lm_body for fp in [
+                    'tudo certo por a', 'ainda est', 'não tive retorno',
+                    'pode mandar', 'precisar de mais alguma',
+                ])
+                _is_close = any(fp in _lm_body for fp in [
+                    'muito obrigado por falar', 'encerrar por aqui',
+                    'encerrando esta conversa', 'não respondeu mais',
+                    'percebi que você não respondeu', 'atendimento será encerrado',
+                ])
+                if not _is_fu and not _is_close:
+                    continue
+                try:
+                    from datetime import datetime as _dtfu
+                    _dt_fu = _dtfu.fromisoformat(str(_fc_sent).replace('Z', '+00:00'))
+                    _fu_age_s = _now_utc - _dt_fu.timestamp()
+                except Exception:
+                    _fu_age_s = 0
+                if _fu_age_s < 900:
+                    continue
+                _fc_ct = _fc.get('contact', {}) or {}
+                _fc_phone = (_fc_ct.get('phoneNumber', '') or _fc_ct.get('phone', '') or '').replace('+','').replace(' ','')
+                if _fc_phone.startswith('55') and len(_fc_phone) > 11:
+                    _fc_phone = _fc_phone[2:]
+                _fc_name = (_fc_ct.get('name', '') or '')[:20]
+                p(f"  [PRIO-1] Encerrando follow-up antigo ({int(_fu_age_s/60)}min): {_fc_name} ...{_fc_phone[-4:] if _fc_phone else '????'}")
+                close_conversation_crm(_fc_id, _fc_phone)
+                _fu_close_count += 1
+            if _fu_close_count > 0:
+                p(f"  [PRIO-1] {_fu_close_count} conversas com follow-up antigo encerradas")
+
+            # ============================================================
+            # PRIORIDADE 2+3: Separar waiting vs rest, com "falar com atendente" primeiro
+            # ============================================================
+            waiting_atendente = []
+            waiting_normal = []
             rest = []
+            _ATENDENTE_KEYWORDS = ['falar com atendente', 'atendente', 'falar com humano',
+                                   'quero falar com alguem', 'falar com pessoa']
             for c in convs_nao_iniciados:
                 recv = c.get('lastReceivedMessageDate', '') or ''
                 sent = c.get('lastSendedMessageDate', '') or ''
                 if recv > sent:
-                    waiting.append(c)
+                    _lm = c.get('lastMessage', '') or ''
+                    _lm_body = (_lm.get('body', '') if isinstance(_lm, dict) else str(_lm)).lower().strip()
+                    if any(kw in _lm_body for kw in _ATENDENTE_KEYWORDS):
+                        waiting_atendente.append(c)
+                    else:
+                        waiting_normal.append(c)
                 else:
                     rest.append(c)
-            waiting.sort(key=lambda c: c.get('lastReceivedMessageDate', '') or '')
+            waiting_atendente.sort(key=lambda c: c.get('lastReceivedMessageDate', '') or '')
+            waiting_normal.sort(key=lambda c: c.get('lastReceivedMessageDate', '') or '')
             rest.sort(key=lambda c: c.get('lastSendedMessageDate', '') or '')
-            convs = waiting + rest
+            waiting = waiting_atendente + waiting_normal
+            _MAX_WAITING_PER_CYCLE = 20
+            convs = waiting[:_MAX_WAITING_PER_CYCLE] + rest
+            if waiting_atendente and (cycle <= 5 or cycle % 10 == 0):
+                p(f"  [PRIO-2] {len(waiting_atendente)} conversas 'falar com atendente' -> distribuir primeiro")
             if cycle <= 5 or cycle % 10 == 0 or len(waiting) > 0:
                 _oldest_info = ''
                 if waiting:
@@ -3994,7 +4430,6 @@ def main():
                 p(f"  [QUEUE] waiting={len(waiting)} rest={len(rest)} -> processando {len(convs)}{_oldest_info}")
 
             # === MONITORAR FOLLOW-UP: conversas onde agente respondeu E aluno NÃO respondeu ===
-            # Só monitora se sent > recv (agente enviou a última mensagem)
             _fu_candidates = list(convs_opened) + [c for c in rest if (c.get('lastSendedMessageDate','') or '') > (c.get('lastReceivedMessageDate','') or '')]
             _fu_tracked = 0
             for _oc in _fu_candidates:
@@ -4024,12 +4459,26 @@ def main():
                     pass
                 _conv_states.setdefault(_oc_id, _default_conv_state())
                 _conv_states[_oc_id]['phone'] = _oc_phone
-                _conv_states[_oc_id]['student_profile'] = {'name': _oc_name, 'first_name': _oc_fname} if _oc_name else None
+                _existing_profile = _conv_states[_oc_id].get('student_profile')
+                if not _existing_profile:
+                    _conv_states[_oc_id]['student_profile'] = {'name': _oc_name, 'first_name': _oc_fname} if _oc_name else None
                 _conv_states[_oc_id]['waiting_for_client'] = True
                 _conv_states[_oc_id]['inactivity_start'] = _oc_start
                 _lm_raw = _oc.get('lastMessage', '') or ''
                 _last_msg = (_lm_raw.get('body', '') if isinstance(_lm_raw, dict) else str(_lm_raw)).lower()
-                if 'ainda est' in _last_msg and 'por a' in _last_msg:
+                _is_followup_msg = any(fp in _last_msg for fp in [
+                    'tudo certo por a', 'ainda est', 'não tive retorno',
+                    'pode mandar', 'precisar de mais alguma',
+                ])
+                _is_close_msg = any(fp in _last_msg for fp in [
+                    'muito obrigado por falar', 'encerrar por aqui',
+                    'encerrando esta conversa', 'não respondeu mais',
+                    'percebi que você não respondeu',
+                    'atendimento será encerrado',
+                ])
+                if _is_close_msg:
+                    _conv_states[_oc_id]['followup_stage'] = 2
+                elif _is_followup_msg:
                     _conv_states[_oc_id]['followup_stage'] = 1
                 else:
                     _conv_states[_oc_id]['followup_stage'] = 0
@@ -4037,7 +4486,10 @@ def main():
             def _get_last_msg_body(c):
                 lm = c.get('lastMessage', '') or ''
                 return (lm.get('body', '') if isinstance(lm, dict) else str(lm)).lower()
-            _fu_with_followup = sum(1 for c in _fu_candidates if 'ainda est' in _get_last_msg_body(c) and 'por a' in _get_last_msg_body(c))
+            def _is_fu(c):
+                b = _get_last_msg_body(c)
+                return any(fp in b for fp in ['tudo certo por a', 'ainda est', 'não tive retorno', 'pode mandar', 'precisar de mais alguma'])
+            _fu_with_followup = sum(1 for c in _fu_candidates if _is_fu(c))
             if cycle <= 3 and _fu_tracked > 0:
                 p(f"  [FOLLOW-UP] {_fu_tracked} monitoradas | {_fu_with_followup} ja com follow-up (auto-close direto)")
 
@@ -4090,20 +4542,37 @@ def main():
                     _conv_skipped_human += 1
                     continue
 
-                # Para conversas WAITING: limpar dedup da msg MAIS RECENTE (apenas 1)
+                # Para conversas WAITING: limpar dedup apenas se o bot NÃO respondeu depois
                 if _in_waiting:
                     _lr = _conv_states.get(conv_id, {}).get('_last_responded_ts', 0)
                     if _lr and (time.time() - _lr) < 60:
                         _conv_no_msg += 1
                         continue
                     try:
-                        _pre_msgs = get_conversation_messages_api(conv_id, limit=5)
+                        _pre_msgs = _cached_msgs.get(conv_id) or get_conversation_messages_api(conv_id, limit=10)
+                        _cached_msgs[conv_id] = _pre_msgs
                         _latest_recv = None
+                        _latest_recv_ts = ''
+                        _latest_out_ts = ''
                         for m in _pre_msgs:
-                            if m.get('id') and m.get('received', False):
-                                _latest_recv = m.get('id')
-                                break
-                        if _latest_recv:
+                            body_ck = (m.get('body', '') or '').strip()
+                            if not body_ck or m.get('isInternal', False):
+                                continue
+                            ts_ck = m.get('createdAt', '') or m.get('timestamp', '') or ''
+                            if m.get('received', False):
+                                if not _latest_recv:
+                                    _latest_recv = m.get('id')
+                                    _latest_recv_ts = ts_ck
+                            else:
+                                if not _latest_out_ts:
+                                    _latest_out_ts = ts_ck
+                        _bot_already_replied = bool(_latest_out_ts and _latest_recv_ts and _latest_out_ts >= _latest_recv_ts)
+                        if _bot_already_replied:
+                            if _latest_recv:
+                                processed_msg_ids.add(_latest_recv)
+                            _conv_no_msg += 1
+                            continue
+                        if _latest_recv and _latest_recv not in processed_msg_ids:
                             conn = get_db()
                             cur = conn.cursor()
                             cur.execute("DELETE FROM msg_dedup WHERE msg_id = %s", (_latest_recv,))
@@ -4216,7 +4685,7 @@ def main():
 
             # === FOLLOW-UP & ENCERRAMENTO POR INATIVIDADE (para TODAS conversas) ===
             _closes_this_cycle = 0
-            _MAX_CLOSES_PER_CYCLE = 5
+            _MAX_CLOSES_PER_CYCLE = 8
             for cid, st in list(_conv_states.items()):
                 if st.get('_human_took_over'):
                     continue
@@ -4226,21 +4695,35 @@ def main():
                     name_fmt = f", {sp['first_name']}" if sp and sp.get('first_name') else ""
                     cur_phone = st.get('phone', '')
 
+                    if st.get('followup_stage', 0) == 2:
+                        if _closes_this_cycle >= _MAX_CLOSES_PER_CYCLE:
+                            continue
+                        p(f"  [DIRECT-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Msg encerramento ja enviada ({int(elapsed)}s) -> finalizando")
+                        _closes_this_cycle += 1
+                        close_conversation_crm(cid, phone=cur_phone)
+                        st['conversation_messages'] = []
+                        conversation_greeted.discard(cid)
+                        st['waiting_for_client'] = False
+                        st['followup_stage'] = 0
+                        st['inactivity_start'] = 0
+                        p(f"  [DIRECT-CLOSE] Conversa finalizada")
+                        continue
+
                     if st.get('followup_stage', 0) == 0 and elapsed >= FOLLOWUP_1_DELAY:
-                        # Verificar se tem atendente antes de enviar follow-up
-                        try:
-                            r_fu_check = requests.get(
-                                f'{DCZ_MSG}/messaging/conversations/{cid}',
-                                headers=H, timeout=8)
-                            if r_fu_check.status_code == 200:
-                                fu_data = r_fu_check.json()
-                                if fu_data.get('attendants', []):
-                                    p(f"  [FOLLOWUP-1] [{cur_phone[-4:] if cur_phone else '????'}] Atendente presente -> cancelando follow-up")
-                                    st['_human_took_over'] = True
-                                    st['waiting_for_client'] = False
-                                    continue
-                        except Exception:
-                            pass
+                        if elapsed <= 3600:
+                            try:
+                                r_fu_check = requests.get(
+                                    f'{DCZ_MSG}/messaging/conversations/{cid}',
+                                    headers=H, timeout=10)
+                                if r_fu_check.status_code == 200:
+                                    fu_data = r_fu_check.json()
+                                    if fu_data.get('attendants', []):
+                                        p(f"  [FOLLOWUP-1] [{cur_phone[-4:] if cur_phone else '????'}] Atendente presente -> cancelando follow-up")
+                                        st['_human_took_over'] = True
+                                        st['waiting_for_client'] = False
+                                        continue
+                            except Exception:
+                                pass
                         msg1 = FOLLOWUP_1_MSG.format(name=name_fmt)
                         p(f"  [FOLLOWUP-1] [{cur_phone[-4:] if cur_phone else '????'}] {int(elapsed)}s sem resposta")
                         send_message_crm(cid, msg1, buttons=FOLLOWUP_1_BUTTONS)
@@ -4249,33 +4732,34 @@ def main():
                         st['inactivity_start'] = time.time()
 
                     elif st.get('followup_stage', 0) == 1 and elapsed >= CLOSE_DELAY:
-                        # SEGURANÇA: sempre verificar via API se há atendente antes de fechar
                         _safe_to_close = False
-                        try:
-                            r_check = requests.get(
-                                f'{DCZ_MSG}/messaging/conversations/{cid}',
-                                headers=H, timeout=8)
-                            if r_check.status_code == 200:
-                                conv_data = r_check.json()
-                                if conv_data.get('attendants', []):
-                                    p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Atendente presente -> cancelando close")
-                                    st['_human_took_over'] = True
-                                    st['waiting_for_client'] = False
-                                    continue
-                                # Verificar se última msg recebida é depois do follow-up (aluno respondeu)
-                                recv_ts = conv_data.get('lastReceivedMessageDate', '') or ''
-                                sent_ts = conv_data.get('lastSendedMessageDate', '') or ''
-                                if recv_ts and sent_ts and recv_ts > sent_ts:
-                                    p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Aluno respondeu depois do follow-up -> cancelando close")
-                                    st['waiting_for_client'] = False
-                                    st['inactivity_start'] = 0
-                                    st['followup_stage'] = 0
-                                    continue
-                                _safe_to_close = True
-                            else:
-                                p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] API retornou {r_check.status_code} -> adiando close")
-                        except Exception as e_check:
-                            p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Erro ao verificar API: {e_check} -> adiando close")
+                        if elapsed > 3600:
+                            _safe_to_close = True
+                        else:
+                            try:
+                                r_check = requests.get(
+                                    f'{DCZ_MSG}/messaging/conversations/{cid}',
+                                    headers=H, timeout=10)
+                                if r_check.status_code == 200:
+                                    conv_data = r_check.json()
+                                    if conv_data.get('attendants', []):
+                                        p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Atendente presente -> cancelando close")
+                                        st['_human_took_over'] = True
+                                        st['waiting_for_client'] = False
+                                        continue
+                                    recv_ts = conv_data.get('lastReceivedMessageDate', '') or ''
+                                    sent_ts = conv_data.get('lastSendedMessageDate', '') or ''
+                                    if recv_ts and sent_ts and recv_ts > sent_ts:
+                                        p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Aluno respondeu depois do follow-up -> cancelando close")
+                                        st['waiting_for_client'] = False
+                                        st['inactivity_start'] = 0
+                                        st['followup_stage'] = 0
+                                        continue
+                                    _safe_to_close = True
+                                else:
+                                    p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] API retornou {r_check.status_code} -> adiando close")
+                            except Exception as e_check:
+                                p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Erro ao verificar API: {e_check} -> adiando close")
                         if not _safe_to_close:
                             continue
                         if _closes_this_cycle >= _MAX_CLOSES_PER_CYCLE:
