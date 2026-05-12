@@ -415,6 +415,44 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
     <div id="sent-alerts" class="space-y-2 max-h-80 overflow-y-auto"></div>
   </div>
 </div>
+
+<!-- AVALIAÇÃO DE RESPOSTAS -->
+<div class="card mt-4">
+  <div class="p-4 border-b">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-sm font-bold text-gray-800"><i class="fas fa-clipboard-check mr-2 text-indigo-500"></i>Avaliação de Respostas do Agente</h3>
+      <div class="flex gap-2">
+        <span class="text-xs bg-gray-100 text-gray-500 px-2 py-1 rounded-full" id="aval-cnt-pending">- pendentes</span>
+        <span class="text-xs bg-green-100 text-green-600 px-2 py-1 rounded-full" id="aval-cnt-approved">- aprovadas</span>
+        <span class="text-xs bg-red-100 text-red-600 px-2 py-1 rounded-full" id="aval-cnt-rejected">- reprovadas</span>
+      </div>
+    </div>
+    <div class="flex flex-wrap items-center gap-2">
+      <select id="aval-filter-status" class="inp btn-sm" style="width:auto;padding:5px 10px;font-size:12px;" onchange="loadAvaliacoes()">
+        <option value="">Todas</option>
+        <option value="pendente" selected>Pendentes</option>
+        <option value="aprovada">Aprovadas</option>
+        <option value="reprovada">Reprovadas</option>
+      </select>
+      <select id="aval-filter-tema" class="inp btn-sm" style="width:auto;padding:5px 10px;font-size:12px;" onchange="loadAvaliacoes()">
+        <option value="">Todos os Temas</option>
+        <option value="ACESSO_PORTAL">Acesso Portal</option>
+        <option value="ACADEMICO">Acadêmico</option>
+        <option value="FINANCEIRO">Financeiro</option>
+        <option value="MATRICULA">Matrícula</option>
+        <option value="DOCUMENTOS">Documentos</option>
+        <option value="OUTRO">Outro</option>
+      </select>
+      <input type="text" id="aval-search" placeholder="Buscar aluno, pergunta..." class="inp btn-sm" style="width:200px;padding:5px 10px;font-size:12px;" onkeyup="debAval()">
+      <button onclick="loadAvaliacoes()" class="btn btn-p btn-sm"><i class="fas fa-rotate"></i></button>
+    </div>
+  </div>
+  <div id="aval-list" class="divide-y divide-gray-100 max-h-[600px] overflow-y-auto"></div>
+  <div class="p-3 border-t flex items-center justify-between bg-gray-50">
+    <span class="text-xs text-gray-400" id="aval-page-info"></span>
+    <div class="flex gap-1.5" id="aval-pagination"></div>
+  </div>
+</div>
 </div>
 
 <!-- ===== TEAM ===== -->
@@ -1006,6 +1044,15 @@ Pode encerrar</textarea>
 
 <script>
 const A='';
+const DCZ_APP='https://crm.datacrazy.io';
+function dczLink(item){
+  const phone=item.phone||'';
+  return DCZ_APP+'/multiservice?search='+encodeURIComponent(phone);
+}
+function dczBtn(item){
+  const url=dczLink(item);
+  return `<a href="${url}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="btn btn-sm btn-p" style="font-size:11px;padding:4px 10px;text-decoration:none;"><i class="fas fa-external-link-alt mr-1"></i>Ver no DataCrazy</a>`;
+}
 let qaPg=1,logsPg=1,stuPg=1,_dt={},charts={};
 let _csvFile=null;
 let _selectedQA=new Set();
@@ -1420,7 +1467,7 @@ async function loadTabulation(){
     document.getElementById('tab-students').innerHTML=stds.length?stds.map(s=>`<div class="flex items-center gap-3 p-3 bg-gray-50 rounded-lg"><div class="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 font-bold text-sm">${(s.name||'?')[0]}</div><div class="flex-1 min-w-0"><div class="text-sm font-medium trunc">${esc(s.name||'Sem nome')}</div><div class="text-xs text-gray-400">${s.phone||''}</div></div><div class="text-right"><div class="text-sm font-bold">${s.count}</div><div class="text-xs text-gray-400">NPS ${s.avg_nps}</div></div></div>`).join(''):'<div class="text-sm text-gray-400 text-center py-4">Nenhum aluno tabulado</div>';
 
     const rec=d.recent||[];
-    document.getElementById('tab-recent').innerHTML=rec.length?rec.map(r=>`<div class="p-3 bg-gray-50 rounded-lg border cursor-pointer" onclick="this.querySelector('.tab-detail').classList.toggle('hidden')"><div class="flex items-center gap-2 mb-1.5"><span class="badge ${r.resolvido==='sim'?'b-green':r.resolvido==='nao'?'b-red':'b-yellow'}">${r.resolvido||'?'}</span><span class="badge b-blue">${r.tema||'N/A'}</span><span class="badge ${r.sentimento==='frustrado'||r.sentimento==='irritado'?'b-red':r.sentimento==='satisfeito'?'b-green':'b-gray'}">${r.sentimento||'?'}</span><span class="text-xs text-gray-400 ml-auto">${r.created_at?new Date(r.created_at).toLocaleString('pt-BR'):''}</span></div><div class="text-sm text-gray-700">${esc(r.student_name||'Aluno')} <span class="text-xs text-gray-400">${r.phone||''}</span></div><div class="mt-1"><div class="text-xs text-indigo-600 font-medium">Aluno: ${esc(r.pergunta_aluno||r.subtema||'')}</div><div class="text-xs text-gray-600">Agente: ${esc(r.resposta_agente||r.resumo||'')}</div></div><div class="tab-detail hidden mt-2 pt-2 border-t border-gray-200"><div class="text-xs text-gray-400">${esc(r.resumo||'')}</div><div class="flex items-center gap-2 mt-1"><span class="text-xs text-gray-500">NPS: <strong>${r.nps_implicito||'-'}</strong></span><span class="text-xs text-gray-400">${r.mensagens_count||0} msgs</span></div></div></div>`).join(''):'<div class="text-sm text-gray-400 text-center py-4">Nenhum atendimento tabulado</div>';
+    document.getElementById('tab-recent').innerHTML=rec.length?rec.map(r=>`<div class="p-3 bg-gray-50 rounded-lg border cursor-pointer" onclick="this.querySelector('.tab-detail').classList.toggle('hidden')"><div class="flex items-center gap-2 mb-1.5"><span class="badge ${r.resolvido==='sim'?'b-green':r.resolvido==='nao'?'b-red':'b-yellow'}">${r.resolvido||'?'}</span><span class="badge b-blue">${r.tema||'N/A'}</span><span class="badge ${r.sentimento==='frustrado'||r.sentimento==='irritado'?'b-red':r.sentimento==='satisfeito'?'b-green':'b-gray'}">${r.sentimento||'?'}</span><span class="text-xs text-gray-400 ml-auto">${r.created_at?new Date(r.created_at).toLocaleString('pt-BR'):''}</span></div><div class="text-sm text-gray-700">${esc(r.student_name||'Aluno')} <span class="text-xs text-gray-400">${r.phone||''}</span></div><div class="mt-1"><div class="text-xs text-indigo-600 font-medium">Aluno: ${esc(r.pergunta_aluno||r.subtema||'')}</div><div class="text-xs text-gray-600">Agente: ${esc(r.resposta_agente||r.resumo||'')}</div></div><div class="tab-detail hidden mt-2 pt-2 border-t border-gray-200"><div class="text-xs text-gray-400">${esc(r.resumo||'')}</div><div class="flex items-center gap-2 mt-2"><span class="text-xs text-gray-500">NPS: <strong>${r.nps_implicito||'-'}</strong></span><span class="text-xs text-gray-400">${r.mensagens_count||0} msgs</span><span class="ml-auto">${dczBtn(r)}</span></div></div></div>`).join(''):'<div class="text-sm text-gray-400 text-center py-4">Nenhum atendimento tabulado</div>';
   }catch(e){console.error('Erro loadTabulation',e);}
 }
 
@@ -1504,8 +1551,100 @@ async function loadSentiment(){
     document.getElementById('sent-repeat').innerHTML=rep.length?rep.map(r=>`<div class="flex items-center gap-3 p-3 bg-red-50 rounded-lg border border-red-100"><div class="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center text-red-600 font-bold text-sm">${(r.name||'?')[0]}</div><div class="flex-1 min-w-0"><div class="text-sm font-medium">${esc(r.name||'Sem nome')}</div><div class="text-xs text-gray-400">${r.phone||''}</div></div><div class="text-right"><div class="text-sm font-bold text-red-600">${r.count}x</div><div class="text-xs text-gray-400">NPS ${r.avg_nps}</div></div></div>`).join(''):'<div class="text-sm text-gray-400 text-center py-4">Nenhum detrator recorrente</div>';
 
     const alerts=d.recent_alerts||[];
-    document.getElementById('sent-alerts').innerHTML=alerts.length?alerts.map(a=>`<div class="p-3 bg-amber-50 rounded-lg border border-amber-100 cursor-pointer" onclick="this.querySelector('.alert-detail').classList.toggle('hidden')"><div class="flex items-center gap-2 mb-1"><span class="badge b-red">${a.sentimento||'?'}</span><span class="badge b-yellow">NPS ${a.nps_implicito||'-'}</span><span class="text-xs text-gray-400 ml-auto">${a.created_at?new Date(a.created_at).toLocaleString('pt-BR'):''}</span></div><div class="text-sm font-medium">${esc(a.student_name||'Aluno')} - ${esc(a.tema||'')}</div><div class="text-xs text-gray-400">${a.phone||''}</div><div class="mt-1"><div class="text-xs text-indigo-600 font-medium">Aluno: ${esc(a.pergunta_aluno||'')}</div><div class="text-xs text-gray-600">Agente: ${esc(a.resposta_agente||'')}</div></div><div class="alert-detail hidden mt-2 pt-2 border-t border-amber-200"><div class="text-xs text-gray-500">${esc(a.resumo||'')}</div></div></div>`).join(''):'<div class="text-sm text-gray-400 text-center py-4">Nenhum alerta</div>';
+    document.getElementById('sent-alerts').innerHTML=alerts.length?alerts.map(a=>`<div class="p-3 bg-amber-50 rounded-lg border border-amber-100 cursor-pointer" onclick="this.querySelector('.alert-detail').classList.toggle('hidden')"><div class="flex items-center gap-2 mb-1"><span class="badge b-red">${a.sentimento||'?'}</span><span class="badge b-yellow">NPS ${a.nps_implicito||'-'}</span><span class="text-xs text-gray-400 ml-auto">${a.created_at?new Date(a.created_at).toLocaleString('pt-BR'):''}</span></div><div class="text-sm font-medium">${esc(a.student_name||'Aluno')} - ${esc(a.tema||'')}</div><div class="text-xs text-gray-400">${a.phone||''}</div><div class="mt-1"><div class="text-xs text-indigo-600 font-medium">Aluno: ${esc(a.pergunta_aluno||'')}</div><div class="text-xs text-gray-600">Agente: ${esc(a.resposta_agente||'')}</div></div><div class="alert-detail hidden mt-2 pt-2 border-t border-amber-200"><div class="text-xs text-gray-500">${esc(a.resumo||'')}</div><div class="mt-2">${dczBtn(a)}</div></div></div>`).join(''):'<div class="text-sm text-gray-400 text-center py-4">Nenhum alerta</div>';
+    loadAvaliacoes();
   }catch(e){console.error('Erro loadSentiment',e);}
+}
+
+// ==== AVALIAÇÃO DE RESPOSTAS ====
+let avalPage=1;
+let avalDebTimer=null;
+function debAval(){clearTimeout(avalDebTimer);avalDebTimer=setTimeout(()=>{avalPage=1;loadAvaliacoes();},400);}
+
+async function loadAvaliacoes(){
+  try{
+    const p=new URLSearchParams({page:avalPage,per_page:15});
+    const st=document.getElementById('aval-filter-status')?.value;if(st)p.set('avaliacao',st);
+    const tm=document.getElementById('aval-filter-tema')?.value;if(tm)p.set('tema',tm);
+    const q=document.getElementById('aval-search')?.value;if(q)p.set('search',q);
+    const sd=document.getElementById('sent-start')?.value;if(sd)p.set('start_date',sd);
+    const ed=document.getElementById('sent-end')?.value;if(ed)p.set('end_date',ed);
+    const d=await(await fetch(A+'/api/sentiment/responses?'+p)).json();
+    const c=d.counters||{};
+    document.getElementById('aval-cnt-pending').textContent=(c.pendentes||0)+' pendentes';
+    document.getElementById('aval-cnt-approved').textContent=(c.aprovadas||0)+' aprovadas';
+    document.getElementById('aval-cnt-rejected').textContent=(c.reprovadas||0)+' reprovadas';
+    document.getElementById('aval-page-info').textContent=`Página ${d.page} de ${d.pages} (${d.total} registros)`;
+
+    const list=document.getElementById('aval-list');
+    if(!d.rows||!d.rows.length){
+      list.innerHTML='<div class="text-sm text-gray-400 text-center py-8">Nenhuma resposta encontrada</div>';
+    } else {
+      list.innerHTML=d.rows.map(r=>{
+        const isApproved=r.avaliacao==='aprovada';
+        const isRejected=r.avaliacao==='reprovada';
+        const isPending=!r.avaliacao;
+        const sentCls=r.sentimento==='frustrado'?'b-red':r.sentimento==='satisfeito'?'b-green':'b-gray';
+        const borderCls=isApproved?'border-l-4 border-l-green-400':isRejected?'border-l-4 border-l-red-400':'border-l-4 border-l-gray-200';
+        return `<div class="p-4 hover:bg-gray-50 transition-colors ${borderCls}" id="aval-row-${r.id}">
+          <div class="flex items-start gap-3">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 mb-1.5 flex-wrap">
+                <span class="text-sm font-semibold text-gray-800">${esc(r.student_name||'Aluno')}</span>
+                <span class="text-xs text-gray-400">${r.phone||''}</span>
+                <span class="badge b-blue">${r.tema||'-'}</span>
+                <span class="badge ${sentCls}">${r.sentimento||'-'}</span>
+                ${r.nps_implicito!=null?`<span class="badge ${r.nps_implicito<=6?'b-red':r.nps_implicito>=9?'b-green':'b-yellow'}">NPS ${r.nps_implicito}</span>`:''}
+                <span class="text-xs text-gray-400 ml-auto">${r.created_at?new Date(r.created_at).toLocaleString('pt-BR'):''}</span>
+              </div>
+              <div class="bg-indigo-50 rounded-lg p-3 mb-2">
+                <div class="text-xs font-semibold text-indigo-600 mb-1"><i class="fas fa-user mr-1"></i>Pergunta do Aluno:</div>
+                <div class="text-sm text-gray-700">${esc(r.pergunta_aluno||'-')}</div>
+              </div>
+              <div class="bg-gray-50 rounded-lg p-3">
+                <div class="text-xs font-semibold text-gray-500 mb-1"><i class="fas fa-robot mr-1"></i>Resposta do Agente:</div>
+                <div class="text-sm text-gray-700" style="white-space:pre-wrap;">${esc(r.resposta_agente||'-')}</div>
+              </div>
+            </div>
+            <div class="flex flex-col gap-2 shrink-0 pt-6">
+              <button onclick="avaliarResp(${r.id},'aprovada')" class="btn btn-sm ${isApproved?'btn-s ring-2 ring-green-400':'btn-g'}" title="Resposta correta" style="min-width:44px;">
+                <i class="fas fa-check"></i>
+              </button>
+              <button onclick="avaliarResp(${r.id},'reprovada')" class="btn btn-sm ${isRejected?'btn-d ring-2 ring-red-400':'btn-g'}" title="Resposta incorreta" style="min-width:44px;">
+                <i class="fas fa-xmark"></i>
+              </button>
+              ${r.conv_id?`<a href="${dczUrl(r)}" target="_blank" class="btn btn-sm btn-g" title="Ver no DataCrazy"><i class="fas fa-external-link"></i></a>`:''}
+            </div>
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    const pag=document.getElementById('aval-pagination');
+    let pagHtml='';
+    if(d.page>1) pagHtml+=`<button class="btn btn-g btn-sm" onclick="avalPage=${d.page-1};loadAvaliacoes()"><i class="fas fa-chevron-left"></i></button>`;
+    const start=Math.max(1,d.page-2),end=Math.min(d.pages,d.page+2);
+    for(let i=start;i<=end;i++){
+      pagHtml+=`<button class="btn btn-sm ${i===d.page?'btn-p':'btn-g'}" onclick="avalPage=${i};loadAvaliacoes()">${i}</button>`;
+    }
+    if(d.page<d.pages) pagHtml+=`<button class="btn btn-g btn-sm" onclick="avalPage=${d.page+1};loadAvaliacoes()"><i class="fas fa-chevron-right"></i></button>`;
+    pag.innerHTML=pagHtml;
+  }catch(e){console.error('Erro loadAvaliacoes',e);}
+}
+
+function dczUrl(r){
+  if(r.conv_id) return 'https://messaging.g1.datacrazy.io/conversations/'+r.conv_id;
+  if(r.phone) return 'https://messaging.g1.datacrazy.io/search?q='+r.phone;
+  return '#';
+}
+
+async function avaliarResp(id,val){
+  try{
+    const row=document.getElementById('aval-row-'+id);
+    if(row) row.style.opacity='0.5';
+    await fetch(A+'/api/sentiment/responses/'+id+'/avaliar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({avaliacao:val})});
+    loadAvaliacoes();
+  }catch(e){console.error('Erro avaliar',e);}
 }
 
 // ==== TEAM PANEL ====
@@ -2349,7 +2488,7 @@ function renderConvTable(data,total,page,perPage){
       <td class="px-4 py-2.5 text-center ${resCls}"><i class="fas ${resIcon}"></i></td>
       <td class="px-4 py-2.5 text-gray-500">${esc(resumo)}</td>
     </tr>
-    <tr class="hidden bg-indigo-50/50"><td colspan="6" class="px-6 py-3 text-xs text-gray-600 whitespace-pre-line">${esc(d.resumo||'Sem resumo')}</td></tr>`;
+    <tr class="hidden bg-indigo-50/50"><td colspan="6" class="px-6 py-3"><div class="text-xs text-gray-600 whitespace-pre-line">${esc(d.resumo||'Sem resumo')}</div><div class="mt-2">${dczBtn(d)}</div></td></tr>`;
   }).join('');
 
   const totalPages=Math.ceil(total/perPage);

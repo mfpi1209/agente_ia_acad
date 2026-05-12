@@ -77,6 +77,17 @@ SUPABASE_HEADERS = {
 }
 DISTRIBUICAO_TABLE = 'distribuicao_academico_duplicate'
 
+# ===================== SUPABASE GRADES (banco de cursos) =====================
+
+GRADES_SUPABASE_URL = os.environ.get('GRADES_SUPABASE_URL', '')
+GRADES_SUPABASE_KEY = os.environ.get('GRADES_SUPABASE_KEY', '')
+GRADES_HEADERS = {
+    'apikey': GRADES_SUPABASE_KEY,
+    'Authorization': f'Bearer {GRADES_SUPABASE_KEY}',
+    'Content-Type': 'application/json',
+}
+_course_info_cache = {}
+
 ATTENDANT_MAP = {
     'julia':   '69161295adb204a6c1033c27',
     'marilia': '6903721f1be7fd548fbd5cd3',
@@ -329,7 +340,7 @@ Sua personalidade: simpática, paciente, fala de um jeito leve e natural. Você 
 2. **NUNCA afirme status de sistemas** (instabilidade, fora do ar) A MENOS que exista um ALERTA ATIVO.
 3. **NUNCA INVENTE** URLs, valores, prazos ou procedimentos que NÃO estejam nas referências.
 4. **NUNCA forneça dados pessoais** (RGM, e-mail acadêmico, senhas).
-5. **DADOS ACADÊMICOS**: Você pode ter acesso a curso, semestre e polo do aluno. NUNCA mencione esses dados proativamente. Use APENAS internamente para dar respostas mais precisas (ex: estágio, TCC, grade). NUNCA diga "Sei que você cursa X" ou "Você está no semestre Y" — use a info para calibrar a resposta sem revelar a fonte.
+5. **DADOS ACADÊMICOS E DO CURSO**: Você pode ter acesso a curso, semestre, polo do aluno E informações detalhadas do curso (duração, grau, grade curricular, mercado de trabalho, áreas de atuação). NUNCA mencione esses dados proativamente na saudação. Use internamente para dar respostas mais precisas. Quando o aluno PERGUNTAR sobre grade/disciplinas, mercado de trabalho, duração ou áreas de atuação do curso, aí sim use os dados disponíveis. Se tiver o link da grade curricular, ENVIE quando perguntado sobre disciplinas/grade/matriz.
 6. **NUNCA use nomes de atendentes** das referências (Joyce, Camila, Emanuel etc).
 7. Use o nome do aluno ao longo da conversa de forma natural (não toda mensagem).
 8. Se a referência tiver links ou vídeos, **INCLUA**.
@@ -818,6 +829,8 @@ def fetch_academic_data(cpf, phone=None):
     try:
         acad_config = DB_CONFIG.copy()
         acad_config['dbname'] = 'dcz_sync'
+        acad_config['connect_timeout'] = 5
+        acad_config['options'] = '-c statement_timeout=10000'
         conn = psycopg2.connect(**acad_config)
         cur = conn.cursor()
 
@@ -892,6 +905,170 @@ def fetch_academic_data(cpf, phone=None):
     except Exception as e:
         p(f"    [ACAD] Erro ao buscar dados academicos: {e}")
         return None
+
+
+def _parse_course_content(content):
+    """Faz parse do campo content da tabela documents (formato chave:valor separado por /)."""
+    result = {}
+    try:
+        raw = content.replace('"', '').strip()
+        nome_part = raw.split(';')[0].replace('nome', '').strip() if ';' in raw else ''
+        info_start = raw.find('info:')
+        if info_start >= 0:
+            nome_part = raw[info_start + 5:].split(';')[0].strip()
+        result['nome'] = nome_part
+
+        def _extract(key):
+            k = key + ':'
+            idx = raw.find(k)
+            if idx < 0:
+                return ''
+            start = idx + len(k)
+            end = len(raw)
+            for sep in ['/', '"']:
+                pos = raw.find(sep, start)
+                if 0 < pos < end:
+                    end = pos
+            for next_key in ['descricao_curso:', 'mercado_trabalho:', 'area_de_atuacao:',
+                             'grade_do_curso:', 'duracao_curso:', 'grau_curso:',
+                             'curso tem:', 'area_do_curso:']:
+                if next_key != k:
+                    pos = raw.find(next_key, start)
+                    if 0 < pos < end:
+                        end = pos
+            return raw[start:end].strip().rstrip(';').strip()
+
+        result['descricao'] = _extract('descricao_curso')
+        result['mercado_trabalho'] = _extract('mercado_trabalho')
+        result['areas_atuacao'] = _extract('area_de_atuacao')
+        result['grade_link'] = _extract('grade_do_curso')
+        result['duracao'] = _extract('duracao_curso').split()[0] if _extract('duracao_curso') else ''
+        result['grau'] = _extract('grau_curso')
+        result['area_curso'] = _extract('area_do_curso')
+    except Exception as e:
+        p(f"    [GRADE] Erro no parse: {e}")
+    return result
+
+
+def _normalize_for_search(text):
+    """Remove acentos para busca case-insensitive."""
+    import unicodedata
+    return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn').lower()
+
+
+def fetch_course_info(course_name):
+    """Busca informações do curso na tabela documents do Supabase de grades.
+    Usa cache em memória para evitar chamadas repetidas."""
+    if not course_name:
+        return None
+    norm_name = course_name.strip().upper()
+    if norm_name in _course_info_cache:
+        return _course_info_cache[norm_name]
+    try:
+        clean = course_name.strip().split('(')[0].strip()
+        clean = clean.split(' - ')[0].strip() if ' - ' in clean else clean
+        words = [w for w in clean.split() if len(w) > 2]
+        main_word = words[0] if words else clean
+
+        all_rows = []
+        search_variants = [clean]
+        if main_word != clean:
+            search_variants.append(main_word)
+        prefix = clean[:5] if len(clean) >= 5 else clean
+        if prefix.lower() != clean.lower() and prefix.lower() != main_word.lower():
+            search_variants.append(prefix)
+        for search_term in search_variants:
+            if all_rows and len(all_rows) >= 5:
+                break
+            r = requests.get(
+                f'{GRADES_SUPABASE_URL}/rest/v1/documents',
+                headers=GRADES_HEADERS,
+                params={'select': 'id,content', 'content': f'ilike.*{search_term}*', 'limit': '20'},
+                timeout=15
+            )
+            if r.status_code == 200:
+                new_rows = r.json()
+                seen_ids = {row['id'] for row in all_rows}
+                all_rows.extend(row for row in new_rows if row['id'] not in seen_ids)
+
+        if not all_rows:
+            p(f"    [GRADE] Nenhum curso encontrado para '{clean}'")
+            _course_info_cache[norm_name] = None
+            return None
+
+        search_norm = _normalize_for_search(clean)
+        search_words = search_norm.split()
+        best = None
+        best_score = -1
+        for row in all_rows:
+            content = row.get('content', '')
+            info_start = content.find('info:')
+            if info_start >= 0:
+                nome_in_content = content[info_start+5:].split(';')[0].strip()
+            else:
+                nome_in_content = content.split(';')[0].replace('nome', '').strip()
+            nome_norm = _normalize_for_search(nome_in_content)
+
+            score = 0
+            for w in search_words:
+                if w in nome_norm:
+                    score += 2
+            if search_norm in nome_norm or nome_norm.startswith(search_norm):
+                score += 20
+            nome_first = nome_norm.split(' - ')[0].strip() if ' - ' in nome_norm else nome_norm
+            search_first = search_norm.split(' - ')[0].strip() if ' - ' in search_norm else search_norm
+            if nome_first == search_first:
+                score += 50
+
+            if score > best_score:
+                best_score = score
+                best = row
+
+        if not best:
+            best = all_rows[0]
+        if best_score <= 0:
+            p(f"    [GRADE] Score muito baixo ({best_score}) para '{clean}' -> ignorando")
+            _course_info_cache[norm_name] = None
+            return None
+        parsed = _parse_course_content(best['content'])
+        parsed['_doc_id'] = best.get('id')
+        _course_info_cache[norm_name] = parsed
+        p(f"    [GRADE] Curso encontrado: {parsed.get('nome','?')[:50]} (score={best_score})")
+        return parsed
+    except Exception as e:
+        p(f"    [GRADE] Erro ao buscar curso: {e}")
+        return None
+
+
+def search_courses_by_query(query, limit=5):
+    """Busca cursos por texto livre na tabela documents."""
+    if not query:
+        return []
+    try:
+        words = query.strip().split()
+        main_word = max(words, key=len) if words else query
+        r = requests.get(
+            f'{GRADES_SUPABASE_URL}/rest/v1/documents',
+            headers=GRADES_HEADERS,
+            params={'select': 'id,content', 'content': f'ilike.*{main_word}*', 'limit': '30'},
+            timeout=15
+        )
+        if r.status_code != 200:
+            return []
+        rows = r.json()
+        results = []
+        query_lower = query.lower()
+        for row in rows:
+            parsed = _parse_course_content(row['content'])
+            score = sum(1 for w in words if w.lower() in (parsed.get('nome', '') or '').lower())
+            if query_lower in (parsed.get('area_curso', '') or '').lower():
+                score += 2
+            results.append((score, parsed))
+        results.sort(key=lambda x: -x[0])
+        return [r[1] for r in results[:limit] if r[0] > 0]
+    except Exception as e:
+        p(f"    [GRADE] Erro busca cursos: {e}")
+        return []
 
 
 def check_lead_has_pipeline(phone, pipeline_id=None):
@@ -1004,6 +1181,32 @@ def create_lead_and_business(phone, name=''):
 
 
 # ===================== FASE 2: MEMÓRIA =====================
+
+def _heartbeat(status='online', extra=''):
+    """Grava heartbeat do agente no DB para o dashboard saber se está ligado."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS agent_heartbeat (
+                id INT PRIMARY KEY DEFAULT 1,
+                status VARCHAR(20) DEFAULT 'offline',
+                pid INT,
+                last_beat TIMESTAMP DEFAULT NOW(),
+                extra TEXT DEFAULT ''
+            )
+        """)
+        cur.execute("""
+            INSERT INTO agent_heartbeat (id, status, pid, last_beat, extra)
+            VALUES (1, %s, %s, NOW(), %s)
+            ON CONFLICT (id) DO UPDATE SET status=%s, pid=%s, last_beat=NOW(), extra=%s
+        """, (status, os.getpid(), extra, status, os.getpid(), extra))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
 
 def ensure_memory_tables():
     """Cria tabelas se necessário (chamada uma vez no startup)."""
@@ -1365,6 +1568,53 @@ def build_student_context(profile):
             "\n  * Bacharelado: cursos de 4-5 anos, geralmente possuem estágio obrigatório."
             "\n  * Licenciatura: cursos de 4 anos, possuem estágio obrigatório."
             "\n  NUNCA afirme com certeza se o curso tem ou não estágio — oriente a verificar a grade."
+        )
+
+    all_ci = profile.get('all_courses_info')
+    ci = profile.get('course_info')
+    if all_ci and len(all_ci) > 1:
+        parts.append(f"\n## INFORMAÇÕES DOS CURSOS (da grade oficial):")
+        for i, ci_item in enumerate(all_ci, 1):
+            parts.append(f"\n### Curso {i}: {ci_item.get('nome', '?')}")
+            if ci_item.get('duracao'):
+                parts.append(f"- Duração: {ci_item['duracao']} semestres")
+            if ci_item.get('grau'):
+                parts.append(f"- Grau: {ci_item['grau']}")
+            if ci_item.get('grade_link'):
+                parts.append(f"- Link da grade: {ci_item['grade_link']}")
+            if ci_item.get('descricao'):
+                parts.append(f"- Descrição: {ci_item['descricao'][:200]}")
+        parts.append(
+            "\nREGRAS PARA MÚLTIPLOS CURSOS:"
+            "\n- Quando o aluno perguntar sobre grade/disciplinas/mercado/duração, PERGUNTE de qual curso antes de responder."
+            "\n- Liste os nomes dos cursos de forma natural para o aluno escolher."
+            "\n- Quando o aluno indicar qual curso, ENVIE O LINK da grade correspondente."
+            "\n- NÃO envie informações de todos os cursos de uma vez."
+        )
+    elif ci:
+        parts.append(f"\n## INFORMAÇÕES DO CURSO (da grade oficial):")
+        if ci.get('nome'):
+            parts.append(f"- Curso completo: {ci['nome']}")
+        if ci.get('duracao'):
+            parts.append(f"- Duração: {ci['duracao']} semestres")
+        if ci.get('grau'):
+            parts.append(f"- Grau: {ci['grau']}")
+        if ci.get('area_curso'):
+            parts.append(f"- Área: {ci['area_curso']}")
+        if ci.get('grade_link'):
+            parts.append(f"- Link da grade curricular: {ci['grade_link']}")
+        if ci.get('descricao'):
+            parts.append(f"- Descrição: {ci['descricao'][:300]}")
+        if ci.get('mercado_trabalho'):
+            parts.append(f"- Mercado de trabalho: {ci['mercado_trabalho'][:300]}")
+        if ci.get('areas_atuacao'):
+            parts.append(f"- Áreas de atuação: {ci['areas_atuacao'][:300]}")
+        parts.append(
+            "\nREGRAS PARA DADOS DO CURSO:"
+            "\n- Quando o aluno perguntar sobre grade/disciplinas/matriz curricular, ENVIE O LINK da grade."
+            "\n- Quando perguntar sobre mercado de trabalho ou áreas de atuação do curso, use as informações acima."
+            "\n- Quando perguntar duração ou grau do curso, responda com os dados acima."
+            "\n- NÃO despeje todas as informações de uma vez. Responda o que foi perguntado."
         )
 
     return '\n'.join(parts)
@@ -3429,15 +3679,34 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         p(f"  Identificando aluno...")
         student_profile = identify_student(cur_phone)
 
-    # TODO: Ativar dados academicos quando autorizado
-    # if student_profile and not student_profile.get('_acad_loaded'):
-    #     _acad_cpf = student_profile.get('cpf')
-    #     _acad_phone = _current_phone or cur_phone
-    #     if _acad_cpf or _acad_phone:
-    #         acad = fetch_academic_data(_acad_cpf, phone=_acad_phone)
-    #         if acad:
-    #             student_profile['academic'] = acad
-    #     student_profile['_acad_loaded'] = True
+    if student_profile and not student_profile.get('_acad_loaded'):
+        _acad_cpf = student_profile.get('cpf')
+        _acad_phone = _current_phone or cur_phone
+        if _acad_cpf or _acad_phone:
+            acad = fetch_academic_data(_acad_cpf, phone=_acad_phone)
+            if acad:
+                student_profile['academic'] = acad
+                _all_courses_list = acad.get('_all_courses', [])
+                if len(_all_courses_list) > 1:
+                    _all_ci = []
+                    for _c in _all_courses_list[:3]:
+                        _cn = _c.get('curso', '')
+                        if _cn:
+                            _ci = fetch_course_info(_cn)
+                            if _ci:
+                                _all_ci.append(_ci)
+                    if _all_ci:
+                        student_profile['all_courses_info'] = _all_ci
+                        student_profile['course_info'] = _all_ci[0]
+                        p(f"    [GRADE] {len(_all_ci)} cursos carregados (multi-curso)")
+                else:
+                    _course_name = acad.get('curso', '')
+                    if _course_name:
+                        _ci = fetch_course_info(_course_name)
+                        if _ci:
+                            student_profile['course_info'] = _ci
+                            p(f"    [GRADE] Info do curso carregada: {_ci.get('nome','?')[:40]}")
+        student_profile['_acad_loaded'] = True
 
     # === ÁUDIO: identificar aluno + criar lead se necessário + distribuir ===
     if msg_body == '[audio]':
@@ -3753,7 +4022,17 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         conversation_messages.append({'role': 'bot', 'text': greeting})
         log_to_db(conv_id, question, greeting, 1.0, 'greeting')
         waiting_for_client = True; inactivity_start = time.time()
-        return
+
+        _ACTIONABLE_FIRST_KW = (
+            'disciplinas', 'materias', 'grade', 'boleto', 'prova', 'nota', 'notas',
+            'senha', 'acesso', 'financeiro', 'documento', 'historico', 'histórico',
+            'estagio', 'estágio', 'tcc', 'rematricula', 'rematrícula', 'aula',
+            'minha grade', 'mensalidade', 'declaração', 'declaracao', 'pix',
+        )
+        if not is_greeting(question) and any(kw in q_lower for kw in _ACTIONABLE_FIRST_KW):
+            p(f"  [1a-MSG] Pergunta acionável detectada na 1a msg, processando após saudação...")
+        else:
+            return
 
     # === SAUDAÇÃO REPETIDA (não é a primeira vez) ===
     if is_greeting(question):
@@ -3945,6 +4224,61 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         log_to_db(conv_id, question, msg, 0.0, 'fallback_short')
         waiting_for_client = True; inactivity_start = time.time()
         return
+
+    # === GRADE DIRETA: se perguntou sobre grade/disciplinas e temos o link ===
+    _GRADE_KEYWORDS = ('disciplinas', 'materias', 'matriz curricular', 'grade curricular',
+                       'materias do curso', 'disciplinas do curso', 'quais materias', 'quais disciplinas',
+                       'grade do curso', 'grade do meu curso', 'minha grade')
+    _question_lower = question.lower()
+    if any(kw in _question_lower for kw in _GRADE_KEYWORDS):
+        _has_multi_courses = len((student_profile or {}).get('all_courses_info') or []) > 1
+        ci = (student_profile or {}).get('course_info')
+        if _has_multi_courses:
+            p(f"  [GRADE] Multi-curso detectado, delegando ao LLM para perguntar qual curso")
+        elif ci and ci.get('grade_link'):
+            fname = (student_profile or {}).get('first_name', '')
+            name_part = f", {fname}" if fname else ''
+            grade_msg = (
+                f"Olha{name_part}, aqui está o link da *grade curricular* do seu curso "
+                f"*{ci.get('nome', 'seu curso')}*:\n\n"
+                f"{ci['grade_link']}\n\n"
+                f"Lá você consegue ver todas as disciplinas de cada semestre! "
+                f"Se tiver alguma dúvida sobre uma disciplina específica, me conta que te ajudo 😊"
+            )
+            p(f"  [GRADE-DIRETA] Enviando link da grade: {ci['grade_link'][:60]}")
+            meta_typing_on()
+            send_and_track(conv_id, grade_msg)
+            conversation_messages.append({'role': 'bot', 'text': grade_msg})
+            log_to_db(conv_id, question, grade_msg, 1.0, 'grade_link_direto')
+            waiting_for_client = True; inactivity_start = time.time()
+            return
+        elif not _has_multi_courses and not ci and student_profile:
+            _grade_stop = {'quero', 'ver', 'quais', 'sao', 'são', 'sobre', 'minha', 'minhas',
+                           'meu', 'como', 'onde', 'qual', 'grade', 'disciplinas', 'disciplina',
+                           'materias', 'materia', 'curricular', 'matriz', 'curso', 'pode',
+                           'voce', 'você', 'meus', 'favor', 'por', 'que', 'das', 'dos',
+                           'com', 'sem', 'para', 'pra', 'uma', 'uns', 'umas', 'preciso',
+                           'gostaria', 'consegue', 'enviar', 'mandar', 'olhar', 'acessar'}
+            _grade_words = [w for w in question.split()
+                           if w.lower().strip('?!.,') not in _grade_stop and len(w) > 2]
+            _grade_search = ' '.join(_grade_words) if _grade_words else ''
+            _ci_try = fetch_course_info(_grade_search) if _grade_search else None
+            if _ci_try and _ci_try.get('grade_link'):
+                fname = (student_profile or {}).get('first_name', '')
+                name_part = f", {fname}" if fname else ''
+                grade_msg = (
+                    f"Achei aqui{name_part}! O link da *grade curricular* de "
+                    f"*{_ci_try.get('nome', 'curso')}*:\n\n"
+                    f"{_ci_try['grade_link']}\n\n"
+                    f"Se precisar de mais alguma coisa, tô por aqui! 😊"
+                )
+                p(f"  [GRADE-BUSCA] Grade encontrada por busca: {_ci_try.get('nome','?')[:40]}")
+                meta_typing_on()
+                send_and_track(conv_id, grade_msg)
+                conversation_messages.append({'role': 'bot', 'text': grade_msg})
+                log_to_db(conv_id, question, grade_msg, 0.9, 'grade_link_busca')
+                waiting_for_client = True; inactivity_start = time.time()
+                return
 
     # === PIPELINE RAG ===
     p(f"  Pipeline RAG... (sentimento: {sentiment})")
@@ -4183,6 +4517,7 @@ def main():
         f.write(str(my_pid))
 
     p(f"  Entrando no loop principal... (PID {os.getpid()})")
+    _heartbeat('online', f'startup cycle=0')
 
     # === VARREDURA ÚNICA: mover alunos presos em Encerramento/outro pipeline de volta para Base de Alunos ===
     try:
@@ -4807,6 +5142,7 @@ def main():
             if cycle % 10 == 0:
                 active_count = sum(1 for s in _conv_states.values() if s.get('waiting_for_client'))
                 p(f"  ...ativo ({cycle * POLL_INTERVAL}s | {len(processed_msg_ids)} msgs | {len(_conv_states)} convs | {active_count} aguardando)")
+                _heartbeat('online', f'cycle={cycle} convs={len(_conv_states)} active={active_count}')
             if cycle % 120 == 0:
                 _db_cleanup_dedup()
                 # Limpar estados de conversas inativas há mais de 1h
@@ -4821,6 +5157,7 @@ def main():
 
         except KeyboardInterrupt:
             p("\n  Agente encerrado.")
+            _heartbeat('offline', 'shutdown')
             break
         except BaseException as e:
             import traceback

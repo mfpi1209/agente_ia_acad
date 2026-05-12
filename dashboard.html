@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard - Agente IA Acadêmico</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0f1117;
+  --card: #1a1d27;
+  --card-hover: #22263a;
+  --border: #2a2e3f;
+  --text: #e4e6ed;
+  --text-muted: #8b8fa3;
+  --primary: #6366f1;
+  --primary-light: #818cf8;
+  --green: #22c55e;
+  --green-bg: rgba(34,197,94,.12);
+  --yellow: #eab308;
+  --yellow-bg: rgba(234,179,8,.12);
+  --red: #ef4444;
+  --red-bg: rgba(239,68,68,.12);
+  --blue: #3b82f6;
+  --blue-bg: rgba(59,130,246,.12);
+  --purple: #a855f7;
+  --orange: #f97316;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:'Inter',system-ui,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }
+
+.topbar {
+  background: linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #1e1b4b 100%);
+  padding: 20px 32px;
+  display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+}
+.topbar h1 { font-size:22px; font-weight:700; letter-spacing:-.5px; }
+.topbar h1 span { color:var(--primary-light); }
+.topbar-right { display:flex; gap:12px; align-items:center; }
+.topbar-right select, .topbar-right button {
+  background:rgba(255,255,255,.08); color:var(--text); border:1px solid rgba(255,255,255,.15);
+  padding:8px 14px; border-radius:8px; font-size:13px; cursor:pointer; font-family:inherit;
+}
+.topbar-right button:hover { background:var(--primary); border-color:var(--primary); }
+.live-dot { width:8px; height:8px; border-radius:50%; background:var(--green); display:inline-block;
+  animation: pulse 2s infinite; margin-right:6px; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+.container { max-width:1440px; margin:0 auto; padding:24px; }
+
+/* KPI Cards */
+.kpi-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px; margin-bottom:24px; }
+.kpi-card {
+  background:var(--card); border:1px solid var(--border); border-radius:12px;
+  padding:20px; position:relative; overflow:hidden;
+}
+.kpi-card::before {
+  content:''; position:absolute; top:0; left:0; right:0; height:3px;
+  border-radius:12px 12px 0 0;
+}
+.kpi-card.blue::before { background:var(--blue); }
+.kpi-card.green::before { background:var(--green); }
+.kpi-card.purple::before { background:var(--purple); }
+.kpi-card.yellow::before { background:var(--yellow); }
+.kpi-card.red::before { background:var(--red); }
+.kpi-label { font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:var(--text-muted); margin-bottom:8px; }
+.kpi-value { font-size:32px; font-weight:700; line-height:1; }
+.kpi-sub { font-size:12px; color:var(--text-muted); margin-top:6px; }
+
+/* Charts Grid */
+.charts-grid { display:grid; grid-template-columns:2fr 1fr 1fr; gap:16px; margin-bottom:24px; }
+.charts-grid-2 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; margin-bottom:24px; }
+.chart-card {
+  background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px;
+}
+.chart-card h3 { font-size:14px; font-weight:600; margin-bottom:16px; color:var(--text-muted); }
+.chart-card canvas { max-height:280px; }
+
+/* Alerts */
+.alerts-section { margin-bottom:24px; }
+.alerts-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+.alerts-header h2 { font-size:16px; font-weight:600; }
+.alert-badge { background:var(--red-bg); color:var(--red); padding:2px 10px; border-radius:20px; font-size:12px; font-weight:600; }
+.alerts-scroll { display:flex; gap:12px; overflow-x:auto; padding-bottom:8px; }
+.alert-card {
+  min-width:320px; max-width:360px; background:var(--card); border:1px solid var(--border);
+  border-radius:12px; padding:16px; flex-shrink:0; border-left:3px solid var(--red);
+}
+.alert-card .alert-top { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+.alert-card .alert-name { font-weight:600; font-size:13px; }
+.alert-card .alert-time { font-size:11px; color:var(--text-muted); }
+.alert-card .alert-meta { display:flex; gap:6px; margin-bottom:8px; flex-wrap:wrap; }
+.tag { padding:2px 8px; border-radius:6px; font-size:11px; font-weight:500; }
+.tag-red { background:var(--red-bg); color:var(--red); }
+.tag-yellow { background:var(--yellow-bg); color:var(--yellow); }
+.tag-green { background:var(--green-bg); color:var(--green); }
+.tag-blue { background:var(--blue-bg); color:var(--blue); }
+.alert-q { font-size:12px; color:var(--text-muted); line-height:1.4; margin-bottom:6px; }
+.alert-q strong { color:var(--text); }
+.btn-dcz {
+  display:inline-flex; align-items:center; gap:4px; background:rgba(99,102,241,.15);
+  color:var(--primary-light); border:1px solid rgba(99,102,241,.3); padding:4px 10px;
+  border-radius:6px; font-size:11px; cursor:pointer; text-decoration:none; margin-top:4px;
+}
+.btn-dcz:hover { background:var(--primary); color:#fff; }
+
+/* Table */
+.table-section { background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+.table-header {
+  display:flex; justify-content:space-between; align-items:center; padding:16px 20px;
+  border-bottom:1px solid var(--border);
+}
+.table-header h2 { font-size:16px; font-weight:600; }
+.table-filters { display:flex; gap:8px; }
+.table-filters select, .table-filters input {
+  background:rgba(255,255,255,.06); color:var(--text); border:1px solid var(--border);
+  padding:6px 12px; border-radius:8px; font-size:12px; font-family:inherit;
+}
+.table-filters input { width:200px; }
+.table-wrap { overflow-x:auto; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+thead th {
+  text-align:left; padding:10px 14px; font-size:11px; text-transform:uppercase;
+  letter-spacing:.5px; color:var(--text-muted); background:rgba(255,255,255,.03);
+  border-bottom:1px solid var(--border); white-space:nowrap;
+}
+tbody td { padding:10px 14px; border-bottom:1px solid rgba(255,255,255,.04); vertical-align:top; }
+tbody tr:hover { background:var(--card-hover); }
+.cell-q { max-width:250px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-muted); }
+.cell-q:hover { white-space:normal; }
+.btn-aval {
+  padding:3px 8px; border-radius:5px; font-size:11px; cursor:pointer; border:1px solid;
+  background:transparent; font-family:inherit; transition:.15s;
+}
+.btn-aval.correta { border-color:var(--green); color:var(--green); }
+.btn-aval.correta:hover, .btn-aval.correta.active { background:var(--green); color:#fff; }
+.btn-aval.incorreta { border-color:var(--red); color:var(--red); }
+.btn-aval.incorreta:hover, .btn-aval.incorreta.active { background:var(--red); color:#fff; }
+.pagination { display:flex; justify-content:center; gap:8px; padding:16px; }
+.pagination button {
+  background:rgba(255,255,255,.06); color:var(--text); border:1px solid var(--border);
+  padding:6px 14px; border-radius:8px; font-size:12px; cursor:pointer; font-family:inherit;
+}
+.pagination button:hover { background:var(--primary); border-color:var(--primary); }
+.pagination button:disabled { opacity:.3; cursor:default; }
+.pagination span { color:var(--text-muted); font-size:13px; line-height:32px; }
+
+.nps-bar { display:flex; height:24px; border-radius:8px; overflow:hidden; margin-top:8px; }
+.nps-bar .seg { display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600; }
+.nps-bar .seg.det { background:var(--red); }
+.nps-bar .seg.neu { background:var(--yellow); color:#000; }
+.nps-bar .seg.pro { background:var(--green); }
+
+@media(max-width:900px) {
+  .charts-grid, .charts-grid-2 { grid-template-columns:1fr; }
+  .kpi-grid { grid-template-columns:repeat(2,1fr); }
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1><span>&#9679;</span> Dashboard <span>Agente IA</span> Acadêmico</h1>
+  <div class="topbar-right">
+    <span id="agentStatus"><span class="live-dot" id="statusDot" style="background:var(--text-muted);animation:none"></span><span id="statusText">Verificando...</span></span>
+    <select id="dayFilter" onchange="loadAll()">
+      <option value="1">Hoje</option>
+      <option value="3">3 dias</option>
+      <option value="7" selected>7 dias</option>
+      <option value="15">15 dias</option>
+      <option value="30">30 dias</option>
+    </select>
+    <button onclick="loadAll()">&#x21bb; Atualizar</button>
+  </div>
+</div>
+
+<div class="container">
+  <!-- KPIs -->
+  <div class="kpi-grid" id="kpis"></div>
+
+  <!-- Alerts -->
+  <div class="alerts-section" id="alertsSection"></div>
+
+  <!-- Charts row 1 -->
+  <div class="charts-grid">
+    <div class="chart-card"><h3>Interações por Dia</h3><canvas id="chartDia"></canvas></div>
+    <div class="chart-card"><h3>Sentimento</h3><canvas id="chartSent"></canvas></div>
+    <div class="chart-card"><h3>Resolução</h3><canvas id="chartRes"></canvas></div>
+  </div>
+
+  <!-- Charts row 2 -->
+  <div class="charts-grid-2">
+    <div class="chart-card"><h3>Temas</h3><canvas id="chartTema"></canvas></div>
+    <div class="chart-card"><h3>Distribuição NPS</h3><canvas id="chartNps"></canvas></div>
+    <div class="chart-card"><h3>Horário de Pico</h3><canvas id="chartHora"></canvas></div>
+  </div>
+
+  <!-- Table -->
+  <div class="table-section">
+    <div class="table-header">
+      <h2>Interações Recentes</h2>
+      <div class="table-filters">
+        <input type="text" id="searchInput" placeholder="Buscar aluno, telefone..." onkeyup="debounceSearch()">
+        <select id="temaFilter" onchange="loadTable()">
+          <option value="">Todos os Temas</option>
+        </select>
+        <select id="sentFilter" onchange="loadTable()">
+          <option value="">Todos os Sentimentos</option>
+          <option value="satisfeito">Satisfeito</option>
+          <option value="neutro">Neutro</option>
+          <option value="frustrado">Frustrado</option>
+        </select>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Data</th>
+            <th>Aluno</th>
+            <th>Telefone</th>
+            <th>Tema</th>
+            <th>Sentimento</th>
+            <th>NPS</th>
+            <th>Pergunta</th>
+            <th>Resposta</th>
+            <th>Avaliação</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+    <div class="pagination" id="pagination"></div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let charts = {};
+let currentPage = 1;
+let searchTimer = null;
+
+const SENT_COLORS = {satisfeito:'#22c55e', neutro:'#eab308', frustrado:'#ef4444'};
+const TEMA_COLORS = ['#6366f1','#3b82f6','#22c55e','#f97316','#a855f7','#ec4899','#14b8a6','#eab308'];
+const DCZ_BASE = 'https://messaging.g1.datacrazy.io';
+
+function dczLink(convId, phone) {
+  if (convId) return `${DCZ_BASE}/conversations/${convId}`;
+  if (phone) return `${DCZ_BASE}/search?q=${phone}`;
+  return '#';
+}
+
+function fmtDate(iso) {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  return d.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'}) + ' ' +
+         d.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+}
+
+function sentTag(s) {
+  const cls = s==='satisfeito'?'tag-green': s==='frustrado'?'tag-red':'tag-yellow';
+  return `<span class="tag ${cls}">${s}</span>`;
+}
+
+function npsTag(n) {
+  if (n===null||n===undefined) return '-';
+  const cls = n>=8?'tag-green': n>=6?'tag-yellow':'tag-red';
+  return `<span class="tag ${cls}">NPS ${n}</span>`;
+}
+
+async function loadAgentStatus() {
+  try {
+    const data = await fetch(`${API}/api/agent-status`).then(r=>r.json());
+    const dot = document.getElementById('statusDot');
+    const txt = document.getElementById('statusText');
+    if (data.status === 'online') {
+      dot.style.background = 'var(--green)';
+      dot.style.animation = 'pulse 2s infinite';
+      const mins = Math.floor((data.seconds_ago || 0) / 60);
+      txt.textContent = mins > 0 ? `Agente Ligado (${mins}min atrás)` : 'Agente Ligado';
+      txt.style.color = 'var(--green)';
+    } else {
+      dot.style.background = 'var(--red)';
+      dot.style.animation = 'none';
+      txt.textContent = 'Agente Desligado';
+      txt.style.color = 'var(--red)';
+    }
+  } catch(e) {
+    document.getElementById('statusText').textContent = 'Status indisponível';
+  }
+}
+
+async function loadAll() {
+  const days = document.getElementById('dayFilter').value;
+  const [stats, alerts] = await Promise.all([
+    fetch(`${API}/api/stats?days=${days}`).then(r=>r.json()),
+    fetch(`${API}/api/alerts`).then(r=>r.json()),
+  ]);
+  renderKPIs(stats);
+  renderAlerts(alerts);
+  renderCharts(stats);
+  loadTable();
+  loadAgentStatus();
+}
+
+function renderKPIs(s) {
+  document.getElementById('kpis').innerHTML = `
+    <div class="kpi-card blue">
+      <div class="kpi-label">Total Interações</div>
+      <div class="kpi-value">${s.total.toLocaleString('pt-BR')}</div>
+      <div class="kpi-sub">No período selecionado</div>
+    </div>
+    <div class="kpi-card green">
+      <div class="kpi-label">Taxa de Resolução</div>
+      <div class="kpi-value">${s.taxa_resolucao}%</div>
+      <div class="kpi-sub">Resolvido + Parcial</div>
+    </div>
+    <div class="kpi-card purple">
+      <div class="kpi-label">NPS Score</div>
+      <div class="kpi-value">${s.nps_score > 0 ? '+' : ''}${s.nps_score}</div>
+      <div class="kpi-sub">
+        <div class="nps-bar">
+          ${s.detratores > 0 ? `<div class="seg det" style="width:${(s.detratores/(s.promotores+s.neutros+s.detratores))*100}%">${s.detratores}</div>` : ''}
+          ${s.neutros > 0 ? `<div class="seg neu" style="width:${(s.neutros/(s.promotores+s.neutros+s.detratores))*100}%">${s.neutros}</div>` : ''}
+          ${s.promotores > 0 ? `<div class="seg pro" style="width:${(s.promotores/(s.promotores+s.neutros+s.detratores))*100}%">${s.promotores}</div>` : ''}
+        </div>
+      </div>
+    </div>
+    <div class="kpi-card yellow">
+      <div class="kpi-label">NPS Médio</div>
+      <div class="kpi-value">${s.avg_nps}</div>
+      <div class="kpi-sub">Escala 1-10</div>
+    </div>
+    <div class="kpi-card red">
+      <div class="kpi-label">Frustrados</div>
+      <div class="kpi-value">${(s.sentimentos.find(x=>x.sentimento==='frustrado')||{cnt:0}).cnt}</div>
+      <div class="kpi-sub">Requerem atenção</div>
+    </div>
+  `;
+}
+
+function renderAlerts(alerts) {
+  const sec = document.getElementById('alertsSection');
+  if (!alerts.length) { sec.innerHTML = ''; return; }
+  sec.innerHTML = `
+    <div class="alerts-header">
+      <h2>⚠ Alertas (últimas 24h)</h2>
+      <span class="alert-badge">${alerts.length} alertas</span>
+    </div>
+    <div class="alerts-scroll">
+      ${alerts.map(a => `
+        <div class="alert-card">
+          <div class="alert-top">
+            <span class="alert-name">${a.student_name||'Desconhecido'}</span>
+            <span class="alert-time">${fmtDate(a.created_at)}</span>
+          </div>
+          <div class="alert-meta">
+            ${sentTag(a.sentimento)} ${npsTag(a.nps_implicito)}
+            <span class="tag tag-blue">${a.tema||'-'}</span>
+          </div>
+          <div class="alert-q"><strong>Pergunta:</strong> ${(a.pergunta_aluno||'-').substring(0,120)}</div>
+          <div class="alert-q"><strong>Resposta:</strong> ${(a.resposta_agente||'-').substring(0,120)}</div>
+          <a class="btn-dcz" href="${dczLink(a.conv_id, a.phone)}" target="_blank">&#x2197; Ver no DataCrazy</a>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function destroyChart(id) { if(charts[id]) { charts[id].destroy(); delete charts[id]; } }
+
+function renderCharts(s) {
+  Chart.defaults.color = '#8b8fa3';
+  Chart.defaults.borderColor = 'rgba(255,255,255,.06)';
+  Chart.defaults.font.family = 'Inter, system-ui';
+
+  // Interações por dia
+  destroyChart('chartDia');
+  charts.chartDia = new Chart(document.getElementById('chartDia'), {
+    type:'line',
+    data:{
+      labels: s.por_dia.map(d => { const dt=new Date(d.d+'T12:00:00'); return dt.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'}); }),
+      datasets:[{label:'Interações', data:s.por_dia.map(d=>d.cnt),
+        borderColor:'#6366f1', backgroundColor:'rgba(99,102,241,.15)', fill:true, tension:.3, pointRadius:4, pointBackgroundColor:'#6366f1'}]
+    },
+    options:{responsive:true, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true}}}
+  });
+
+  // Sentimento
+  destroyChart('chartSent');
+  charts.chartSent = new Chart(document.getElementById('chartSent'), {
+    type:'doughnut',
+    data:{
+      labels: s.sentimentos.map(x=>x.sentimento),
+      datasets:[{data:s.sentimentos.map(x=>x.cnt),
+        backgroundColor: s.sentimentos.map(x=>SENT_COLORS[x.sentimento]||'#666')}]
+    },
+    options:{responsive:true, plugins:{legend:{position:'bottom', labels:{padding:12, usePointStyle:true}}}, cutout:'60%'}
+  });
+
+  // Resolução
+  destroyChart('chartRes');
+  const resColors = {sim:'#22c55e', parcial:'#eab308', nao:'#ef4444', escalado:'#6366f1','não':'#ef4444'};
+  charts.chartRes = new Chart(document.getElementById('chartRes'), {
+    type:'doughnut',
+    data:{
+      labels: s.resolvido.map(x=>x.resolvido),
+      datasets:[{data:s.resolvido.map(x=>x.cnt),
+        backgroundColor: s.resolvido.map(x=>resColors[x.resolvido]||'#666')}]
+    },
+    options:{responsive:true, plugins:{legend:{position:'bottom', labels:{padding:12, usePointStyle:true}}}, cutout:'60%'}
+  });
+
+  // Temas
+  destroyChart('chartTema');
+  charts.chartTema = new Chart(document.getElementById('chartTema'), {
+    type:'bar',
+    data:{
+      labels: s.temas.map(x=>x.tema),
+      datasets:[{label:'Qtd', data:s.temas.map(x=>x.cnt),
+        backgroundColor: s.temas.map((_,i)=>TEMA_COLORS[i%TEMA_COLORS.length]), borderRadius:6}]
+    },
+    options:{indexAxis:'horizontal', responsive:true, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true}}}
+  });
+
+  // NPS
+  destroyChart('chartNps');
+  const npsColors = s.nps.map(x => x.nps_implicito >= 9 ? '#22c55e' : x.nps_implicito >= 7 ? '#eab308' : '#ef4444');
+  charts.chartNps = new Chart(document.getElementById('chartNps'), {
+    type:'bar',
+    data:{
+      labels: s.nps.map(x=>'NPS '+x.nps_implicito),
+      datasets:[{label:'Qtd', data:s.nps.map(x=>x.cnt), backgroundColor:npsColors, borderRadius:6}]
+    },
+    options:{responsive:true, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true}}}
+  });
+
+  // Hora
+  destroyChart('chartHora');
+  const hours = Array.from({length:24},(_,i)=>i);
+  const hourData = hours.map(h => (s.por_hora.find(x=>x.h===h)||{cnt:0}).cnt);
+  charts.chartHora = new Chart(document.getElementById('chartHora'), {
+    type:'bar',
+    data:{
+      labels: hours.map(h=>h+'h'),
+      datasets:[{label:'Interações', data:hourData, backgroundColor:'rgba(59,130,246,.6)', borderRadius:4}]
+    },
+    options:{responsive:true, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true}}}
+  });
+
+  // Populate tema filter
+  const sel = document.getElementById('temaFilter');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">Todos os Temas</option>' +
+    s.temas.map(t=>`<option value="${t.tema}" ${t.tema===current?'selected':''}>${t.tema} (${t.cnt})</option>`).join('');
+}
+
+async function loadTable() {
+  const tema = document.getElementById('temaFilter').value;
+  const sent = document.getElementById('sentFilter').value;
+  const search = document.getElementById('searchInput').value;
+  const params = new URLSearchParams({limit:30, page:currentPage});
+  if (tema) params.set('tema', tema);
+  if (sent) params.set('sentimento', sent);
+  if (search) params.set('search', search);
+
+  const data = await fetch(`${API}/api/recent?${params}`).then(r=>r.json());
+  const tbody = document.getElementById('tableBody');
+  tbody.innerHTML = data.rows.map(r => `
+    <tr>
+      <td style="white-space:nowrap">${fmtDate(r.created_at)}</td>
+      <td><strong>${r.student_name||'-'}</strong></td>
+      <td style="font-size:12px;color:var(--text-muted)">${r.phone||'-'}</td>
+      <td><span class="tag tag-blue">${r.tema||'-'}</span></td>
+      <td>${sentTag(r.sentimento)}</td>
+      <td>${npsTag(r.nps_implicito)}</td>
+      <td class="cell-q" title="${(r.pergunta_aluno||'').replace(/"/g,'&quot;')}">${r.pergunta_aluno||'-'}</td>
+      <td class="cell-q" title="${(r.resposta_agente||'').replace(/"/g,'&quot;')}">${r.resposta_agente||'-'}</td>
+      <td>
+        <button class="btn-aval correta ${r.avaliacao==='correta'?'active':''}" onclick="avaliar(${r.id},'correta',this)">✓</button>
+        <button class="btn-aval incorreta ${r.avaliacao==='incorreta'?'active':''}" onclick="avaliar(${r.id},'incorreta',this)">✗</button>
+      </td>
+      <td><a class="btn-dcz" href="${dczLink(r.conv_id, r.phone)}" target="_blank">&#x2197;</a></td>
+    </tr>
+  `).join('');
+
+  const totalPages = Math.ceil(data.total / data.limit);
+  document.getElementById('pagination').innerHTML = `
+    <button ${currentPage<=1?'disabled':''} onclick="goPage(${currentPage-1})">← Anterior</button>
+    <span>Página ${currentPage} de ${totalPages} (${data.total} registros)</span>
+    <button ${currentPage>=totalPages?'disabled':''} onclick="goPage(${currentPage+1})">Próxima →</button>
+  `;
+}
+
+function goPage(p) { currentPage = p; loadTable(); }
+
+function debounceSearch() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { currentPage=1; loadTable(); }, 400);
+}
+
+async function avaliar(id, val, btn) {
+  await fetch(`${API}/api/avaliar/${id}?avaliacao=${val}`, {method:'POST'});
+  const row = btn.closest('tr');
+  row.querySelectorAll('.btn-aval').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+// Auto-refresh a cada 60s
+setInterval(loadAll, 60000);
+setInterval(loadAgentStatus, 15000);
+loadAll();
+</script>
+</body>
+</html>

@@ -305,6 +305,9 @@ def run_migrations():
             label VARCHAR(100) NOT NULL, response_text TEXT, rag_question TEXT,
             sort_order INT DEFAULT 0, active BOOLEAN DEFAULT true,
             created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())"""),
+        ("interaction_summary_conv_id", """DO $$ BEGIN
+            ALTER TABLE interaction_summary ADD COLUMN conv_id VARCHAR(50);
+            EXCEPTION WHEN duplicate_column THEN NULL; END $$"""),
     ]
 
     for name, sql in ddl_statements:
@@ -2070,6 +2073,84 @@ async def sentiment_dashboard(
             'repeat_detractors': repeat_detractors,
             'recent_alerts': recent_alerts,
         }
+
+
+# ===================== AVALIAÇÃO DE RESPOSTAS =====================
+
+@app.get("/api/sentiment/responses")
+async def sentiment_responses(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    avaliacao: Optional[str] = None,
+    tema: Optional[str] = None,
+    sentimento: Optional[str] = None,
+    search: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    filters = " WHERE pergunta_aluno IS NOT NULL AND pergunta_aluno != ''"
+    params = []
+    if avaliacao == 'pendente':
+        filters += " AND (avaliacao IS NULL OR avaliacao = '')"
+    elif avaliacao:
+        filters += " AND avaliacao = %s"
+        params.append(avaliacao)
+    if tema:
+        filters += " AND tema = %s"
+        params.append(tema)
+    if sentimento:
+        filters += " AND sentimento = %s"
+        params.append(sentimento)
+    if search:
+        filters += " AND (student_name ILIKE %s OR pergunta_aluno ILIKE %s OR resposta_agente ILIKE %s OR phone ILIKE %s)"
+        params.extend([f'%{search}%'] * 4)
+    if start_date:
+        filters += " AND created_at >= %s"
+        params.append(start_date)
+    if end_date:
+        filters += " AND created_at <= %s"
+        params.append(end_date + ' 23:59:59')
+
+    offset = (page - 1) * per_page
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(f"SELECT count(*) as cnt FROM interaction_summary {filters}", params)
+        total = cur.fetchone()['cnt']
+
+        cur.execute(f"""SELECT count(*) FILTER (WHERE avaliacao IS NULL OR avaliacao = '') as pendentes,
+            count(*) FILTER (WHERE avaliacao = 'aprovada') as aprovadas,
+            count(*) FILTER (WHERE avaliacao = 'reprovada') as reprovadas
+            FROM interaction_summary WHERE pergunta_aluno IS NOT NULL AND pergunta_aluno != ''""")
+        counters = dict(cur.fetchone())
+
+        cur.execute(f"""SELECT id, phone, student_name, tema, subtema, sentimento, resolvido,
+            nps_implicito, pergunta_aluno, resposta_agente, avaliacao, conv_id, created_at
+            FROM interaction_summary {filters}
+            ORDER BY created_at DESC LIMIT %s OFFSET %s""", params + [per_page, offset])
+        rows = cur.fetchall()
+        for r in rows:
+            if r.get('created_at'):
+                r['created_at'] = r['created_at'].isoformat()
+
+        return {
+            'total': total, 'page': page, 'per_page': per_page,
+            'pages': (total + per_page - 1) // per_page,
+            'counters': counters, 'rows': rows,
+        }
+
+
+@app.post("/api/sentiment/responses/{record_id}/avaliar")
+async def avaliar_resposta(record_id: int, request: Request):
+    body = await request.json()
+    avaliacao = body.get('avaliacao', '')
+    if avaliacao not in ('aprovada', 'reprovada', ''):
+        raise HTTPException(400, "Avaliação deve ser 'aprovada', 'reprovada' ou vazio")
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE interaction_summary SET avaliacao = %s WHERE id = %s",
+                    (avaliacao or None, record_id))
+        conn.commit()
+    return {'ok': True, 'id': record_id, 'avaliacao': avaliacao}
 
 
 # ===================== CONVERSAS ANALYTICS =====================
