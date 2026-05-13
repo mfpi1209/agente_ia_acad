@@ -174,6 +174,13 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
 <div id="tab-agentia" class="tc hidden fade">
 <style>
 #tab-agentia{--aia-bg:#0f1117;--aia-card:#1a1d27;--aia-card-hover:#22263a;--aia-border:#2a2e3f;--aia-text:#e4e6ed;--aia-muted:#8b8fa3;--aia-primary:#6366f1;--aia-primary-l:#818cf8;--aia-green:#22c55e;--aia-green-bg:rgba(34,197,94,.12);--aia-yellow:#eab308;--aia-yellow-bg:rgba(234,179,8,.12);--aia-red:#ef4444;--aia-red-bg:rgba(239,68,68,.12);--aia-blue:#3b82f6;--aia-blue-bg:rgba(59,130,246,.12);--aia-purple:#a855f7;--aia-orange:#f97316;}
+#tab-agentia.aia-light{--aia-bg:#f5f6fa;--aia-card:#ffffff;--aia-card-hover:#f0f1f5;--aia-border:#e2e4ea;--aia-text:#1e1e2e;--aia-muted:#6b7085;}
+#tab-agentia.aia-light .aia-topbar{background:linear-gradient(135deg,#4f46e5 0%,#6366f1 50%,#4f46e5 100%);}
+#tab-agentia.aia-light .aia-tbl-wrap thead th{background:rgba(0,0,0,.03);color:#6b7085;}
+#tab-agentia.aia-light .aia-tbl-wrap tbody td{border-bottom-color:rgba(0,0,0,.06);}
+#tab-agentia.aia-light .aia-tbl-wrap tbody tr:hover{background:#f3f4ff;}
+#tab-agentia.aia-light .aia-tbl-filters select,#tab-agentia.aia-light .aia-tbl-filters input{background:#f5f6fa;color:#1e1e2e;border-color:#e2e4ea;}
+#tab-agentia.aia-light .aia-nps-bar .seg.neu{color:#fff;}
 #tab-agentia .aia-wrap{background:var(--aia-bg);border-radius:12px;padding:0;min-height:600px;color:var(--aia-text);font-family:'Inter',system-ui,sans-serif;}
 #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4b 0%,#312e81 50%,#1e1b4b 100%);padding:18px 28px;display:flex;align-items:center;justify-content:space-between;border-radius:12px 12px 0 0;border-bottom:1px solid var(--aia-border);}
 #tab-agentia .aia-topbar h2{font-size:20px;font-weight:700;letter-spacing:-.5px;color:#fff;}
@@ -247,6 +254,21 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
 #tab-agentia .aia-nps-bar .seg.neu{background:var(--aia-yellow);color:#000;}
 #tab-agentia .aia-nps-bar .seg.pro{background:var(--aia-green);}
 @media(max-width:900px){#tab-agentia .aia-charts,#tab-agentia .aia-charts-2{grid-template-columns:1fr;}#tab-agentia .aia-kpi-grid{grid-template-columns:repeat(2,1fr);}}
+#aia-corr-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);z-index:9999;display:none;align-items:center;justify-content:center;}
+#aia-corr-overlay.open{display:flex;}
+#aia-corr-modal{background:var(--aia-card);border:1px solid var(--aia-border);border-radius:14px;padding:24px;width:520px;max-width:90vw;box-shadow:0 20px 50px rgba(0,0,0,.4);}
+#tab-agentia.aia-light #aia-corr-modal{background:#fff;border-color:#e2e4ea;box-shadow:0 10px 30px rgba(0,0,0,.15);}
+#aia-corr-modal h3{font-size:15px;font-weight:700;margin-bottom:6px;color:var(--aia-text);}
+#aia-corr-modal .corr-info{font-size:12px;color:var(--aia-muted);margin-bottom:14px;line-height:1.5;}
+#aia-corr-modal .corr-info strong{color:var(--aia-text);}
+#aia-corr-modal textarea{width:100%;min-height:100px;background:rgba(255,255,255,.06);color:var(--aia-text);border:1px solid var(--aia-border);border-radius:8px;padding:12px;font-size:13px;font-family:inherit;resize:vertical;}
+#tab-agentia.aia-light #aia-corr-modal textarea{background:#f5f6fa;color:#1e1e2e;border-color:#e2e4ea;}
+#aia-corr-modal .corr-btns{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;}
+#aia-corr-modal .corr-btns button{padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:1px solid;font-family:inherit;}
+#aia-corr-modal .corr-save{background:var(--aia-green);color:#fff;border-color:var(--aia-green);}
+#aia-corr-modal .corr-save:hover{opacity:.9;}
+#aia-corr-modal .corr-cancel{background:transparent;color:var(--aia-muted);border-color:var(--aia-border);}
+#aia-corr-modal .corr-cancel:hover{background:rgba(255,255,255,.06);}
 </style>
 
 <div class="aia-wrap">
@@ -265,6 +287,7 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
         <option value="30">30 dias</option>
       </select>
       <button onclick="aiaLoadAll()">&#x21bb; Atualizar</button>
+      <button id="aia-theme-btn" onclick="aiaToggleTheme()" title="Alternar tema claro/escuro" style="font-size:16px;padding:6px 12px;">&#9788;</button>
     </div>
   </div>
   <div class="aia-container">
@@ -300,6 +323,31 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
         </tr></thead><tbody id="aia-tbody"></tbody></table>
       </div>
       <div class="aia-pag" id="aia-pag"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal Correção -->
+<div id="aia-corr-overlay" onclick="if(event.target===this)aiaCorrClose()">
+  <div id="aia-corr-modal">
+    <h3><i class="fas fa-pen-to-square" style="color:var(--aia-primary);margin-right:6px;"></i>Corrigir Resposta do Agente</h3>
+    <div class="corr-info">
+      <strong>Pergunta do aluno:</strong><br>
+      <span id="aia-corr-pergunta"></span>
+    </div>
+    <div class="corr-info">
+      <strong>Resposta original (incorreta):</strong><br>
+      <span id="aia-corr-original" style="color:var(--aia-red);"></span>
+    </div>
+    <label style="font-size:12px;font-weight:600;color:var(--aia-text);margin-bottom:6px;display:block;">Digite a resposta correta:</label>
+    <textarea id="aia-corr-texto" placeholder="Escreva aqui a resposta correta que o agente deveria ter enviado..."></textarea>
+    <div style="font-size:11px;color:var(--aia-muted);margin-top:6px;">
+      <i class="fas fa-brain" style="color:var(--aia-primary);margin-right:4px;"></i>
+      Essa resposta será salva na memória do agente e usada em atendimentos futuros.
+    </div>
+    <div class="corr-btns">
+      <button class="corr-cancel" onclick="aiaCorrClose()">Cancelar</button>
+      <button class="corr-save" onclick="aiaCorrSave()"><i class="fas fa-check" style="margin-right:4px;"></i>Salvar Correção</button>
     </div>
   </div>
 </div>
@@ -1299,7 +1347,59 @@ async function aiaLoadTbl(){
   }catch(e){console.error('AIA table error:',e);}
 }
 function aiaDebSearch(){clearTimeout(aiaSearchT);aiaSearchT=setTimeout(()=>{aiaPage=1;aiaLoadTbl();},400);}
-async function aiaAval(id,val,btn){await fetch(AIA+'/api/avaliar/'+id+'?avaliacao='+val,{method:'POST'});const row=btn.closest('tr');row.querySelectorAll('.aia-btn-av').forEach(b=>b.classList.remove('active'));btn.classList.add('active');}
+async function aiaAval(id,val,btn){
+  await fetch(AIA+'/api/avaliar/'+id+'?avaliacao='+val,{method:'POST'});
+  const row=btn.closest('tr');row.querySelectorAll('.aia-btn-av').forEach(b=>b.classList.remove('active'));btn.classList.add('active');
+  if(val==='incorreta'){
+    const cells=row.querySelectorAll('td');
+    const pergunta=(cells[6]?cells[6].getAttribute('title'):'')||cells[6].textContent||'';
+    const resposta=(cells[7]?cells[7].getAttribute('title'):'')||cells[7].textContent||'';
+    aiaCorrOpen(id,pergunta,resposta);
+  }
+}
+
+// ==== TEMA CLARO/ESCURO ====
+function aiaToggleTheme(){
+  const tab=document.getElementById('tab-agentia');
+  const isLight=tab.classList.toggle('aia-light');
+  localStorage.setItem('aia-theme',isLight?'light':'dark');
+  document.getElementById('aia-theme-btn').textContent=isLight?'\u263E':'\u2606';
+}
+(function(){
+  if(localStorage.getItem('aia-theme')==='light'){
+    document.getElementById('tab-agentia').classList.add('aia-light');
+    document.getElementById('aia-theme-btn').textContent='\u263E';
+  }
+})();
+
+// ==== MODAL CORREÇÃO ====
+let aiaCorrId=null;
+function aiaCorrOpen(id,pergunta,resposta){
+  aiaCorrId=id;
+  document.getElementById('aia-corr-pergunta').textContent=pergunta||'(sem pergunta)';
+  document.getElementById('aia-corr-original').textContent=resposta||'(sem resposta)';
+  document.getElementById('aia-corr-texto').value='';
+  document.getElementById('aia-corr-overlay').classList.add('open');
+  setTimeout(()=>document.getElementById('aia-corr-texto').focus(),100);
+}
+function aiaCorrClose(){
+  document.getElementById('aia-corr-overlay').classList.remove('open');
+  aiaCorrId=null;
+}
+async function aiaCorrSave(){
+  const texto=document.getElementById('aia-corr-texto').value.trim();
+  if(!texto){alert('Digite a resposta correta.');return;}
+  const btn=document.querySelector('#aia-corr-modal .corr-save');
+  btn.disabled=true;btn.textContent='Salvando...';
+  try{
+    const r=await fetch(AIA+'/api/corrigir/'+aiaCorrId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({resposta_correta:texto})}).then(r=>r.json());
+    if(r.ok){
+      toast('Correção salva na memória do agente!','success');
+      aiaCorrClose();
+    }else{alert(r.error||r.msg||'Erro ao salvar');}
+  }catch(e){alert('Erro de conexão: '+e);}
+  btn.disabled=false;btn.innerHTML='<i class="fas fa-check" style="margin-right:4px;"></i>Salvar Correção';
+}
 
 // ==== TABS ====
 function sw(t){document.querySelectorAll('.tc').forEach(e=>e.classList.add('hidden'));document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));document.getElementById('tab-'+t).classList.remove('hidden');document.querySelector(`.tab[data-tab="${t}"]`).classList.add('active');

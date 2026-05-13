@@ -11,8 +11,10 @@ load_dotenv()
 import psycopg2
 import requests
 from psycopg2.extras import RealDictCursor
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Body
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
+from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -146,6 +148,51 @@ def api_avaliar(record_id: int, avaliacao: str = Query(...)):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+class CorrecaoBody(BaseModel):
+    resposta_correta: str
+
+
+@app.post("/api/corrigir/{record_id}")
+def api_corrigir(record_id: int, body: CorrecaoBody):
+    """Marca como incorreta, salva a resposta correta na knowledge_base do agente."""
+    resposta = body.resposta_correta.strip()
+    if not resposta:
+        return JSONResponse({"error": "Resposta vazia"}, 400)
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("UPDATE interaction_summary SET avaliacao = 'incorreta' WHERE id = %s", (record_id,))
+    cur.execute("SELECT pergunta_aluno, tema, student_name, phone FROM interaction_summary WHERE id = %s", (record_id,))
+    row = cur.fetchone()
+    if not row or not row.get('pergunta_aluno'):
+        conn.commit()
+        conn.close()
+        return JSONResponse({"error": "Registro não encontrado"}, 404)
+    pergunta = row['pergunta_aluno']
+    tema = row.get('tema') or 'OUTRO'
+    try:
+        cur.execute("""
+            INSERT INTO knowledge_base (pergunta, resposta, tema, confianca, created_at)
+            VALUES (%s, %s, %s, 1.0, NOW())
+        """, (pergunta, resposta, tema))
+    except Exception:
+        pass
+    try:
+        import openai
+        client = openai.OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
+        emb_resp = client.embeddings.create(input=pergunta, model='text-embedding-3-small')
+        embedding = emb_resp.data[0].embedding
+        cur.execute("""
+            UPDATE knowledge_base SET embedding = %s
+            WHERE pergunta = %s AND resposta = %s AND embedding IS NULL
+            ORDER BY id DESC LIMIT 1
+        """, (str(embedding), pergunta, resposta))
+    except Exception:
+        pass
+    conn.commit()
+    conn.close()
+    return {"ok": True, "msg": "Correção salva na base de conhecimento"}
 
 
 @app.get("/api/agent-status")
