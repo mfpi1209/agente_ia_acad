@@ -86,6 +86,45 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
 .wa-preview-bubble{background:#fff;border-radius:8px;padding:10px;max-width:280px;font-size:13px;box-shadow:0 1px 2px rgba(0,0,0,.06);}
 .flow-btn{background:#fff;border:1.5px solid #00a884;color:#00a884;padding:8px 16px;border-radius:20px;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;font-family:inherit;white-space:nowrap;}
 .flow-btn:hover{background:#00a884;color:#fff;transform:translateY(-1px);box-shadow:0 3px 8px rgba(0,168,132,.25);}
+/* ==== DARK MODE GLOBAL ==== */
+body.dark-mode{--bg:#0f1117;--card:#1a1d27;--border:#2a2e3f;--t1:#e4e6ed;--t2:#a1a5b7;--t3:#6b7085;--sh:0 1px 3px rgba(0,0,0,.3);background:var(--bg);color:var(--t1);}
+body.dark-mode .inp{background:#22263a;color:#e4e6ed;border-color:#2a2e3f;}
+body.dark-mode .inp:focus{border-color:var(--p);box-shadow:0 0 0 3px rgba(99,102,241,.2);}
+body.dark-mode select.inp{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%239ca3af' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");}
+body.dark-mode .btn-g{background:#22263a;color:#a1a5b7;border-color:#2a2e3f;}
+body.dark-mode .btn-g:hover{background:#2a2e3f;border-color:#3a3f55;}
+body.dark-mode .tab:hover{color:#e4e6ed;background:#1a1d27;}
+body.dark-mode .b-blue{background:rgba(59,130,246,.15);color:#60a5fa;}
+body.dark-mode .b-green{background:rgba(34,197,94,.15);color:#4ade80;}
+body.dark-mode .b-yellow{background:rgba(234,179,8,.15);color:#facc15;}
+body.dark-mode .b-red{background:rgba(239,68,68,.15);color:#f87171;}
+body.dark-mode .b-gray{background:rgba(107,114,128,.2);color:#9ca3af;}
+body.dark-mode .b-purple{background:rgba(147,51,234,.15);color:#c084fc;}
+body.dark-mode .stat-card.blue::after,.stat-card.green::after,.stat-card.yellow::after,.stat-card.purple::after,.stat-card.red::after{opacity:.1;}
+body.dark-mode .wa-bg{background:#1a1d27;}
+body.dark-mode .wa-bot{background:#22263a;color:#e4e6ed;}
+body.dark-mode .wa-user{background:#2e4a3e;color:#e4e6ed;}
+body.dark-mode .wa-meta{color:#6b7085;}
+body.dark-mode .ref-card{background:#22263a;border-color:#2a2e3f;color:#e4e6ed;}
+body.dark-mode .ref-card:hover{border-color:#4f46e5;background:#262a3e;}
+body.dark-mode .metric-box{background:#22263a;border-color:#2a2e3f;}
+body.dark-mode .wb-section{background:#22263a;border-color:#2a2e3f;}
+body.dark-mode .modal-bg{background:rgba(0,0,0,.6);}
+body.dark-mode table th{color:#6b7085;background:rgba(255,255,255,.03);}
+body.dark-mode table td{border-bottom-color:rgba(255,255,255,.04);}
+body.dark-mode table tr:hover{background:#22263a;}
+body.dark-mode .conf-h{color:#4ade80;}.dark-mode .conf-m{color:#facc15;}.dark-mode .conf-l{color:#f87171;}
+body.dark-mode .btn-d{background:rgba(239,68,68,.15);color:#f87171;}
+body.dark-mode .btn-s{background:rgba(34,197,94,.15);color:#4ade80;}
+body.dark-mode .btn-w{background:rgba(234,179,8,.15);color:#facc15;}
+body.dark-mode .act-ok{background:rgba(34,197,94,.15);color:#4ade80;}
+body.dark-mode .act-fix{background:rgba(59,130,246,.15);color:#60a5fa;}
+body.dark-mode .act-bad{background:rgba(239,68,68,.15);color:#f87171;}
+body.dark-mode .sbar{background:#2a2e3f;}
+body.dark-mode #aia-corr-modal{background:#1a1d27;border-color:#2a2e3f;}
+body.dark-mode #aia-corr-modal textarea{background:#22263a;color:#e4e6ed;border-color:#2a2e3f;}
+#theme-toggle{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.2);padding:7px 14px;border-radius:8px;font-size:14px;cursor:pointer;transition:.15s;font-family:inherit;}
+#theme-toggle:hover{background:rgba(255,255,255,.25);}
 </style>
 </head>
 <body>
@@ -97,7 +136,10 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
     <div class="w-10 h-10 rounded-xl bg-white bg-opacity-20 flex items-center justify-center backdrop-blur"><i class="fas fa-brain text-white text-lg"></i></div>
     <div><h1 class="text-base font-bold text-white tracking-tight">Cockpit IA</h1><p class="text-xs text-indigo-200">Cruzeiro do Sul Educacional</p></div>
   </div>
-  <button onclick="openModal('add')" class="btn" style="background:rgba(255,255,255,.15);color:#fff;backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.2);"><i class="fas fa-plus"></i> Novo Q&A</button>
+  <div class="flex items-center gap-3">
+    <button id="theme-toggle" onclick="toggleDarkMode()" title="Alternar tema claro/escuro"><i class="fas fa-moon" id="theme-icon"></i></button>
+    <button onclick="openModal('add')" class="btn" style="background:rgba(255,255,255,.15);color:#fff;backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.2);"><i class="fas fa-plus"></i> Novo Q&A</button>
+  </div>
 </div>
 </header>
 
@@ -173,16 +215,11 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
 <!-- ===== AGENTE IA (dashboard integrado) ===== -->
 <div id="tab-agentia" class="tc hidden fade">
 <style>
-#tab-agentia{--aia-bg:#0f1117;--aia-card:#1a1d27;--aia-card-hover:#22263a;--aia-border:#2a2e3f;--aia-text:#e4e6ed;--aia-muted:#8b8fa3;--aia-primary:#6366f1;--aia-primary-l:#818cf8;--aia-green:#22c55e;--aia-green-bg:rgba(34,197,94,.12);--aia-yellow:#eab308;--aia-yellow-bg:rgba(234,179,8,.12);--aia-red:#ef4444;--aia-red-bg:rgba(239,68,68,.12);--aia-blue:#3b82f6;--aia-blue-bg:rgba(59,130,246,.12);--aia-purple:#a855f7;--aia-orange:#f97316;}
-#tab-agentia.aia-light{--aia-bg:#f5f6fa;--aia-card:#ffffff;--aia-card-hover:#f0f1f5;--aia-border:#e2e4ea;--aia-text:#1e1e2e;--aia-muted:#6b7085;}
-#tab-agentia.aia-light .aia-topbar{background:linear-gradient(135deg,#4f46e5 0%,#6366f1 50%,#4f46e5 100%);}
-#tab-agentia.aia-light .aia-tbl-wrap thead th{background:rgba(0,0,0,.03);color:#6b7085;}
-#tab-agentia.aia-light .aia-tbl-wrap tbody td{border-bottom-color:rgba(0,0,0,.06);}
-#tab-agentia.aia-light .aia-tbl-wrap tbody tr:hover{background:#f3f4ff;}
-#tab-agentia.aia-light .aia-tbl-filters select,#tab-agentia.aia-light .aia-tbl-filters input{background:#f5f6fa;color:#1e1e2e;border-color:#e2e4ea;}
-#tab-agentia.aia-light .aia-nps-bar .seg.neu{color:#fff;}
+#tab-agentia{--aia-bg:#f5f6fa;--aia-card:#ffffff;--aia-card-hover:#f0f1f5;--aia-border:#e2e4ea;--aia-text:#1e1e2e;--aia-muted:#6b7085;--aia-primary:#6366f1;--aia-primary-l:#818cf8;--aia-green:#22c55e;--aia-green-bg:rgba(34,197,94,.12);--aia-yellow:#eab308;--aia-yellow-bg:rgba(234,179,8,.12);--aia-red:#ef4444;--aia-red-bg:rgba(239,68,68,.12);--aia-blue:#3b82f6;--aia-blue-bg:rgba(59,130,246,.12);--aia-purple:#a855f7;--aia-orange:#f97316;}
+body.dark-mode #tab-agentia{--aia-bg:#0f1117;--aia-card:#1a1d27;--aia-card-hover:#22263a;--aia-border:#2a2e3f;--aia-text:#e4e6ed;--aia-muted:#8b8fa3;}
 #tab-agentia .aia-wrap{background:var(--aia-bg);border-radius:12px;padding:0;min-height:600px;color:var(--aia-text);font-family:'Inter',system-ui,sans-serif;}
-#tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4b 0%,#312e81 50%,#1e1b4b 100%);padding:18px 28px;display:flex;align-items:center;justify-content:space-between;border-radius:12px 12px 0 0;border-bottom:1px solid var(--aia-border);}
+#tab-agentia .aia-topbar{background:linear-gradient(135deg,#4f46e5 0%,#6366f1 50%,#4f46e5 100%);padding:18px 28px;display:flex;align-items:center;justify-content:space-between;border-radius:12px 12px 0 0;border-bottom:1px solid var(--aia-border);}
+body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4b 0%,#312e81 50%,#1e1b4b 100%);}
 #tab-agentia .aia-topbar h2{font-size:20px;font-weight:700;letter-spacing:-.5px;color:#fff;}
 #tab-agentia .aia-topbar h2 span{color:var(--aia-primary-l);}
 #tab-agentia .aia-topbar-r{display:flex;gap:10px;align-items:center;}
@@ -229,7 +266,7 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
 #tab-agentia .aia-tbl-header{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--aia-border);}
 #tab-agentia .aia-tbl-header h2{font-size:15px;font-weight:600;}
 #tab-agentia .aia-tbl-filters{display:flex;gap:8px;}
-#tab-agentia .aia-tbl-filters select,#tab-agentia .aia-tbl-filters input{background:rgba(255,255,255,.06);color:var(--aia-text);border:1px solid var(--aia-border);padding:5px 10px;border-radius:8px;font-size:11px;font-family:inherit;}
+#tab-agentia .aia-tbl-filters select,#tab-agentia .aia-tbl-filters input{background:var(--aia-card);color:var(--aia-text);border:1px solid var(--aia-border);padding:5px 10px;border-radius:8px;font-size:11px;font-family:inherit;}
 #tab-agentia .aia-tbl-filters input{width:180px;}
 #tab-agentia .aia-tbl-wrap{overflow-x:auto;}
 #tab-agentia .aia-tbl-wrap table{width:100%;border-collapse:collapse;font-size:12px;}
@@ -287,7 +324,6 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
         <option value="30">30 dias</option>
       </select>
       <button onclick="aiaLoadAll()">&#x21bb; Atualizar</button>
-      <button id="aia-theme-btn" onclick="aiaToggleTheme()" title="Alternar tema claro/escuro" style="font-size:16px;padding:6px 12px;">&#9788;</button>
     </div>
   </div>
   <div class="aia-container">
@@ -1225,6 +1261,23 @@ Pode encerrar</textarea>
 <div id="toast" class="fixed bottom-5 right-5 z-50 hidden"><div class="rounded-xl px-5 py-3 flex items-center gap-2 shadow-2xl border" id="toast-in" style="backdrop-filter:blur(12px);"><i id="toast-icon"></i><span id="toast-msg" class="text-sm font-medium"></span></div></div>
 
 <script>
+// ==== DARK MODE GLOBAL ====
+function toggleDarkMode(){
+  const isDark=document.body.classList.toggle('dark-mode');
+  localStorage.setItem('cockpit-theme',isDark?'dark':'light');
+  const icon=document.getElementById('theme-icon');
+  icon.className=isDark?'fas fa-sun':'fas fa-moon';
+  Chart.defaults.color=isDark?'#8b8fa3':'#666';
+  Chart.defaults.borderColor=isDark?'rgba(255,255,255,.06)':'rgba(0,0,0,.1)';
+}
+(function(){
+  if(localStorage.getItem('cockpit-theme')==='dark'){
+    document.body.classList.add('dark-mode');
+    const i=document.getElementById('theme-icon');if(i)i.className='fas fa-sun';
+    Chart.defaults.color='#8b8fa3';Chart.defaults.borderColor='rgba(255,255,255,.06)';
+  }
+})();
+
 const A='';
 const DCZ_APP='https://crm.datacrazy.io';
 function dczLink(item){
@@ -1357,20 +1410,6 @@ async function aiaAval(id,val,btn){
     aiaCorrOpen(id,pergunta,resposta);
   }
 }
-
-// ==== TEMA CLARO/ESCURO ====
-function aiaToggleTheme(){
-  const tab=document.getElementById('tab-agentia');
-  const isLight=tab.classList.toggle('aia-light');
-  localStorage.setItem('aia-theme',isLight?'light':'dark');
-  document.getElementById('aia-theme-btn').textContent=isLight?'\u263E':'\u2606';
-}
-(function(){
-  if(localStorage.getItem('aia-theme')==='light'){
-    document.getElementById('tab-agentia').classList.add('aia-light');
-    document.getElementById('aia-theme-btn').textContent='\u263E';
-  }
-})();
 
 // ==== MODAL CORREÇÃO ====
 let aiaCorrId=null;
