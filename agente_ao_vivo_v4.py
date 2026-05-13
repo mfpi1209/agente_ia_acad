@@ -39,12 +39,37 @@ N8N_WEBHOOK_LEADS_CPF = 'https://n8n-new-n8n.ca31ey.easypanel.host/webhook/leads
 STAGE_ATENDIMENTO_ID = 'ce42afe6-757f-405c-aa34-6668f4a75d07'
 STAGE_BASE_ALUNOS_ID = '742714eb-ac5a-435f-8680-97e6ab8f2f6e'
 STAGE_ENCERRAMENTO_ID = '3016b9c8-3914-4bf5-8f7c-1fee44baea9c'
+STAGE_PERDIDO_ID = '7e89e4a3-09ca-4e5a-976b-35f7f041ccf6'
 PIPELINE_ENCERRAMENTO_ID = '16638d55-b556-4792-8e11-f67c04ecf94c'
 
-POLOS_LIST = ("Barra Funda\nVila Prudente\nVila Mariana\nFreguesia do Ó (Moinho Velho)\n"
-              "Vila Ema (Sapopemba)\nIbirapuera (Indianópolis)\nTaboão da Serra - Jardim Mituzi\n"
-              "Taboão da Serra - Centro\nCampinas (Ouro Verde)\nItapira (Santo Antônio)\n"
-              "Capivari (Centro)\nMorumbi (Vila Progedior)\nSantana 2")
+POLOS_LIST = ("Ibirapuera\nTaboão da Serra Centro\nVila Mariana\nItapira\n"
+              "Capivari\nCampinas\nPrudente 2\nBarra Funda\nMorumbi\n"
+              "Sapopemba\nFreguesia do Ó\nSantana 2\nTaboão Mituzzi")
+
+POLOS_NOSSOS_NORMALIZED = [
+    'ibirapuera', 'taboao da serra centro', 'taboao centro', 'vila mariana',
+    'itapira', 'capivari', 'campinas', 'prudente', 'prudente 2', 'vila prudente',
+    'barra funda', 'morumbi', 'sapopemba', 'vila ema', 'freguesia',
+    'freguesia do o', 'moinho velho', 'santana', 'santana 2',
+    'taboao mituzzi', 'taboao mituzi', 'jardim mituzi', 'jardim mituzzi',
+    'taboao da serra', 'ouro verde', 'indianopolis',
+]
+
+OUTRO_POLO_MSG_1 = (
+    "Identifiquei que você não está vinculado(a) a um dos polos que atendemos "
+    "e, por motivos de segurança e ética, não tenho acesso às suas informações "
+    "por aqui 🥹.\n\n"
+    "Mas não se preocupe! Basta clicar no link abaixo 👇 para localizar o seu "
+    "polo de apoio e falar diretamente com a sua unidade:\n\n"
+    "https://www.cruzeirodosulvirtual.com.br/nossos-polos/"
+)
+
+OUTRO_POLO_MSG_2 = (
+    "Este atendimento está sendo encerrado. 😉\n\n"
+    "Espero de verdade que você consiga todo o apoio necessário no seu polo. "
+    "Se em algum momento sentir que precisa de um atendimento mais próximo, "
+    "ágil ou quiser conhecer nosso polo, é só me chamar. Estou por aqui."
+)
 
 NOT_IN_BASE_BUTTONS = ['Já sou aluno', 'Quero me matricular']
 COMMERCIAL_REDIRECT_MSG = ("Certo!\n\nEste canal é dedicado ao atendimento dos nossos alunos.\n\n"
@@ -2410,6 +2435,89 @@ def close_conversation_crm(conv_id, phone=''):
     return 200 if fin_ok else 500
 
 
+def _is_nosso_polo(polo_name):
+    """Verifica se o polo do aluno é um dos nossos polos atendidos."""
+    if not polo_name:
+        return True
+    import unicodedata
+    norm = ''.join(c for c in unicodedata.normalize('NFD', polo_name.lower().strip())
+                   if unicodedata.category(c) != 'Mn')
+    norm = norm.replace('-', ' ').replace('_', ' ')
+    for polo in POLOS_NOSSOS_NORMALIZED:
+        if polo in norm or norm in polo:
+            return True
+    return False
+
+
+def _move_business_to_perdido(phone):
+    """Encontra o business pelo telefone e move para o stage PERDIDO."""
+    if not phone:
+        return False
+    try:
+        search_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
+        phones_to_try = [search_phone]
+        if not search_phone.startswith('55'):
+            phones_to_try.append('55' + search_phone)
+        biz_id = ''
+        for try_phone in phones_to_try:
+            if biz_id:
+                break
+            r = requests.get(f'{DCZ_CRM}/businesses', headers=H,
+                             params={'search': try_phone, 'limit': 5}, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                biz_list = data.get('data', data) if isinstance(data, dict) else data
+                if isinstance(biz_list, list) and biz_list:
+                    biz_id = biz_list[0].get('id', '')
+        if not biz_id:
+            p(f"  [PERDIDO] Nenhum business encontrado para ...{search_phone[-4:]}")
+            return False
+        r2 = requests.patch(
+            f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+            json={'stageId': STAGE_PERDIDO_ID, 'attendant': None}, timeout=10
+        )
+        ok = r2.status_code in (200, 204)
+        p(f"  [PERDIDO] Business {biz_id[:16]} -> Perdido + remover atendente (status={r2.status_code}, ok={ok})")
+        return ok
+    except Exception as e:
+        p(f"  [PERDIDO] Erro: {e}")
+        return False
+
+
+def _handle_outro_polo(conv_id, phone, student_profile, polo_real):
+    """Envia mensagens de outro polo, move para Perdido e finaliza a conversa."""
+    p(f"  [OUTRO-POLO] Polo '{polo_real}' não atendido -> redirecionando")
+    meta_typing_on()
+    send_and_track(conv_id, OUTRO_POLO_MSG_1)
+    time.sleep(2)
+    send_and_track(conv_id, OUTRO_POLO_MSG_2)
+    log_to_db(conv_id, f'[polo: {polo_real}]', OUTRO_POLO_MSG_1, 1.0, 'outro_polo')
+    _move_business_to_perdido(phone)
+    time.sleep(1)
+    fin_ok = False
+    try:
+        r = requests.post(
+            f'{DCZ_API}/api/v1/conversations/{conv_id}/finish',
+            headers=H, json={}, timeout=15
+        )
+        if r.status_code in (200, 201, 204):
+            fin_ok = True
+    except Exception:
+        pass
+    if not fin_ok:
+        try:
+            r2 = requests.post(
+                f'{DCZ_MSG}/messaging/conversations/{conv_id}/finish',
+                headers=H, json={}, timeout=15
+            )
+            if r2.status_code in (200, 201, 204):
+                fin_ok = True
+        except Exception:
+            pass
+    p(f"  [OUTRO-POLO] Conv {conv_id[:16]} -> Perdido + Finalizada (fin={fin_ok})")
+    return fin_ok
+
+
 def transfer_to_human(conv_id, reason=''):
     """Sinaliza transferência para atendente humano via nota interna."""
     try:
@@ -3557,6 +3665,19 @@ def _handle_cpf_input(conv_id, question, name_suffix):
         _student_in_base = True
         p(f"  ALUNO VALIDADO pelo CPF -> saudação + menu")
         student_profile = identify_student(_current_phone or PHONE_TO_MONITOR)
+
+        _acad_cpf = fetch_academic_data(cpf_raw, phone=_current_phone or PHONE_TO_MONITOR)
+        if _acad_cpf:
+            if student_profile:
+                student_profile['academic'] = _acad_cpf
+                student_profile['_acad_loaded'] = True
+            _polo_aluno = (_acad_cpf.get('polo') or '').strip()
+            if _polo_aluno and not _is_nosso_polo(_polo_aluno):
+                p(f"  [POLO-CPF] Polo '{_polo_aluno}' NÃO é nosso -> redirecionando")
+                _handle_outro_polo(conv_id, _current_phone or cur_phone, student_profile, _polo_aluno)
+                waiting_for_client = False; inactivity_start = 0
+                return
+
         fname = student_profile.get('first_name', '') if student_profile else ''
         if fname:
             greeting = f"*Em breve um de nossos consultores irá te chamar!*\n\nMe conta, sobre o que você deseja falar?\nPergunte de maneira simples que eu entendo melhor assim. 😊"
@@ -3707,6 +3828,14 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                             student_profile['course_info'] = _ci
                             p(f"    [GRADE] Info do curso carregada: {_ci.get('nome','?')[:40]}")
         student_profile['_acad_loaded'] = True
+
+        if student_profile.get('academic'):
+            _polo_aluno = (student_profile['academic'].get('polo') or '').strip()
+            if _polo_aluno and not _is_nosso_polo(_polo_aluno):
+                p(f"  [POLO-CHECK] Polo '{_polo_aluno}' NÃO é nosso -> redirecionando")
+                _handle_outro_polo(conv_id, _current_phone or cur_phone, student_profile, _polo_aluno)
+                waiting_for_client = False; inactivity_start = 0
+                return
 
     # === ÁUDIO: identificar aluno + criar lead se necessário + distribuir ===
     if msg_body == '[audio]':
