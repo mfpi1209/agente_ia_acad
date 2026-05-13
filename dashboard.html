@@ -165,6 +165,8 @@ tbody tr:hover { background:var(--card-hover); }
   <h1><span>&#9679;</span> Dashboard <span>Agente IA</span> Acadêmico</h1>
   <div class="topbar-right">
     <span id="agentStatus"><span class="live-dot" id="statusDot" style="background:var(--text-muted);animation:none"></span><span id="statusText">Verificando...</span></span>
+    <button id="btnStart" onclick="agentStart()" style="background:#22c55e;border-color:#22c55e;color:#fff;font-weight:600;display:none">&#9654; Ligar</button>
+    <button id="btnStop" onclick="agentStop()" style="background:#ef4444;border-color:#ef4444;color:#fff;font-weight:600;display:none">&#9632; Desligar</button>
     <select id="dayFilter" onchange="loadAll()">
       <option value="1">Hoje</option>
       <option value="3">3 dias</option>
@@ -276,21 +278,64 @@ async function loadAgentStatus() {
     const data = await fetch(`${API}/api/agent-status`).then(r=>r.json());
     const dot = document.getElementById('statusDot');
     const txt = document.getElementById('statusText');
+    const btnStart = document.getElementById('btnStart');
+    const btnStop = document.getElementById('btnStop');
     if (data.status === 'online') {
       dot.style.background = 'var(--green)';
       dot.style.animation = 'pulse 2s infinite';
       const mins = Math.floor((data.seconds_ago || 0) / 60);
       txt.textContent = mins > 0 ? `Agente Ligado (${mins}min atrás)` : 'Agente Ligado';
       txt.style.color = 'var(--green)';
+      btnStart.style.display = 'none';
+      btnStop.style.display = '';
     } else {
       dot.style.background = 'var(--red)';
       dot.style.animation = 'none';
       txt.textContent = 'Agente Desligado';
       txt.style.color = 'var(--red)';
+      btnStart.style.display = '';
+      btnStop.style.display = 'none';
     }
   } catch(e) {
     document.getElementById('statusText').textContent = 'Status indisponível';
   }
+}
+
+async function agentStart() {
+  const btn = document.getElementById('btnStart');
+  btn.textContent = '⏳ Ligando...';
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API}/api/agent/start`, {method:'POST'}).then(r=>r.json());
+    if (res.ok) {
+      document.getElementById('statusText').textContent = 'Iniciando...';
+      document.getElementById('statusDot').style.background = 'var(--yellow)';
+    } else {
+      alert(res.msg || 'Erro ao ligar');
+    }
+  } catch(e) { alert('Erro de conexão: ' + e); }
+  btn.textContent = '▶ Ligar';
+  btn.disabled = false;
+  setTimeout(loadAgentStatus, 5000);
+}
+
+async function agentStop() {
+  if (!confirm('Tem certeza que deseja desligar o agente?')) return;
+  const btn = document.getElementById('btnStop');
+  btn.textContent = '⏳ Desligando...';
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API}/api/agent/stop`, {method:'POST'}).then(r=>r.json());
+    if (res.ok) {
+      document.getElementById('statusText').textContent = 'Desligando...';
+      document.getElementById('statusDot').style.background = 'var(--yellow)';
+    } else {
+      alert(res.msg || 'Erro ao desligar');
+    }
+  } catch(e) { alert('Erro de conexão: ' + e); }
+  btn.textContent = '■ Desligar';
+  btn.disabled = false;
+  setTimeout(loadAgentStatus, 3000);
 }
 
 async function loadAll() {

@@ -1229,8 +1229,11 @@ def _heartbeat(status='online', extra=''):
         conn.commit()
         cur.close()
         conn.close()
-    except Exception:
-        pass
+    except Exception as hb_err:
+        try:
+            p(f"  [HEARTBEAT] Erro: {hb_err}")
+        except Exception:
+            pass
 
 
 def ensure_memory_tables():
@@ -4407,7 +4410,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                 conversation_messages.append({'role': 'bot', 'text': grade_msg})
                 log_to_db(conv_id, question, grade_msg, 0.9, 'grade_link_busca')
                 waiting_for_client = True; inactivity_start = time.time()
-                return
+        return
 
     # === PIPELINE RAG ===
     p(f"  Pipeline RAG... (sentimento: {sentiment})")
@@ -4726,10 +4729,16 @@ def main():
             _cached_msgs.clear()
             maybe_reload()
 
+            if cycle % 5 == 0:
+                active_count = sum(1 for s in _conv_states.values() if s.get('waiting_for_client'))
+                if cycle % 10 == 0:
+                    p(f"  ...ativo ({cycle * POLL_INTERVAL}s | {len(processed_msg_ids)} msgs | {len(_conv_states)} convs | {active_count} aguardando)")
+                _heartbeat('online', f'cycle={cycle} convs={len(_conv_states)} active={active_count}')
+
             # Busca conversas abertas recentes
             try:
                 r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
-                                params={'limit': 300, 'status': 'open'}, timeout=60)
+                                    params={'limit': 300, 'status': 'open'}, timeout=60)
             except Exception as _e_conv:
                 p(f"  [ERRO] Falha ao buscar conversas: {_e_conv}")
                 continue
@@ -5268,9 +5277,10 @@ def main():
                 except Exception as e_deep:
                     p(f"  [DEEP-SCAN] Erro: {e_deep}")
 
-            if cycle % 10 == 0:
+            if cycle % 5 == 0:
                 active_count = sum(1 for s in _conv_states.values() if s.get('waiting_for_client'))
-                p(f"  ...ativo ({cycle * POLL_INTERVAL}s | {len(processed_msg_ids)} msgs | {len(_conv_states)} convs | {active_count} aguardando)")
+                if cycle % 10 == 0:
+                    p(f"  ...ativo ({cycle * POLL_INTERVAL}s | {len(processed_msg_ids)} msgs | {len(_conv_states)} convs | {active_count} aguardando)")
                 _heartbeat('online', f'cycle={cycle} convs={len(_conv_states)} active={active_count}')
             if cycle % 120 == 0:
                 _db_cleanup_dedup()

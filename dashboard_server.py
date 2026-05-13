@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import psycopg2
+import requests
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -149,7 +150,21 @@ def api_avaliar(record_id: int, avaliacao: str = Query(...)):
 
 @app.get("/api/agent-status")
 def api_agent_status():
-    """Retorna status do agente baseado no heartbeat no DB."""
+    """Retorna status do agente verificando o processo via Cockpit + heartbeat DB."""
+    process_online = False
+    cockpit_pid = None
+    try:
+        r = requests.get(f'{COCKPIT_BASE}/api/agent/live/status', timeout=3)
+        if r.status_code == 200:
+            data = r.json()
+            process_online = data.get('running', False)
+            cockpit_pid = data.get('pid')
+    except Exception:
+        pass
+
+    hb_status = 'offline'
+    hb_extra = ''
+    hb_seconds = 9999
     try:
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -160,19 +175,43 @@ def api_agent_status():
         """)
         row = cur.fetchone()
         conn.close()
-        if not row:
-            return {'status': 'offline', 'since': None, 'extra': ''}
-        seconds_ago = float(row['seconds_ago'] or 9999)
-        is_online = row['status'] == 'online' and seconds_ago < 120
-        return {
-            'status': 'online' if is_online else 'offline',
-            'pid': row['pid'],
-            'last_beat': row['last_beat'].isoformat() if row['last_beat'] else None,
-            'seconds_ago': round(seconds_ago),
-            'extra': row['extra'] or '',
-        }
+        if row:
+            hb_seconds = float(row['seconds_ago'] or 9999)
+            hb_status = row['status']
+            hb_extra = row['extra'] or ''
+    except Exception:
+        pass
+
+    is_online = process_online or (hb_status == 'online' and hb_seconds < 120)
+    return {
+        'status': 'online' if is_online else 'offline',
+        'pid': cockpit_pid,
+        'seconds_ago': round(hb_seconds),
+        'extra': hb_extra,
+    }
+
+
+COCKPIT_BASE = os.environ.get('COCKPIT_BASE_URL', 'http://localhost:8000')
+
+
+@app.post("/api/agent/start")
+def api_agent_start():
+    """Proxy para iniciar o agente via Cockpit API."""
+    try:
+        r = requests.post(f'{COCKPIT_BASE}/api/agent/live/start', timeout=30)
+        return r.json()
     except Exception as e:
-        return {'status': 'unknown', 'error': str(e)}
+        return {'ok': False, 'msg': str(e)}
+
+
+@app.post("/api/agent/stop")
+def api_agent_stop():
+    """Proxy para parar o agente via Cockpit API."""
+    try:
+        r = requests.post(f'{COCKPIT_BASE}/api/agent/live/stop', timeout=15)
+        return r.json()
+    except Exception as e:
+        return {'ok': False, 'msg': str(e)}
 
 
 @app.get("/api/alerts")

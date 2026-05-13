@@ -106,12 +106,11 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
 <div class="flex bg-white mt-4 rounded-xl border border-gray-100 px-2 overflow-x-auto" style="box-shadow:0 1px 3px rgba(0,0,0,.03);">
   <div class="tab active" data-tab="dashboard" onclick="sw('dashboard')"><i class="fas fa-chart-pie mr-1.5"></i>Dashboard</div>
   <div class="tab" data-tab="qa" onclick="sw('qa')"><i class="fas fa-database mr-1.5"></i>Base Q&A</div>
-  <div class="tab" data-tab="chat" onclick="sw('chat')"><i class="fab fa-whatsapp mr-1.5"></i>Chat</div>
+  <div class="tab" data-tab="agentia" onclick="sw('agentia')"><i class="fas fa-robot mr-1.5"></i>Agente IA</div>
   <div class="tab" data-tab="playground" onclick="sw('playground')"><i class="fas fa-flask mr-1.5"></i>Playground</div>
   <div class="tab" data-tab="prompts" onclick="sw('prompts')"><i class="fas fa-wand-magic-sparkles mr-1.5"></i>Prompts</div>
   <div class="tab" data-tab="enrich" onclick="sw('enrich')"><i class="fas fa-seedling mr-1.5"></i>Enriquecer</div>
   <div class="tab" data-tab="tabulation" onclick="sw('tabulation')"><i class="fas fa-chart-bar mr-1.5"></i>Tabulação</div>
-  <div class="tab" data-tab="sentiment" onclick="sw('sentiment')"><i class="fas fa-heart-pulse mr-1.5"></i>Sentimento</div>
   <div class="tab" data-tab="team" onclick="sw('team')"><i class="fas fa-users-gear mr-1.5"></i>Equipe</div>
   <div class="tab" data-tab="students" onclick="sw('students')"><i class="fas fa-user-graduate mr-1.5"></i>Alunos</div>
   <div class="tab" data-tab="logs" onclick="sw('logs')"><i class="fas fa-timeline mr-1.5"></i>Interações</div>
@@ -171,7 +170,142 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
 </div>
 </div>
 
-<!-- ===== CHAT ===== -->
+<!-- ===== AGENTE IA (dashboard integrado) ===== -->
+<div id="tab-agentia" class="tc hidden fade">
+<style>
+#tab-agentia{--aia-bg:#0f1117;--aia-card:#1a1d27;--aia-card-hover:#22263a;--aia-border:#2a2e3f;--aia-text:#e4e6ed;--aia-muted:#8b8fa3;--aia-primary:#6366f1;--aia-primary-l:#818cf8;--aia-green:#22c55e;--aia-green-bg:rgba(34,197,94,.12);--aia-yellow:#eab308;--aia-yellow-bg:rgba(234,179,8,.12);--aia-red:#ef4444;--aia-red-bg:rgba(239,68,68,.12);--aia-blue:#3b82f6;--aia-blue-bg:rgba(59,130,246,.12);--aia-purple:#a855f7;--aia-orange:#f97316;}
+#tab-agentia .aia-wrap{background:var(--aia-bg);border-radius:12px;padding:0;min-height:600px;color:var(--aia-text);font-family:'Inter',system-ui,sans-serif;}
+#tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4b 0%,#312e81 50%,#1e1b4b 100%);padding:18px 28px;display:flex;align-items:center;justify-content:space-between;border-radius:12px 12px 0 0;border-bottom:1px solid var(--aia-border);}
+#tab-agentia .aia-topbar h2{font-size:20px;font-weight:700;letter-spacing:-.5px;color:#fff;}
+#tab-agentia .aia-topbar h2 span{color:var(--aia-primary-l);}
+#tab-agentia .aia-topbar-r{display:flex;gap:10px;align-items:center;}
+#tab-agentia .aia-topbar-r select,#tab-agentia .aia-topbar-r button{background:rgba(255,255,255,.08);color:var(--aia-text);border:1px solid rgba(255,255,255,.15);padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit;}
+#tab-agentia .aia-topbar-r button:hover{background:var(--aia-primary);border-color:var(--aia-primary);}
+#tab-agentia .aia-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px;}
+@keyframes aiaPulse{0%,100%{opacity:1}50%{opacity:.4}}
+#tab-agentia .aia-container{max-width:1440px;margin:0 auto;padding:20px;}
+#tab-agentia .aia-kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:20px;}
+#tab-agentia .aia-kpi{background:var(--aia-card);border:1px solid var(--aia-border);border-radius:12px;padding:18px;position:relative;overflow:hidden;}
+#tab-agentia .aia-kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;border-radius:12px 12px 0 0;}
+#tab-agentia .aia-kpi.blue::before{background:var(--aia-blue);}
+#tab-agentia .aia-kpi.green::before{background:var(--aia-green);}
+#tab-agentia .aia-kpi.purple::before{background:var(--aia-purple);}
+#tab-agentia .aia-kpi.yellow::before{background:var(--aia-yellow);}
+#tab-agentia .aia-kpi.red::before{background:var(--aia-red);}
+#tab-agentia .aia-kpi-label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--aia-muted);margin-bottom:6px;}
+#tab-agentia .aia-kpi-val{font-size:30px;font-weight:700;line-height:1;}
+#tab-agentia .aia-kpi-sub{font-size:11px;color:var(--aia-muted);margin-top:5px;}
+#tab-agentia .aia-charts{display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px;margin-bottom:20px;}
+#tab-agentia .aia-charts-2{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:20px;}
+#tab-agentia .aia-cc{background:var(--aia-card);border:1px solid var(--aia-border);border-radius:12px;padding:18px;}
+#tab-agentia .aia-cc h3{font-size:13px;font-weight:600;margin-bottom:14px;color:var(--aia-muted);}
+#tab-agentia .aia-cc canvas{max-height:270px;}
+#tab-agentia .aia-alerts-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
+#tab-agentia .aia-alerts-hdr h2{font-size:15px;font-weight:600;color:var(--aia-text);}
+#tab-agentia .aia-alert-badge{background:var(--aia-red-bg);color:var(--aia-red);padding:2px 10px;border-radius:20px;font-size:11px;font-weight:600;}
+#tab-agentia .aia-alerts-scroll{display:flex;gap:12px;overflow-x:auto;padding-bottom:8px;margin-bottom:20px;}
+#tab-agentia .aia-alert-card{min-width:300px;max-width:340px;background:var(--aia-card);border:1px solid var(--aia-border);border-radius:12px;padding:14px;flex-shrink:0;border-left:3px solid var(--aia-red);}
+#tab-agentia .aia-alert-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
+#tab-agentia .aia-alert-name{font-weight:600;font-size:12px;}
+#tab-agentia .aia-alert-time{font-size:10px;color:var(--aia-muted);}
+#tab-agentia .aia-alert-meta{display:flex;gap:5px;margin-bottom:6px;flex-wrap:wrap;}
+#tab-agentia .aia-tag{padding:2px 7px;border-radius:5px;font-size:10px;font-weight:500;}
+#tab-agentia .aia-tag-red{background:var(--aia-red-bg);color:var(--aia-red);}
+#tab-agentia .aia-tag-yellow{background:var(--aia-yellow-bg);color:var(--aia-yellow);}
+#tab-agentia .aia-tag-green{background:var(--aia-green-bg);color:var(--aia-green);}
+#tab-agentia .aia-tag-blue{background:var(--aia-blue-bg);color:var(--aia-blue);}
+#tab-agentia .aia-alert-q{font-size:11px;color:var(--aia-muted);line-height:1.4;margin-bottom:5px;}
+#tab-agentia .aia-alert-q strong{color:var(--aia-text);}
+#tab-agentia .aia-btn-dcz{display:inline-flex;align-items:center;gap:4px;background:rgba(99,102,241,.15);color:var(--aia-primary-l);border:1px solid rgba(99,102,241,.3);padding:3px 9px;border-radius:5px;font-size:10px;cursor:pointer;text-decoration:none;margin-top:3px;}
+#tab-agentia .aia-btn-dcz:hover{background:var(--aia-primary);color:#fff;}
+#tab-agentia .aia-tbl-section{background:var(--aia-card);border:1px solid var(--aia-border);border-radius:12px;overflow:hidden;}
+#tab-agentia .aia-tbl-header{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--aia-border);}
+#tab-agentia .aia-tbl-header h2{font-size:15px;font-weight:600;}
+#tab-agentia .aia-tbl-filters{display:flex;gap:8px;}
+#tab-agentia .aia-tbl-filters select,#tab-agentia .aia-tbl-filters input{background:rgba(255,255,255,.06);color:var(--aia-text);border:1px solid var(--aia-border);padding:5px 10px;border-radius:8px;font-size:11px;font-family:inherit;}
+#tab-agentia .aia-tbl-filters input{width:180px;}
+#tab-agentia .aia-tbl-wrap{overflow-x:auto;}
+#tab-agentia .aia-tbl-wrap table{width:100%;border-collapse:collapse;font-size:12px;}
+#tab-agentia .aia-tbl-wrap thead th{text-align:left;padding:9px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--aia-muted);background:rgba(255,255,255,.03);border-bottom:1px solid var(--aia-border);white-space:nowrap;}
+#tab-agentia .aia-tbl-wrap tbody td{padding:9px 12px;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:top;}
+#tab-agentia .aia-tbl-wrap tbody tr:hover{background:var(--aia-card-hover);}
+#tab-agentia .aia-cell-q{max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--aia-muted);}
+#tab-agentia .aia-cell-q:hover{white-space:normal;}
+#tab-agentia .aia-btn-av{padding:3px 7px;border-radius:5px;font-size:10px;cursor:pointer;border:1px solid;background:transparent;font-family:inherit;transition:.15s;}
+#tab-agentia .aia-btn-av.ok{border-color:var(--aia-green);color:var(--aia-green);}
+#tab-agentia .aia-btn-av.ok:hover,#tab-agentia .aia-btn-av.ok.active{background:var(--aia-green);color:#fff;}
+#tab-agentia .aia-btn-av.nok{border-color:var(--aia-red);color:var(--aia-red);}
+#tab-agentia .aia-btn-av.nok:hover,#tab-agentia .aia-btn-av.nok.active{background:var(--aia-red);color:#fff;}
+#tab-agentia .aia-pag{display:flex;justify-content:center;gap:8px;padding:14px;}
+#tab-agentia .aia-pag button{background:rgba(255,255,255,.06);color:var(--aia-text);border:1px solid var(--aia-border);padding:5px 12px;border-radius:8px;font-size:11px;cursor:pointer;font-family:inherit;}
+#tab-agentia .aia-pag button:hover{background:var(--aia-primary);border-color:var(--aia-primary);}
+#tab-agentia .aia-pag button:disabled{opacity:.3;cursor:default;}
+#tab-agentia .aia-pag span{color:var(--aia-muted);font-size:12px;line-height:28px;}
+#tab-agentia .aia-nps-bar{display:flex;height:22px;border-radius:8px;overflow:hidden;margin-top:6px;}
+#tab-agentia .aia-nps-bar .seg{display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;}
+#tab-agentia .aia-nps-bar .seg.det{background:var(--aia-red);}
+#tab-agentia .aia-nps-bar .seg.neu{background:var(--aia-yellow);color:#000;}
+#tab-agentia .aia-nps-bar .seg.pro{background:var(--aia-green);}
+@media(max-width:900px){#tab-agentia .aia-charts,#tab-agentia .aia-charts-2{grid-template-columns:1fr;}#tab-agentia .aia-kpi-grid{grid-template-columns:repeat(2,1fr);}}
+</style>
+
+<div class="aia-wrap">
+  <!-- Topbar -->
+  <div class="aia-topbar">
+    <h2><span>&#9679;</span> Dashboard <span>Agente IA</span> Acadêmico</h2>
+    <div class="aia-topbar-r">
+      <span id="aia-status"><span class="aia-dot" id="aia-dot" style="background:var(--aia-muted)"></span><span id="aia-stxt">Verificando...</span></span>
+      <button id="aia-btnStart" onclick="aiaStart()" style="background:#22c55e;border-color:#22c55e;color:#fff;font-weight:600;display:none">&#9654; Ligar</button>
+      <button id="aia-btnStop" onclick="aiaStop()" style="background:#ef4444;border-color:#ef4444;color:#fff;font-weight:600;display:none">&#9632; Desligar</button>
+      <select id="aia-days" onchange="aiaLoadAll()">
+        <option value="1">Hoje</option>
+        <option value="3">3 dias</option>
+        <option value="7" selected>7 dias</option>
+        <option value="15">15 dias</option>
+        <option value="30">30 dias</option>
+      </select>
+      <button onclick="aiaLoadAll()">&#x21bb; Atualizar</button>
+    </div>
+  </div>
+  <div class="aia-container">
+    <div class="aia-kpi-grid" id="aia-kpis"></div>
+    <div id="aia-alerts-sec"></div>
+    <div class="aia-charts">
+      <div class="aia-cc"><h3>Interações por Dia</h3><canvas id="aia-cDia"></canvas></div>
+      <div class="aia-cc"><h3>Sentimento</h3><canvas id="aia-cSent"></canvas></div>
+      <div class="aia-cc"><h3>Resolução</h3><canvas id="aia-cRes"></canvas></div>
+    </div>
+    <div class="aia-charts-2">
+      <div class="aia-cc"><h3>Temas</h3><canvas id="aia-cTema"></canvas></div>
+      <div class="aia-cc"><h3>Distribuição NPS</h3><canvas id="aia-cNps"></canvas></div>
+      <div class="aia-cc"><h3>Horário de Pico</h3><canvas id="aia-cHora"></canvas></div>
+    </div>
+    <div class="aia-tbl-section">
+      <div class="aia-tbl-header">
+        <h2>Interações Recentes</h2>
+        <div class="aia-tbl-filters">
+          <input type="text" id="aia-search" placeholder="Buscar aluno, telefone..." onkeyup="aiaDebSearch()">
+          <select id="aia-ftema" onchange="aiaLoadTbl()"><option value="">Todos os Temas</option></select>
+          <select id="aia-fsent" onchange="aiaLoadTbl()">
+            <option value="">Todos os Sentimentos</option>
+            <option value="satisfeito">Satisfeito</option>
+            <option value="neutro">Neutro</option>
+            <option value="frustrado">Frustrado</option>
+          </select>
+        </div>
+      </div>
+      <div class="aia-tbl-wrap">
+        <table><thead><tr>
+          <th>Data</th><th>Aluno</th><th>Telefone</th><th>Tema</th><th>Sentimento</th><th>NPS</th><th>Pergunta</th><th>Resposta</th><th>Avaliação</th><th></th>
+        </tr></thead><tbody id="aia-tbody"></tbody></table>
+      </div>
+      <div class="aia-pag" id="aia-pag"></div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ===== CHAT (legacy - hidden) ===== -->
 <div id="tab-chat" class="tc hidden fade">
 <div class="mt-5 flex gap-4" style="height:calc(100vh - 190px);min-height:500px;">
   <!-- Chat Window -->
@@ -1070,9 +1204,106 @@ function confBar(c){return c>=.8?'background:#22c55e':c>=.5?'background:#eab308'
 function confLabel(c){return c>=.8?'Alta':c>=.5?'Média':'Baixa';}
 function now(){return new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});}
 
+// ==== AGENTE IA (dashboard integrado) ====
+const AIA='http://localhost:8050';
+let aiaCharts={}, aiaPage=1, aiaSearchT=null, aiaLoaded=false, aiaStatusInt=null;
+const AIA_SENT_C={satisfeito:'#22c55e',neutro:'#eab308',frustrado:'#ef4444'};
+const AIA_TEMA_C=['#6366f1','#3b82f6','#22c55e','#f97316','#a855f7','#ec4899','#14b8a6','#eab308'];
+const AIA_DCZ='https://messaging.g1.datacrazy.io';
+function aiaDczLink(c,p){if(c)return AIA_DCZ+'/conversations/'+c;if(p)return AIA_DCZ+'/search?q='+p;return'#';}
+function aiaFmtDate(iso){if(!iso)return'-';const d=new Date(iso);return d.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'})+' '+d.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});}
+function aiaSentTag(s){const c=s==='satisfeito'?'aia-tag-green':s==='frustrado'?'aia-tag-red':'aia-tag-yellow';return`<span class="aia-tag ${c}">${s}</span>`;}
+function aiaNpsTag(n){if(n===null||n===undefined)return'-';const c=n>=8?'aia-tag-green':n>=6?'aia-tag-yellow':'aia-tag-red';return`<span class="aia-tag ${c}">NPS ${n}</span>`;}
+
+function initAgentIA(){
+  if(!aiaLoaded){aiaLoaded=true;aiaLoadAll();}
+  if(!aiaStatusInt){aiaStatusInt=setInterval(aiaLoadStatus,12000);}
+}
+async function aiaLoadStatus(){
+  try{
+    const d=await fetch(A+'/api/agent/live/status').then(r=>r.json());
+    const dot=document.getElementById('aia-dot'),txt=document.getElementById('aia-stxt');
+    const bs=document.getElementById('aia-btnStart'),bp=document.getElementById('aia-btnStop');
+    if(d.running){
+      dot.style.background='var(--aia-green)';dot.style.animation='aiaPulse 2s infinite';
+      txt.textContent='Agente Ligado';txt.style.color='#22c55e';
+      bs.style.display='none';bp.style.display='';
+    }else{
+      dot.style.background='var(--aia-red)';dot.style.animation='none';
+      txt.textContent='Agente Desligado';txt.style.color='#ef4444';
+      bs.style.display='';bp.style.display='none';
+    }
+  }catch(e){document.getElementById('aia-stxt').textContent='Status indisponível';}
+}
+async function aiaStart(){
+  const b=document.getElementById('aia-btnStart');b.textContent='⏳ Ligando...';b.disabled=true;
+  try{const r=await fetch(A+'/api/agent/live/start',{method:'POST'}).then(r=>r.json());
+    if(r.ok){document.getElementById('aia-stxt').textContent='Iniciando...';document.getElementById('aia-dot').style.background='var(--aia-yellow)';}
+    else{alert(r.msg||'Erro ao ligar');}
+  }catch(e){alert('Erro: '+e);}
+  b.textContent='▶ Ligar';b.disabled=false;setTimeout(aiaLoadStatus,5000);
+}
+async function aiaStop(){
+  if(!confirm('Tem certeza que deseja desligar o agente?'))return;
+  const b=document.getElementById('aia-btnStop');b.textContent='⏳ Desligando...';b.disabled=true;
+  try{const r=await fetch(A+'/api/agent/live/stop',{method:'POST'}).then(r=>r.json());
+    if(r.ok){document.getElementById('aia-stxt').textContent='Desligando...';document.getElementById('aia-dot').style.background='var(--aia-yellow)';}
+    else{alert(r.msg||'Erro ao desligar');}
+  }catch(e){alert('Erro: '+e);}
+  b.textContent='■ Desligar';b.disabled=false;setTimeout(aiaLoadStatus,3000);
+}
+async function aiaLoadAll(){
+  try{
+    const days=document.getElementById('aia-days').value;
+    const[stats,alerts]=await Promise.all([
+      fetch(AIA+'/api/stats?days='+days).then(r=>r.json()),
+      fetch(AIA+'/api/alerts').then(r=>r.json())
+    ]);
+    aiaRenderKPIs(stats);aiaRenderAlerts(alerts);aiaRenderCharts(stats);aiaLoadTbl();aiaLoadStatus();
+  }catch(e){console.error('AIA loadAll error:',e);}
+}
+function aiaRenderKPIs(s){
+  document.getElementById('aia-kpis').innerHTML=`
+    <div class="aia-kpi blue"><div class="aia-kpi-label">Total Interações</div><div class="aia-kpi-val">${s.total.toLocaleString('pt-BR')}</div><div class="aia-kpi-sub">No período selecionado</div></div>
+    <div class="aia-kpi green"><div class="aia-kpi-label">Taxa de Resolução</div><div class="aia-kpi-val">${s.taxa_resolucao}%</div><div class="aia-kpi-sub">Resolvido + Parcial</div></div>
+    <div class="aia-kpi purple"><div class="aia-kpi-label">NPS Score</div><div class="aia-kpi-val">${s.nps_score>0?'+':''}${s.nps_score}</div><div class="aia-kpi-sub"><div class="aia-nps-bar">${s.detratores>0?`<div class="seg det" style="width:${(s.detratores/(s.promotores+s.neutros+s.detratores))*100}%">${s.detratores}</div>`:''}${s.neutros>0?`<div class="seg neu" style="width:${(s.neutros/(s.promotores+s.neutros+s.detratores))*100}%">${s.neutros}</div>`:''}${s.promotores>0?`<div class="seg pro" style="width:${(s.promotores/(s.promotores+s.neutros+s.detratores))*100}%">${s.promotores}</div>`:''}</div></div></div>
+    <div class="aia-kpi yellow"><div class="aia-kpi-label">NPS Médio</div><div class="aia-kpi-val">${s.avg_nps}</div><div class="aia-kpi-sub">Escala 1-10</div></div>
+    <div class="aia-kpi red"><div class="aia-kpi-label">Frustrados</div><div class="aia-kpi-val">${(s.sentimentos.find(x=>x.sentimento==='frustrado')||{cnt:0}).cnt}</div><div class="aia-kpi-sub">Requerem atenção</div></div>`;
+}
+function aiaRenderAlerts(alerts){
+  const sec=document.getElementById('aia-alerts-sec');
+  if(!alerts.length){sec.innerHTML='';return;}
+  sec.innerHTML=`<div class="aia-alerts-hdr"><h2>⚠ Alertas (últimas 24h)</h2><span class="aia-alert-badge">${alerts.length} alertas</span></div>
+    <div class="aia-alerts-scroll">${alerts.map(a=>`<div class="aia-alert-card"><div class="aia-alert-top"><span class="aia-alert-name">${a.student_name||'Desconhecido'}</span><span class="aia-alert-time">${aiaFmtDate(a.created_at)}</span></div><div class="aia-alert-meta">${aiaSentTag(a.sentimento)} ${aiaNpsTag(a.nps_implicito)} <span class="aia-tag aia-tag-blue">${a.tema||'-'}</span></div><div class="aia-alert-q"><strong>Pergunta:</strong> ${(a.pergunta_aluno||'-').substring(0,120)}</div><div class="aia-alert-q"><strong>Resposta:</strong> ${(a.resposta_agente||'-').substring(0,120)}</div><a class="aia-btn-dcz" href="${aiaDczLink(a.conv_id,a.phone)}" target="_blank">↗ Ver no DataCrazy</a></div>`).join('')}</div>`;
+}
+function aiaDestroyChart(id){if(aiaCharts[id]){aiaCharts[id].destroy();delete aiaCharts[id];}}
+function aiaRenderCharts(s){
+  Chart.defaults.color='#8b8fa3';Chart.defaults.borderColor='rgba(255,255,255,.06)';
+  aiaDestroyChart('cDia');aiaCharts.cDia=new Chart(document.getElementById('aia-cDia'),{type:'line',data:{labels:s.por_dia.map(d=>{const dt=new Date(d.d+'T12:00:00');return dt.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'});}),datasets:[{label:'Interações',data:s.por_dia.map(d=>d.cnt),borderColor:'#6366f1',backgroundColor:'rgba(99,102,241,.15)',fill:true,tension:.3,pointRadius:4,pointBackgroundColor:'#6366f1'}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}});
+  aiaDestroyChart('cSent');aiaCharts.cSent=new Chart(document.getElementById('aia-cSent'),{type:'doughnut',data:{labels:s.sentimentos.map(x=>x.sentimento),datasets:[{data:s.sentimentos.map(x=>x.cnt),backgroundColor:s.sentimentos.map(x=>AIA_SENT_C[x.sentimento]||'#666')}]},options:{responsive:true,plugins:{legend:{position:'bottom',labels:{padding:12,usePointStyle:true}}},cutout:'60%'}});
+  const resC={sim:'#22c55e',parcial:'#eab308',nao:'#ef4444',escalado:'#6366f1','não':'#ef4444'};
+  aiaDestroyChart('cRes');aiaCharts.cRes=new Chart(document.getElementById('aia-cRes'),{type:'doughnut',data:{labels:s.resolvido.map(x=>x.resolvido),datasets:[{data:s.resolvido.map(x=>x.cnt),backgroundColor:s.resolvido.map(x=>resC[x.resolvido]||'#666')}]},options:{responsive:true,plugins:{legend:{position:'bottom',labels:{padding:12,usePointStyle:true}}},cutout:'60%'}});
+  aiaDestroyChart('cTema');aiaCharts.cTema=new Chart(document.getElementById('aia-cTema'),{type:'bar',data:{labels:s.temas.map(x=>x.tema),datasets:[{label:'Qtd',data:s.temas.map(x=>x.cnt),backgroundColor:s.temas.map((_,i)=>AIA_TEMA_C[i%AIA_TEMA_C.length]),borderRadius:6}]},options:{indexAxis:'horizontal',responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}});
+  aiaDestroyChart('cNps');const npsC=s.nps.map(x=>x.nps_implicito>=9?'#22c55e':x.nps_implicito>=7?'#eab308':'#ef4444');aiaCharts.cNps=new Chart(document.getElementById('aia-cNps'),{type:'bar',data:{labels:s.nps.map(x=>'NPS '+x.nps_implicito),datasets:[{label:'Qtd',data:s.nps.map(x=>x.cnt),backgroundColor:npsC,borderRadius:6}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}});
+  aiaDestroyChart('cHora');const hrs=Array.from({length:24},(_,i)=>i);const hd=hrs.map(h=>(s.por_hora.find(x=>x.h===h)||{cnt:0}).cnt);aiaCharts.cHora=new Chart(document.getElementById('aia-cHora'),{type:'bar',data:{labels:hrs.map(h=>h+'h'),datasets:[{label:'Interações',data:hd,backgroundColor:'rgba(59,130,246,.6)',borderRadius:4}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}});
+  const sel=document.getElementById('aia-ftema');const cur=sel.value;sel.innerHTML='<option value="">Todos os Temas</option>'+s.temas.map(t=>`<option value="${t.tema}" ${t.tema===cur?'selected':''}>${t.tema} (${t.cnt})</option>`).join('');
+}
+async function aiaLoadTbl(){
+  try{
+    const tema=document.getElementById('aia-ftema').value,sent=document.getElementById('aia-fsent').value,search=document.getElementById('aia-search').value;
+    const p=new URLSearchParams({limit:30,page:aiaPage});if(tema)p.set('tema',tema);if(sent)p.set('sentimento',sent);if(search)p.set('search',search);
+    const d=await fetch(AIA+'/api/recent?'+p).then(r=>r.json());
+    document.getElementById('aia-tbody').innerHTML=d.rows.map(r=>`<tr><td style="white-space:nowrap">${aiaFmtDate(r.created_at)}</td><td><strong>${r.student_name||'-'}</strong></td><td style="font-size:11px;color:var(--aia-muted)">${r.phone||'-'}</td><td><span class="aia-tag aia-tag-blue">${r.tema||'-'}</span></td><td>${aiaSentTag(r.sentimento)}</td><td>${aiaNpsTag(r.nps_implicito)}</td><td class="aia-cell-q" title="${(r.pergunta_aluno||'').replace(/"/g,'&quot;')}">${r.pergunta_aluno||'-'}</td><td class="aia-cell-q" title="${(r.resposta_agente||'').replace(/"/g,'&quot;')}">${r.resposta_agente||'-'}</td><td><button class="aia-btn-av ok ${r.avaliacao==='correta'?'active':''}" onclick="aiaAval(${r.id},'correta',this)">✓</button> <button class="aia-btn-av nok ${r.avaliacao==='incorreta'?'active':''}" onclick="aiaAval(${r.id},'incorreta',this)">✗</button></td><td><a class="aia-btn-dcz" href="${aiaDczLink(r.conv_id,r.phone)}" target="_blank">↗</a></td></tr>`).join('');
+    const tp=Math.ceil(d.total/d.limit);
+    document.getElementById('aia-pag').innerHTML=`<button ${aiaPage<=1?'disabled':''} onclick="aiaPage=${aiaPage-1};aiaLoadTbl()">← Anterior</button><span>Página ${aiaPage} de ${tp} (${d.total} registros)</span><button ${aiaPage>=tp?'disabled':''} onclick="aiaPage=${aiaPage+1};aiaLoadTbl()">Próxima →</button>`;
+  }catch(e){console.error('AIA table error:',e);}
+}
+function aiaDebSearch(){clearTimeout(aiaSearchT);aiaSearchT=setTimeout(()=>{aiaPage=1;aiaLoadTbl();},400);}
+async function aiaAval(id,val,btn){await fetch(AIA+'/api/avaliar/'+id+'?avaliacao='+val,{method:'POST'});const row=btn.closest('tr');row.querySelectorAll('.aia-btn-av').forEach(b=>b.classList.remove('active'));btn.classList.add('active');}
+
 // ==== TABS ====
 function sw(t){document.querySelectorAll('.tc').forEach(e=>e.classList.add('hidden'));document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));document.getElementById('tab-'+t).classList.remove('hidden');document.querySelector(`.tab[data-tab="${t}"]`).classList.add('active');
-if(t==='dashboard')loadDash();if(t==='qa')loadQA();if(t==='logs')loadLogs();if(t==='prompts')loadPrompts();if(t==='playground')initPG();if(t==='chat')initChat();if(t==='tabulation')loadTabulation();if(t==='sentiment')loadSentiment();if(t==='team')loadTeam();if(t==='students')loadStudents();if(t==='alerts')loadAlerts();if(t==='menus')loadMenus();if(t==='agentcfg')loadAgentConfig();if(t==='conversations')loadConversations();}
+if(t==='dashboard')loadDash();if(t==='qa')loadQA();if(t==='logs')loadLogs();if(t==='prompts')loadPrompts();if(t==='playground')initPG();if(t==='agentia')initAgentIA();if(t==='tabulation')loadTabulation();if(t==='team')loadTeam();if(t==='students')loadStudents();if(t==='alerts')loadAlerts();if(t==='menus')loadMenus();if(t==='agentcfg')loadAgentConfig();if(t==='conversations')loadConversations();}
 
 // ==== DASHBOARD ====
 async function loadDash(){
