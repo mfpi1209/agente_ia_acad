@@ -147,6 +147,43 @@ tbody tr:hover { background:var(--card-hover); }
 .pagination button:disabled { opacity:.3; cursor:default; }
 .pagination span { color:var(--text-muted); font-size:13px; line-height:32px; }
 
+.nav-tabs { display:flex; gap:8px; margin-bottom:20px; flex-wrap:wrap; }
+.nav-tabs a, .nav-tabs button {
+  padding:8px 16px; border-radius:8px; font-size:13px; text-decoration:none; cursor:pointer;
+  border:1px solid var(--border); background:var(--card); color:var(--text-muted); font-family:inherit;
+}
+.nav-tabs a.active, .nav-tabs button.active { background:var(--primary); border-color:var(--primary); color:#fff; }
+.nav-tabs a:hover { color:var(--text); }
+
+.top-alunos { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:12px; margin-bottom:24px; }
+.aluno-card {
+  background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px;
+}
+.aluno-card .nome { font-weight:600; font-size:13px; margin-bottom:4px; }
+.aluno-card .meta { font-size:11px; color:var(--text-muted); }
+
+.modal-overlay {
+  display:none; position:fixed; inset:0; background:rgba(0,0,0,.65); z-index:1000;
+  align-items:center; justify-content:center; padding:20px;
+}
+.modal-overlay.open { display:flex; }
+.modal-box {
+  background:var(--card); border:1px solid var(--border); border-radius:14px;
+  max-width:560px; width:100%; padding:24px; max-height:90vh; overflow-y:auto;
+}
+.modal-box h3 { margin-bottom:12px; font-size:16px; }
+.modal-box label { font-size:12px; color:var(--text-muted); display:block; margin-bottom:6px; }
+.modal-box textarea {
+  width:100%; min-height:120px; background:rgba(255,255,255,.06); border:1px solid var(--border);
+  color:var(--text); border-radius:8px; padding:12px; font-family:inherit; font-size:13px; margin-bottom:12px;
+}
+.modal-actions { display:flex; gap:8px; justify-content:flex-end; }
+.modal-actions button {
+  padding:8px 16px; border-radius:8px; border:1px solid var(--border); cursor:pointer;
+  font-family:inherit; font-size:13px;
+}
+.modal-actions .primary { background:var(--primary); border-color:var(--primary); color:#fff; }
+
 .nps-bar { display:flex; height:24px; border-radius:8px; overflow:hidden; margin-top:8px; }
 .nps-bar .seg { display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600; }
 .nps-bar .seg.det { background:var(--red); }
@@ -174,6 +211,8 @@ tbody tr:hover { background:var(--card-hover); }
       <option value="15">15 dias</option>
       <option value="30">30 dias</option>
     </select>
+    <button onclick="exportCsv()">&#x2B07; Exportar CSV</button>
+    <a href="/cockpit" target="_blank" style="text-decoration:none"><button type="button">&#x2699; Cockpit KB</button></a>
     <button onclick="loadAll()">&#x21bb; Atualizar</button>
   </div>
 </div>
@@ -195,9 +234,19 @@ tbody tr:hover { background:var(--card-hover); }
   <!-- Charts row 2 -->
   <div class="charts-grid-2">
     <div class="chart-card"><h3>Temas</h3><canvas id="chartTema"></canvas></div>
+    <div class="chart-card"><h3>Subtemas (top 15)</h3><canvas id="chartSub"></canvas></div>
     <div class="chart-card"><h3>Distribuição NPS</h3><canvas id="chartNps"></canvas></div>
-    <div class="chart-card"><h3>Horário de Pico</h3><canvas id="chartHora"></canvas></div>
   </div>
+
+  <div class="charts-grid-2">
+    <div class="chart-card"><h3>Horário de Pico</h3><canvas id="chartHora"></canvas></div>
+    <div class="chart-card"><h3>Qualidade (avaliação)</h3><canvas id="chartAval"></canvas></div>
+    <div class="chart-card"><h3>Base de Conhecimento</h3>
+      <div id="kbStats" style="padding:24px 8px;font-size:14px;line-height:1.8;color:var(--text-muted)">—</div>
+    </div>
+  </div>
+
+  <div id="topAlunosSection"></div>
 
   <!-- Table -->
   <div class="table-section">
@@ -213,6 +262,12 @@ tbody tr:hover { background:var(--card-hover); }
           <option value="satisfeito">Satisfeito</option>
           <option value="neutro">Neutro</option>
           <option value="frustrado">Frustrado</option>
+        </select>
+        <select id="avalFilter" onchange="loadTable()">
+          <option value="">Todas avaliações</option>
+          <option value="pendente">Pendentes</option>
+          <option value="correta">Corretas</option>
+          <option value="incorreta">Incorretas</option>
         </select>
       </div>
     </div>
@@ -239,11 +294,26 @@ tbody tr:hover { background:var(--card-hover); }
   </div>
 </div>
 
+<div class="modal-overlay" id="modalCorrigir">
+  <div class="modal-box">
+    <h3>Corrigir resposta e salvar na base</h3>
+    <label>Pergunta do aluno</label>
+    <p id="modalPergunta" style="font-size:13px;margin-bottom:12px;color:var(--text-muted)"></p>
+    <label>Resposta correta</label>
+    <textarea id="modalResposta" placeholder="Digite a resposta que deveria ter sido enviada..."></textarea>
+    <div class="modal-actions">
+      <button type="button" onclick="fecharModal()">Cancelar</button>
+      <button type="button" class="primary" onclick="salvarCorrecao()">Salvar correção</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const API = '';
 let charts = {};
 let currentPage = 1;
 let searchTimer = null;
+let corrigirId = null;
 
 const SENT_COLORS = {satisfeito:'#22c55e', neutro:'#eab308', frustrado:'#ef4444'};
 const TEMA_COLORS = ['#6366f1','#3b82f6','#22c55e','#f97316','#a855f7','#ec4899','#14b8a6','#eab308'];
@@ -352,6 +422,8 @@ async function loadAll() {
 }
 
 function renderKPIs(s) {
+  const av = s.avaliacoes || {corretas:0, incorretas:0, pendentes:0, taxa_acerto:0};
+  const kb = s.knowledge_base || {total:0, com_embedding:0};
   document.getElementById('kpis').innerHTML = `
     <div class="kpi-card blue">
       <div class="kpi-label">Total Interações</div>
@@ -383,6 +455,26 @@ function renderKPIs(s) {
       <div class="kpi-label">Frustrados</div>
       <div class="kpi-value">${(s.sentimentos.find(x=>x.sentimento==='frustrado')||{cnt:0}).cnt}</div>
       <div class="kpi-sub">Requerem atenção</div>
+    </div>
+    <div class="kpi-card green">
+      <div class="kpi-label">Avaliações ✓</div>
+      <div class="kpi-value">${av.corretas}</div>
+      <div class="kpi-sub">Taxa acerto: ${av.taxa_acerto}%</div>
+    </div>
+    <div class="kpi-card red">
+      <div class="kpi-label">Avaliações ✗</div>
+      <div class="kpi-value">${av.incorretas}</div>
+      <div class="kpi-sub">Corrigidas manualmente</div>
+    </div>
+    <div class="kpi-card blue">
+      <div class="kpi-label">Pendentes</div>
+      <div class="kpi-value">${av.pendentes}</div>
+      <div class="kpi-sub">Sem avaliação humana</div>
+    </div>
+    <div class="kpi-card purple">
+      <div class="kpi-label">Base Q&A</div>
+      <div class="kpi-value">${kb.total}</div>
+      <div class="kpi-sub">${kb.com_embedding} com embedding</div>
     </div>
   `;
 }
@@ -496,6 +588,55 @@ function renderCharts(s) {
     options:{responsive:true, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true}}}
   });
 
+  // Subtemas
+  destroyChart('chartSub');
+  const subs = (s.subtemas || []).slice(0, 15);
+  if (subs.length && document.getElementById('chartSub')) {
+    charts.chartSub = new Chart(document.getElementById('chartSub'), {
+      type:'bar',
+      data:{
+        labels: subs.map(x=>x.subtema || '(sem)'),
+        datasets:[{label:'Qtd', data:subs.map(x=>x.cnt),
+          backgroundColor: subs.map((_,i)=>TEMA_COLORS[i%TEMA_COLORS.length]), borderRadius:6}]
+      },
+      options:{indexAxis:'horizontal', responsive:true, plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}}
+    });
+  }
+
+  // Avaliações
+  destroyChart('chartAval');
+  const av = s.avaliacoes || {corretas:0, incorretas:0, pendentes:0};
+  if (document.getElementById('chartAval')) {
+    charts.chartAval = new Chart(document.getElementById('chartAval'), {
+      type:'doughnut',
+      data:{
+        labels: ['Corretas', 'Incorretas', 'Pendentes'],
+        datasets:[{data: [av.corretas, av.incorretas, av.pendentes],
+          backgroundColor: ['#22c55e', '#ef4444', '#6366f1']}]
+      },
+      options:{responsive:true, plugins:{legend:{position:'bottom'}}, cutout:'55%'}
+    });
+  }
+
+  const kb = s.knowledge_base || {total:0, com_embedding:0};
+  const kbEl = document.getElementById('kbStats');
+  if (kbEl) {
+    const pct = kb.total ? Math.round(kb.com_embedding / kb.total * 100) : 0;
+    kbEl.innerHTML = `<strong style="color:var(--text);font-size:28px">${kb.total}</strong> perguntas na base<br>
+      <strong style="color:var(--green)">${kb.com_embedding}</strong> com embedding (${pct}%)<br>
+      <a href="/cockpit" target="_blank" class="btn-dcz" style="margin-top:12px">Abrir Cockpit KB →</a>`;
+  }
+
+  const topSec = document.getElementById('topAlunosSection');
+  if (topSec && (s.top_alunos || []).length) {
+    topSec.innerHTML = `<div class="alerts-header"><h2>Top alunos (volume no período)</h2></div>
+      <div class="top-alunos">${s.top_alunos.map(a => `
+        <div class="aluno-card">
+          <div class="nome">${a.name || '—'}</div>
+          <div class="meta">${a.cnt} interações · NPS médio ${a.avg_nps ?? '—'} · …${(a.phone||'').slice(-4)}</div>
+        </div>`).join('')}</div>`;
+  } else if (topSec) { topSec.innerHTML = ''; }
+
   // Populate tema filter
   const sel = document.getElementById('temaFilter');
   const current = sel.value;
@@ -506,10 +647,12 @@ function renderCharts(s) {
 async function loadTable() {
   const tema = document.getElementById('temaFilter').value;
   const sent = document.getElementById('sentFilter').value;
+  const aval = document.getElementById('avalFilter').value;
   const search = document.getElementById('searchInput').value;
   const params = new URLSearchParams({limit:30, page:currentPage});
   if (tema) params.set('tema', tema);
   if (sent) params.set('sentimento', sent);
+  if (aval) params.set('avaliacao', aval);
   if (search) params.set('search', search);
 
   const data = await fetch(`${API}/api/recent?${params}`).then(r=>r.json());
@@ -527,6 +670,7 @@ async function loadTable() {
       <td>
         <button class="btn-aval correta ${r.avaliacao==='correta'?'active':''}" onclick="avaliar(${r.id},'correta',this)">✓</button>
         <button class="btn-aval incorreta ${r.avaliacao==='incorreta'?'active':''}" onclick="avaliar(${r.id},'incorreta',this)">✗</button>
+        <button class="btn-aval" style="border-color:var(--primary);color:var(--primary-light);margin-left:4px" onclick="abrirCorrigir(${r.id}, this)" title="Corrigir e salvar na base">✎</button>
       </td>
       <td><a class="btn-dcz" href="${dczLink(r.conv_id, r.phone)}" target="_blank">&#x2197;</a></td>
     </tr>
@@ -552,6 +696,36 @@ async function avaliar(id, val, btn) {
   const row = btn.closest('tr');
   row.querySelectorAll('.btn-aval').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
+}
+
+function abrirCorrigir(id, btn) {
+  corrigirId = id;
+  const row = btn.closest('tr');
+  const q = row.querySelector('.cell-q');
+  document.getElementById('modalPergunta').textContent = q ? (q.getAttribute('title') || q.textContent) : '';
+  document.getElementById('modalResposta').value = '';
+  document.getElementById('modalCorrigir').classList.add('open');
+}
+
+function fecharModal() {
+  document.getElementById('modalCorrigir').classList.remove('open');
+  corrigirId = null;
+}
+
+async function salvarCorrecao() {
+  const resp = document.getElementById('modalResposta').value.trim();
+  if (!resp || !corrigirId) return;
+  const r = await fetch(`${API}/api/corrigir/${corrigirId}`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({resposta_correta: resp})
+  }).then(x=>x.json());
+  if (r.ok) { fecharModal(); loadTable(); loadAll(); }
+  else alert(r.error || r.msg || 'Erro ao salvar');
+}
+
+function exportCsv() {
+  const days = document.getElementById('dayFilter').value;
+  window.location.href = `${API}/api/export/csv?days=${days}`;
 }
 
 // Auto-refresh a cada 60s

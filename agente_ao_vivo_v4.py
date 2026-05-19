@@ -16,7 +16,7 @@ import time
 import random
 import hashlib
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -145,17 +145,78 @@ CRM_ATTENDANT_MAP = {
     'beatriz': 'ab65b480-1761-42d8-815f-c7e3c8a7b6b4',
 }
 
+# Apelidos/aliases que o aluno pode usar para pedir um consultor especifico.
+# Chave = forma normalizada do nome completo aceito como preferred_attendant.
+ATTENDANT_ALIASES = {
+    'wesley':  ['wesley', 'weslei', 'wes ', 'wesly'],
+    'felipe':  ['felipe', 'felipi'],
+    'mariana': ['mariana', 'mari ', 'maryana'],
+    'debora':  ['debora', 'débora'],
+    'beatriz': ['beatriz', 'bia ', 'bea '],
+    'camila':  ['camila', 'kamila'],
+    'marilia': ['marilia', 'marília'],
+    'julia':   ['julia', 'júlia'],
+    'danubia': ['danubia', 'danúbia'],
+    'gustavo': ['gustavo'],
+    'joyce':   ['joyce'],
+    'emanuel': ['emanuel', 'manuel'],
+    'jessica': ['jessica', 'jéssica'],
+}
+
 ALMOCO_ANTE_MIN = 20
 ALMOCO_DURACAO_MIN = 60
 SAIDA_ANTE_MIN = 20
 
-OUT_OF_HOURS_MSG = (
-    "Nosso time de atendimento está disponível nos seguintes horários:\n\n"
+# ===================== HORÁRIO DE ATENDIMENTO (sobrescrito por agent_config) =====================
+BUSINESS_HOURS_WEEKDAY_START = 9   # Seg-Sex início
+BUSINESS_HOURS_WEEKDAY_END = 20    # Seg-Sex fim (exclusivo)
+BUSINESS_HOURS_SATURDAY_START = 9
+BUSINESS_HOURS_SATURDAY_END = 13   # Sábado fim (exclusivo)
+
+# Janela em minutos para considerar pedidos repetidos de "falar com atendente"
+AFTER_HOURS_INSIST_WINDOW_MIN = 30
+
+# Fila noturna: distribuição automática no horário comercial
+AUTO_DISPATCH_MORNING_QUEUE = True
+MORNING_DISPATCH_BATCH_SIZE = 25
+MORNING_DISPATCH_RETRY_BATCH = 5
+MORNING_DISPATCH_RETRY_COOLDOWN_S = 600
+_last_pending_dispatch_ts = 0
+
+# Templates de mensagens fora do horário
+AFTER_HOURS_FIRST_MSG = (
+    "Oii{name}! Nesse momento nosso time de atendimento humano está fora do horário, "
+    "mas eu (assistente virtual) sigo por aqui pra tentar te ajudar agora mesmo 😊\n\n"
     "📅 *Segunda a Sexta*: 09h às 20h\n"
     "📅 *Sábado*: 09h às 13h\n\n"
-    "Fora desse horário, eu (assistente virtual) continuo por aqui para te ajudar! 😊\n"
-    "Caso precise falar com um atendente, por favor retorne dentro do horário de atendimento."
+    "Me conta o que você precisa que eu já vou tentando resolver com você."
 )
+
+AFTER_HOURS_INSIST_MSG = (
+    "Entendi{name}! Para esse caso é melhor falar com um(a) consultor(a) mesmo, "
+    "e o nosso time retorna o atendimento *{retorno_label}*. "
+    "Vou deixar registrado por aqui pra que assim que abrir o horário, alguém te chame. "
+    "Enquanto isso, se quiser, posso te ajudar com outras dúvidas — é só me dizer 😊"
+)
+
+RETENTION_AFTER_HOURS_MSG = (
+    "Oii{name}, entendi 💙\n\n"
+    "Essa é uma decisão importante e a gente quer te ouvir com a atenção que você merece. "
+    "Para esse assunto, quem cuida com carinho é o *Wesley*, nosso consultor especializado.\n\n"
+    "No momento ele está fora do horário de atendimento, mas assim que retomar *{retorno_label}* "
+    "ele entra em contato com você por aqui mesmo, tá? 😊\n\n"
+    "Enquanto isso, se precisar de ajuda com *acesso, boleto, aulas* ou qualquer outra coisa, "
+    "é só me chamar — eu sigo por aqui pra te ajudar."
+)
+
+# Mensagem dentro do horário, mas sem consultor disponível no momento
+HUMAN_BUSY_MSG = (
+    "Nossos atendentes estão todos em atendimento agora, mas fica tranquilo{name}! "
+    "Em pouquinho alguém vai te chamar aqui 😊"
+)
+
+# Mantido por compatibilidade — usado apenas em logs/fallback genérico
+OUT_OF_HOURS_MSG = AFTER_HOURS_FIRST_MSG
 
 # ===================== FLOW CONSTANTS =====================
 
@@ -452,6 +513,19 @@ FOLLOWUP_1_BUTTONS = ['Tenho outra dúvida', 'Não, obrigado!']
 CLOSE_INACTIVITY_MSG     = "Como você não respondeu, vou encerrar por aqui pra não te incomodar, tá? Se precisar de algo depois, é só me chamar de novo! Até mais ✨"
 CLOSE_INACTIVITY_BUTTONS = None
 
+# Última mensagem enviada (bot/automação) contém encerramento — Kommo/DataCrazy usam textos variados
+LAST_MSG_CLOSE_PHRASES = (
+    'muito obrigado por falar', 'encerrar por aqui',
+    'encerrando esta conversa', 'não respondeu mais',
+    'percebi que você não respondeu', 'atendimento será encerrado',
+    'este atendimento foi encerrado', 'este atendimento foi finalizado',
+    'atendimento foi encerrado', 'este atendimento está sendo encerrado',
+    'atendimento está sendo encerrado', 'se quiser retornar para conversar',
+    'se quiser retornar para conversar novamente',
+    'foi encerrado por falta', 'foi encerrada por falta', 'encerrada devido',
+    'atendimento foi finalizado', 'conversa foi encerrada',
+)
+
 # ===================== SAUDAÇÕES (defaults, sobrescritos pelo banco) =====================
 
 GREETING_RETURNING = "Olá, *{fname}*! Que bom falar com você novamente 😊\n\nNa última vez que conversamos, você estava com algumas dúvidas sobre *{topic}* — espero que tenha conseguido te ajudar naquele momento.\n\nAgora me conta: como posso te ajudar hoje?\n\nEscolha uma opção abaixo para agilizar seu atendimento 👇"
@@ -468,6 +542,9 @@ def load_agent_config_from_db():
     global CLOSE_INACTIVITY_MSG, CLOSE_INACTIVITY_BUTTONS
     global POLL_INTERVAL, CONFIDENCE_THRESHOLD, RESPONSE_COOLDOWN
     global GREETING_RETURNING, GREETING_RETURNING_NO_TOPIC, GREETING_NEW, GREETING_ANONYMOUS, GREETING_BUTTONS
+    global BUSINESS_HOURS_WEEKDAY_START, BUSINESS_HOURS_WEEKDAY_END
+    global BUSINESS_HOURS_SATURDAY_START, BUSINESS_HOURS_SATURDAY_END
+    global AFTER_HOURS_FIRST_MSG, AFTER_HOURS_INSIST_MSG, RETENTION_AFTER_HOURS_MSG, HUMAN_BUSY_MSG
     mapping = {
         'followup_1_delay': ('FOLLOWUP_1_DELAY', int),
         'close_delay': ('CLOSE_DELAY', int),
@@ -483,6 +560,16 @@ def load_agent_config_from_db():
         'greeting_new': ('GREETING_NEW', str),
         'greeting_anonymous': ('GREETING_ANONYMOUS', str),
         'greeting_buttons': ('GREETING_BUTTONS', list),
+        'business_hours_weekday_start': ('BUSINESS_HOURS_WEEKDAY_START', int),
+        'business_hours_weekday_end': ('BUSINESS_HOURS_WEEKDAY_END', int),
+        'business_hours_saturday_start': ('BUSINESS_HOURS_SATURDAY_START', int),
+        'business_hours_saturday_end': ('BUSINESS_HOURS_SATURDAY_END', int),
+        'after_hours_first_msg': ('AFTER_HOURS_FIRST_MSG', str),
+        'after_hours_insist_msg': ('AFTER_HOURS_INSIST_MSG', str),
+        'retention_after_hours_msg': ('RETENTION_AFTER_HOURS_MSG', str),
+        'human_busy_msg': ('HUMAN_BUSY_MSG', str),
+        'auto_dispatch_morning_queue': ('AUTO_DISPATCH_MORNING_QUEUE', bool),
+        'morning_dispatch_batch_size': ('MORNING_DISPATCH_BATCH_SIZE', int),
     }
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -508,6 +595,8 @@ def load_agent_config_from_db():
                         val = int(parsed)
                     elif typ == float:
                         val = float(parsed)
+                    elif typ == bool:
+                        val = parsed if isinstance(parsed, bool) else str(parsed).lower() in ('1', 'true', 'yes', 'sim')
                     else:
                         val = str(parsed)
                     globals()[var_name] = val
@@ -709,6 +798,8 @@ def _default_conv_state():
         'greeted': False,
         '_human_took_over': False,
         '_last_responded_ts': 0,
+        '_after_hours_escalation_count': 0,
+        '_after_hours_escalation_ts': 0,
     }
 
 def _load_conv_state(conv_id):
@@ -932,6 +1023,47 @@ def fetch_academic_data(cpf, phone=None):
         return None
 
 
+def fetch_caa_solicitacoes(cpf, limit=15):
+    """Busca solicitacoes CAA do aluno no SIAA (snapshot diario).
+    Retorna lista ordenada por data_chegada DESC (mais recentes primeiro).
+    """
+    if not cpf:
+        return []
+    import re as _re
+    clean = _re.sub(r'\D', '', str(cpf))
+    if len(clean) < 9:
+        return []
+    if len(clean) < 11:
+        clean = clean.zfill(11)
+    if len(clean) > 11:
+        clean = clean[-11:]
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT subprocesso, data_chegada, data_previsao, data_conclusao,
+                   protocolo, aging_dias, observacao,
+                   situacao_atendimento, situacao_deferimento
+            FROM caa_solicitacoes
+            WHERE cpf = %s
+            ORDER BY data_chegada DESC NULLS LAST, id DESC
+            LIMIT %s
+        """, (clean, limit))
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+        conn.close()
+        if rows:
+            open_n = sum(1 for r in rows if 'em aberto' in (r.get('situacao_deferimento') or '').lower())
+            p(f"    [CAA] {len(rows)} solicitacao(oes) | em aberto: {open_n}")
+        return rows
+    except Exception as e:
+        # Tabela pode nao existir ainda (antes do primeiro upload) - silencioso.
+        msg = str(e).lower()
+        if 'caa_solicitacoes' not in msg and 'does not exist' not in msg:
+            p(f"    [CAA] Erro lookup: {e}")
+        return []
+
+
 def _parse_course_content(content):
     """Faz parse do campo content da tabela documents (formato chave:valor separado por /)."""
     result = {}
@@ -985,6 +1117,11 @@ def fetch_course_info(course_name):
     """Busca informações do curso na tabela documents do Supabase de grades.
     Usa cache em memória para evitar chamadas repetidas."""
     if not course_name:
+        return None
+    if not GRADES_SUPABASE_URL:
+        if not getattr(fetch_course_info, '_warned', False):
+            p("  [GRADE] GRADES_SUPABASE_URL nao configurada - busca de grade desativada")
+            fetch_course_info._warned = True
         return None
     norm_name = course_name.strip().upper()
     if norm_name in _course_info_cache:
@@ -1433,6 +1570,11 @@ def tabulate_interaction(messages, profile, phone, conv_id=''):
                 'content': f"""Classifique este atendimento. Responda EXATAMENTE neste formato JSON:
 {{"tema":"ACESSO_PORTAL|FINANCEIRO|ACADEMICO|MATRICULA|DOCUMENTOS|OUTRO","subtema":"descricao curta","sentimento":"satisfeito|neutro|frustrado|irritado","resolvido":"sim|nao|parcial|escalado","nps":7}}
 
+Regras para o campo "resolvido":
+- Use "sim" APENAS se o aluno indicou claramente que o problema foi resolvido ou agradeceu/fechou satisfeito.
+- Use "parcial" se o aluno disse que vai *tentar depois*, *chegar em casa*, *voltar ao trabalho*, *não pode ficar no celular*, ou ainda não testou a solução — ainda há retorno esperado.
+- Use "nao" se ficou em aberto ou sem solução útil.
+
 Conversa:
 {conv_text}"""
             }],
@@ -1487,6 +1629,112 @@ Conversa:
 
     except Exception as e:
         p(f"    Erro tabulacao: {e}")
+
+
+_AUTO_AVAL_THANKS_NEG = (
+    'não obrigado', 'nao obrigado', 'não obrigada', 'nao obrigada',
+    'obrigado mas', 'obrigada mas', 'valeu mas', 'vlw mas',
+    'mas ainda', 'mas não', 'mas nao', 'não resolveu', 'nao resolveu',
+    'não funcionou', 'nao funcionou', 'não deu', 'nao deu',
+)
+
+# Resposta tabulada parece handoff — não marcar "correta" só por "obrigado" depois
+_AUTO_AVAL_BLOCK_RESP_PHRASES = (
+    'vou te transferir', 'vou te encaminhar', 'te conectar com',
+    'conectar com um dos nossos', 'distribuição automática pelo agente',
+    'transferir para', 'encaminhar para', 'consultor que vai',
+    'um dos nossos atendentes', 'atendente que vai',
+    'vai dar continuidade ao seu atendimento',
+    'vai poder te ajudar', 'vai poder te atender',
+    'um momento, por favor',  # mensagem típica pós-distribuição
+    'não consigo ouvir áudios', 'nao consigo ouvir audios',
+    'especializado que poderá',  # retenção / Wesley
+)
+
+
+def _resposta_agente_sounds_like_handoff(text):
+    if not text or not str(text).strip():
+        return False
+    low = str(text).lower()
+    return any(p in low for p in _AUTO_AVAL_BLOCK_RESP_PHRASES)
+
+
+def maybe_auto_avaliacao_correta_por_agradecimento(phone, conv_id, msg_text):
+    """Última tabulação pendente vira avaliacao='correta' se o aluno só agradece (só agente, sem handoff)."""
+    if not phone or not msg_text or not str(msg_text).strip():
+        return
+    st = _conv_states.get(conv_id, {}) if conv_id else {}
+    if st.get('_human_took_over'):
+        p(f"    [AUTO-AVAL] skip: handoff_state (_human_took_over)")
+        return
+    if st.get('_last_distributed_to'):
+        p(f"    [AUTO-AVAL] skip: handoff_state (_last_distributed_to={st.get('_last_distributed_to')})")
+        return
+    t = str(msg_text).strip().lower()
+    if len(t) > 160:
+        return
+    for neg in _AUTO_AVAL_THANKS_NEG:
+        if neg in t:
+            return
+    _thanks = ('obrigad', 'valeu', 'vlw', 'brigad', 'grato', 'grata', 'thanks', 'thank you', 'agradeço', 'agradece')
+    if not any(x in t for x in _thanks):
+        return
+    if t.count('?') >= 1 and len(t) > 55:
+        return
+    ph = str(phone).replace('+', '').replace(' ', '').replace('-', '')[-11:]
+    if len(ph) < 8:
+        return
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        if conv_id:
+            cur.execute(
+                """
+                SELECT id, resposta_agente FROM interaction_summary
+                WHERE phone LIKE %s
+                  AND conv_id = %s
+                  AND (avaliacao IS NULL OR trim(avaliacao) = '')
+                  AND resposta_agente IS NOT NULL AND trim(resposta_agente) <> ''
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (f'%{ph}', str(conv_id)),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT id, resposta_agente FROM interaction_summary
+                WHERE phone LIKE %s
+                  AND (avaliacao IS NULL OR trim(avaliacao) = '')
+                  AND resposta_agente IS NOT NULL AND trim(resposta_agente) <> ''
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (f'%{ph}',),
+            )
+        row = cur.fetchone()
+        if not row:
+            cur.close()
+            conn.close()
+            return
+        rid, resp = row[0], row[1]
+        if _resposta_agente_sounds_like_handoff(resp):
+            p(f"    [AUTO-AVAL] skip: handoff_text ({(resp or '')[:72]}...)")
+            cur.close()
+            conn.close()
+            return
+        cur.execute(
+            "UPDATE interaction_summary SET avaliacao = 'correta' WHERE id = %s",
+            (rid,),
+        )
+        n = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        if n:
+            p(f"    [AUTO-AVAL] Agradecimento -> interaction_summary.avaliacao=correta (conv={str(conv_id)[:12] if conv_id else '?'})")
+    except Exception as e:
+        p(f"    [AUTO-AVAL] Erro: {e}")
 
 
 def update_crm_tags(lead_id, tabulation):
@@ -1596,6 +1844,46 @@ def build_student_context(profile):
             "\n  * Bacharelado: cursos de 4-5 anos, geralmente possuem estágio obrigatório."
             "\n  * Licenciatura: cursos de 4 anos, possuem estágio obrigatório."
             "\n  NUNCA afirme com certeza se o curso tem ou não estágio — oriente a verificar a grade."
+        )
+
+    caa_list = profile.get('caa_solicitacoes') or []
+    if caa_list:
+        parts.append("\n## SOLICITACOES CAA (contexto interno - NAO revelar lista; usar APENAS se a duvida for relacionada):")
+        for r in caa_list[:8]:
+            sub = (r.get('subprocesso') or '').strip()
+            sit_at = (r.get('situacao_atendimento') or '').strip()
+            sit_def = (r.get('situacao_deferimento') or '').strip()
+            prot = (r.get('protocolo') or '').strip()
+            dc = r.get('data_chegada')
+            dconc = r.get('data_conclusao')
+            aging = r.get('aging_dias')
+            dc_s = dc.strftime('%d/%m/%Y') if hasattr(dc, 'strftime') else (str(dc)[:10] if dc else '?')
+            dconc_s = dconc.strftime('%d/%m/%Y') if hasattr(dconc, 'strftime') else (str(dconc)[:10] if dconc else '')
+            line = f"- {dc_s} | {sub} | Protocolo {prot} | {sit_at}"
+            if sit_def:
+                line += f" / {sit_def}"
+            is_open = 'em aberto' in sit_def.lower() or sit_at.upper() == 'PENDENTE'
+            if is_open:
+                if aging is not None:
+                    line += f" | {aging} dias em aberto"
+                else:
+                    line += " | em aberto"
+            elif dconc_s:
+                line += f" | concluida em {dconc_s}"
+            parts.append(line)
+            obs = (r.get('observacao') or '').strip()
+            if obs and 'em aberto' in sit_def.lower():
+                parts.append(f"   obs: {obs[:200]}")
+        parts.append(
+            "\nREGRAS PARA SOLICITACOES CAA:"
+            "\n- Use APENAS se a duvida do aluno for relacionada (historico, colacao, declaracao, trancamento, acesso plataforma, etc)."
+            "\n- Quando o assunto bater com um CAA EM ABERTO, mencione de forma natural:"
+            " 'Vi aqui que voce tem uma solicitacao de {subprocesso} em aberto desde {data_chegada}, protocolo {protocolo}. E sobre ela?'"
+            "\n- Quando o aluno perguntar 'esta liberado?' ou 'qual o status?', use situacao_deferimento + data_conclusao."
+            "\n- Se ja foi INDEFERIDO, NAO diga 'esta em aberto'; explique que foi indeferido e oriente proximos passos."
+            "\n- Se ja foi DEFERIDO e ele esta perguntando de novo, lembre que ja foi resolvido em {data_conclusao}."
+            "\n- NUNCA despeje a lista. NUNCA mencione na saudacao proativamente."
+            "\n- Cite no maximo 1 solicitacao por resposta, a mais relevante."
         )
 
     all_ci = profile.get('all_courses_info')
@@ -1877,6 +2165,45 @@ def call_llm(question, references, history, profile, memory, sentiment, is_first
 def make_button_id(name):
     """Generate a short id from button name for WhatsApp API."""
     return re.sub(r'[^a-z0-9_]', '', name.lower().replace(' ', '_').replace('/', '_'))[:24]
+
+
+def _menu_body_matches_normalised(stripped: str, menu_key: str) -> bool:
+    """Texto do aluno bate com item de menu (texto, substring ou id de botão WhatsApp)."""
+    mk = (menu_key or '').strip().lower()
+    if not mk or not stripped:
+        return False
+    if mk in stripped or stripped == mk:
+        return True
+    try:
+        if stripped == make_button_id(menu_key):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _message_has_thread_payload(m):
+    """Corpo, anexo ou clique de botão/lista — não tratar mensagem só com mídia como 'vazia'."""
+    if not isinstance(m, dict) or m.get('isInternal', False):
+        return False
+    if (m.get('body', '') or '').strip():
+        return True
+    if (m.get('text', '') or '').strip():
+        return True
+    if (m.get('title', '') or '').strip():
+        return True
+    _atts = m.get('attachments') or []
+    if isinstance(_atts, list) and len(_atts) > 0:
+        return True
+    _meta = m.get('meta', m.get('payload', m.get('sourceData', {})))
+    if isinstance(_meta, dict):
+        _inter = _meta.get('interactive', _meta)
+        if isinstance(_inter, dict):
+            for _rtype in ('button_reply', 'list_reply'):
+                _rep = _inter.get(_rtype, {})
+                if isinstance(_rep, dict) and (_rep.get('title') or '').strip():
+                    return True
+    return False
 
 
 def send_message_crm(conv_id, text, buttons=None):
@@ -2435,6 +2762,11 @@ def close_conversation_crm(conv_id, phone=''):
             p(f"  [CLOSE] Erro DCZ_MSG fallback: {e2}")
 
     p(f"  [CLOSE] Conv {conv_id[:16]} -> biz_encerr={biz_ok} | finish={fin_ok}")
+    if fin_ok:
+        update_pending_escalation_status(
+            conv_id, 'resolved',
+            note='✅ Conversa encerrada — fila Cockpit marcada como *Resolvido* automaticamente.',
+        )
     return 200 if fin_ok else 500
 
 
@@ -2550,19 +2882,1025 @@ def _now_sp():
     return utc_now + sp_offset
 
 
-def is_within_business_hours():
+def is_within_business_hours(ref_now=None):
     """Verifica se estamos dentro do horário de atendimento humano.
-    Seg-Sex: 09:00–20:00 | Sáb: 09:00–13:00 | Dom: sem atendimento.
+    Defaults: Seg-Sex BUSINESS_HOURS_WEEKDAY_START–END | Sáb BUSINESS_HOURS_SATURDAY_START–END.
+    Horários são lidos das globals (sobrescritas pelo agent_config).
     """
-    now = _now_sp()
+    now = ref_now or _now_sp()
     dow = now.weekday()  # 0=seg, 6=dom
     hour = now.hour
 
     if dow <= 4:
-        return 9 <= hour < 20
+        return BUSINESS_HOURS_WEEKDAY_START <= hour < BUSINESS_HOURS_WEEKDAY_END
     elif dow == 5:
-        return 9 <= hour < 13
+        return BUSINESS_HOURS_SATURDAY_START <= hour < BUSINESS_HOURS_SATURDAY_END
     return False
+
+
+def next_human_available_label(ref_now=None):
+    """Retorna texto humanizado do próximo horário em que o time humano está disponível.
+    Dentro do horário comercial retorna 'em breve' (humano já disponível).
+    Fora do horário: 'hoje às 9h', 'amanhã às 9h', 'na segunda-feira às 9h', etc.
+    """
+    now = ref_now or _now_sp()
+    dow = now.weekday()
+    hour = now.hour
+
+    weekday_start = BUSINESS_HOURS_WEEKDAY_START
+    weekday_end = BUSINESS_HOURS_WEEKDAY_END
+    sat_start = BUSINESS_HOURS_SATURDAY_START
+    sat_end = BUSINESS_HOURS_SATURDAY_END
+
+    if is_within_business_hours(now):
+        return "em breve"
+
+    # Antes do início no mesmo dia (seg-sex) → hoje
+    if dow <= 4 and hour < weekday_start:
+        return f"hoje às {weekday_start}h"
+    # Antes do início no sábado → hoje
+    if dow == 5 and hour < sat_start:
+        return f"hoje às {sat_start}h"
+
+    # Depois do expediente de seg-qui → amanhã (seg-sex normal)
+    if dow <= 3 and hour >= weekday_end:
+        return f"amanhã às {weekday_start}h"
+    # Sexta após expediente → sábado
+    if dow == 4 and hour >= weekday_end:
+        return f"amanhã às {sat_start}h"
+    # Sábado após expediente → segunda
+    if dow == 5 and hour >= sat_end:
+        return f"na segunda-feira às {weekday_start}h"
+    # Domingo → segunda
+    if dow == 6:
+        return f"na segunda-feira às {weekday_start}h"
+
+    return f"amanhã às {weekday_start}h"
+
+
+# Constantes de modo de atendimento
+ATTENDANCE_HUMAN_AVAILABLE = 'human_available'
+ATTENDANCE_HUMAN_UNAVAILABLE = 'human_unavailable'
+ATTENDANCE_AFTER_HOURS = 'after_hours'
+
+
+def resolve_attendance_mode(check_consultant=False):
+    """Decide o modo de atendimento atual.
+
+    - after_hours       → fora do horário global; agente NÃO distribui
+    - human_unavailable → dentro do horário, mas nenhum consultor passou nos filtros
+                          (só apurado se check_consultant=True; caso contrário tratamos como
+                          'a distribuição vai dizer'; mensagem específica é responsabilidade do caller)
+    - human_available   → dentro do horário (consultor disponível se check_consultant=True)
+    """
+    if not is_within_business_hours():
+        return ATTENDANCE_AFTER_HOURS
+    if check_consultant:
+        consultant = get_available_consultant()
+        if not consultant:
+            return ATTENDANCE_HUMAN_UNAVAILABLE
+    return ATTENDANCE_HUMAN_AVAILABLE
+
+
+def _student_first_name_prefix(conv_id):
+    """Retorna ' Fulano' (com espaço) se conseguir extrair o primeiro nome, senão ''."""
+    try:
+        st = _conv_states.get(conv_id, {})
+        prof = st.get('student_profile') or {}
+        nm = prof.get('name') or ''
+        if not nm:
+            return ''
+        first = nm.strip().split()[0]
+        return ' ' + first.capitalize() if first else ''
+    except Exception:
+        return ''
+
+
+def send_after_hours_response(conv_id, *, allow_continue=False, reason='escalate_after_hours', question=''):
+    """Envia AFTER_HOURS_FIRST_MSG ou AFTER_HOURS_INSIST_MSG conforme tier.
+    Retorna 'first' ou 'insist'.
+    Se allow_continue=True e tier == 'first', NÃO marca waiting_for_client
+    (deixa o pipeline IA seguir respondendo a dúvida em paralelo).
+
+    Se o aluno citar um consultor pelo nome ('queria falar com a Mariana'),
+    o nome é gravado em preferred_attendant para honrar quando voltar ao horário.
+    """
+    tier = _after_hours_escalation_tier(conv_id)
+    name_prefix = _student_first_name_prefix(conv_id)
+    meta_typing_on()
+    retorno = next_human_available_label()
+    preferred = detect_preferred_attendant(question or '')
+    if preferred:
+        p(f"  [AFTER-HOURS] Aluno citou consultor: {preferred} -> registrar preferred_attendant")
+    if tier == 'first':
+        msg = AFTER_HOURS_FIRST_MSG.format(name=name_prefix)
+        send_and_track(conv_id, msg)
+        log_to_db(conv_id, question or '', msg, 1.0, 'after_hours_first')
+        record_pending_escalation(conv_id, reason, tier='first', retorno_label=retorno,
+                                  question=question, preferred_attendant=preferred)
+        if not allow_continue:
+            st = _conv_states.setdefault(conv_id, _default_conv_state())
+            st['waiting_for_client'] = True
+            st['inactivity_start'] = time.time()
+            st['_last_responded_ts'] = time.time()
+    else:
+        msg = AFTER_HOURS_INSIST_MSG.format(name=name_prefix, retorno_label=retorno)
+        send_and_track(conv_id, msg)
+        log_to_db(conv_id, question or '', msg, 1.0, 'after_hours_insist')
+        record_pending_escalation(conv_id, reason, tier='insist', retorno_label=retorno,
+                                  question=question, preferred_attendant=preferred)
+        st = _conv_states.setdefault(conv_id, _default_conv_state())
+        st['waiting_for_client'] = True
+        st['inactivity_start'] = time.time()
+        st['_last_responded_ts'] = time.time()
+    return tier
+
+
+def send_media_only_response(conv_id, media_type='áudio', question_label=None):
+    """Resposta padrão para mídia sem texto (áudio puro, imagem sem caption etc).
+    - Dentro do horário: avisa que IA não processa mídia e *transfere para humano agora*.
+    - Fora do horário: registra na fila Cockpit (pending_escalation) com retorno amanhã.
+    Em ambos casos oferece ao aluno seguir por texto pra resposta imediata.
+    """
+    nome = _student_first_name_prefix(conv_id)
+    within = is_within_business_hours()
+
+    if media_type == 'áudio':
+        recebi = 'seu áudio 🎙️'
+        artigo = 'do seu áudio'
+    elif media_type == 'imagem':
+        recebi = 'sua imagem 📷'
+        artigo = 'da imagem'
+    elif media_type == 'vídeo':
+        recebi = 'seu vídeo 🎬'
+        artigo = 'do vídeo'
+    else:
+        recebi = f'sua {media_type} 📎'
+        artigo = f'do(a) {media_type}'
+
+    if within:
+        msg = (
+            f"Oii{nome}! Recebi {recebi}\n\n"
+            f"Como sou um assistente virtual de IA, *não consigo verificar com total certeza* o conteúdo {artigo}.\n\n"
+            f"Vou te *transferir agora* para um(a) consultor(a) humano(a) que vai te ouvir e te ajudar 🙌\n\n"
+            f"Se preferir, também pode me enviar *por texto* — aí eu já adianto a resposta!"
+        )
+        meta_typing_on()
+        send_and_track(conv_id, msg)
+        log_to_db(conv_id, question_label or f'[{media_type}]', msg, 1.0, f'media_only_{media_type}')
+        try:
+            distribute_to_attendant(conv_id, reason=f'Mídia ({media_type}) - IA não processa conteúdo')
+        except Exception as _e_d:
+            p(f"  [MEDIA-ONLY] falha distribuição: {_e_d}")
+    else:
+        retorno = next_human_available_label()
+        msg = (
+            f"Oii{nome}! Recebi {recebi}\n\n"
+            f"Como sou um assistente virtual de IA, *não consigo verificar com total certeza* o conteúdo {artigo}.\n\n"
+            f"Vou registrar aqui para que nosso *time humano* te retorne *{retorno}*.\n\n"
+            f"Mas se preferir, me envie *por texto* agora mesmo o que precisa que eu já te ajudo na hora! 😊"
+        )
+        meta_typing_on()
+        send_and_track(conv_id, msg)
+        log_to_db(conv_id, question_label or f'[{media_type}]', msg, 1.0, f'media_only_{media_type}')
+        try:
+            record_pending_escalation(conv_id, reason=f'media_only_{media_type}',
+                                      tier='first', retorno_label=retorno,
+                                      question=question_label or f'[{media_type} sem texto]')
+        except Exception as _e_pe:
+            p(f"  [MEDIA-ONLY] falha pending_escalation: {_e_pe}")
+
+    st = _conv_states.setdefault(conv_id, _default_conv_state())
+    st['waiting_for_client'] = True
+    st['inactivity_start'] = time.time()
+    st['_last_responded_ts'] = time.time()
+
+
+def record_pending_escalation(conv_id, reason, tier='insist', retorno_label=None, question='',
+                              preferred_attendant=None):
+    """Registra na fila Cockpit alunos que precisam de retorno humano fora do horário.
+
+    preferred_attendant: nome do consultor prometido ao aluno (ex: 'Wesley').
+    Quando o aluno voltar dentro do horário, o agente honra essa promessa.
+    """
+    try:
+        st = _conv_states.get(conv_id) or {}
+        phone = (_current_phone or st.get('phone') or '').strip()
+        prof = st.get('student_profile') or {}
+        name = (prof.get('name') or '').strip()
+        if not retorno_label:
+            retorno_label = next_human_available_label()
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS pending_escalation (
+                id SERIAL PRIMARY KEY,
+                conv_id VARCHAR(80) NOT NULL,
+                phone VARCHAR(32),
+                student_name VARCHAR(255),
+                reason VARCHAR(64) NOT NULL,
+                tier VARCHAR(16) NOT NULL DEFAULT 'insist',
+                retorno_label VARCHAR(128),
+                pergunta TEXT,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW(),
+                resolved_at TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            ALTER TABLE pending_escalation
+            ADD COLUMN IF NOT EXISTS preferred_attendant VARCHAR(64)
+        """)
+        cur.execute("""
+            UPDATE pending_escalation SET status='superseded', updated_at=NOW()
+            WHERE conv_id=%s AND status IN ('pending', 'in_progress')
+        """, (conv_id,))
+        cur.execute("""
+            INSERT INTO pending_escalation
+                (conv_id, phone, student_name, reason, tier, retorno_label, pergunta, status, preferred_attendant)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s)
+        """, (conv_id, phone, name, reason, tier, retorno_label, (question or '')[:500],
+              (preferred_attendant or None)))
+        conn.commit()
+        cur.close()
+        conn.close()
+        tag = f' preferred={preferred_attendant}' if preferred_attendant else ''
+        p(f"  [AFTER-HOURS] Fila registrada: conv={conv_id[:12]} reason={reason} tier={tier}{tag}")
+    except Exception as e_pe:
+        p(f"  [AFTER-HOURS] Erro ao registrar fila: {e_pe}")
+
+
+def update_pending_escalation_status(conv_id, status, note=''):
+    """Atualiza status da fila Cockpit (pending / in_progress / resolved / failed)."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        resolved_clause = ", resolved_at = NOW()" if status == 'resolved' else ""
+        cur.execute(
+            f"""UPDATE pending_escalation SET status = %s, updated_at = NOW(){resolved_clause}
+                WHERE conv_id = %s AND status IN ('pending', 'in_progress', 'failed')""",
+            (status, conv_id),
+        )
+        if note and cur.rowcount:
+            try:
+                requests.post(
+                    f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                    headers=H,
+                    json={'body': note, 'isInternal': True},
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e_up:
+        p(f"  [FILA] Erro ao atualizar status: {e_up}")
+
+
+def _fetch_pending_for_auto_dispatch(limit=25):
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT id, conv_id, phone, student_name, reason, tier, retorno_label, pergunta, status, created_at
+            FROM pending_escalation
+            WHERE status = 'pending'
+            ORDER BY CASE tier WHEN 'insist' THEN 0 WHEN 'first' THEN 1 ELSE 2 END, created_at ASC
+            LIMIT %s
+        """, (limit,))
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return rows
+    except Exception as e_f:
+        p(f"  [FILA] Erro ao listar pendentes: {e_f}")
+        return []
+
+
+def _morning_queue_last_run_date():
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM agent_config WHERE key = 'morning_queue_last_run'")
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return (row[0] or '').strip() if row else ''
+    except Exception:
+        return ''
+
+
+def _set_morning_queue_last_run(date_str):
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO agent_config (key, value, updated_at)
+            VALUES ('morning_queue_last_run', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """, (date_str,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
+
+def process_pending_escalation_auto_dispatch():
+    """Distribui fila noturna no horário comercial.
+    - 1ª execução do dia (após abertura): lote maior (insistência primeiro)
+    - Depois: retentativas a cada MORNING_DISPATCH_RETRY_COOLDOWN_S com lote menor
+    """
+    global student_profile, _current_phone, _last_pending_dispatch_ts
+
+    if not AUTO_DISPATCH_MORNING_QUEUE:
+        return
+    if not is_within_business_hours():
+        return
+
+    now = _now_sp()
+    today = now.strftime('%Y-%m-%d')
+    last_run = _morning_queue_last_run_date()
+    is_morning_burst = (last_run != today and now.hour >= BUSINESS_HOURS_WEEKDAY_START)
+
+    if not is_morning_burst:
+        if time.time() - _last_pending_dispatch_ts < MORNING_DISPATCH_RETRY_COOLDOWN_S:
+            return
+        limit = MORNING_DISPATCH_RETRY_BATCH
+        label = 'retry'
+    else:
+        limit = MORNING_DISPATCH_BATCH_SIZE
+        label = 'morning_burst'
+        p(f"  [FILA] ☀️ Início do expediente — processando fila noturna (até {limit} registros)")
+
+    rows = _fetch_pending_for_auto_dispatch(limit)
+    if not rows:
+        if is_morning_burst:
+            _set_morning_queue_last_run(today)
+        _last_pending_dispatch_ts = time.time()
+        return
+
+    dispatched = 0
+    failed = 0
+    for row in rows:
+        conv_id = row.get('conv_id') or ''
+        if not conv_id:
+            continue
+        phone = (row.get('phone') or '').strip()
+        name = (row.get('student_name') or '').strip()
+        _current_phone = phone
+        first = name.split()[0] if name else ''
+        student_profile = {
+            'name': name,
+            'first_name': first,
+            'phone': phone,
+        }
+        pergunta = (row.get('pergunta') or '')[:200]
+        reason = (f"Retorno automático fila noturna — {row.get('reason', '')}"
+                  + (f' | {pergunta}' if pergunta else ''))
+        p(f"  [FILA] Auto-distribuir conv={conv_id[:12]} tier={row.get('tier')} ({label})")
+        ok = distribute_to_attendant(conv_id, reason=reason)
+        if ok:
+            update_pending_escalation_status(
+                conv_id, 'in_progress',
+                note=f'☀️ *Fila noturna* — distribuído automaticamente às {now.strftime("%H:%M")}.',
+            )
+            dispatched += 1
+        else:
+            update_pending_escalation_status(conv_id, 'pending')
+            failed += 1
+            p(f"  [FILA] Mantido pendente (sem consultor ou falha na distribuição)")
+
+    p(f"  [FILA] Lote {label}: distribuídos={dispatched} ainda_pendentes={failed}")
+    if is_morning_burst:
+        _set_morning_queue_last_run(today)
+    _last_pending_dispatch_ts = time.time()
+
+
+# ===================== AFTER-HOURS RESCUE =====================
+_AFTER_HOURS_RESCUE_RECENT = {}  # conv_id -> last_rescue_ts (memória)
+AFTER_HOURS_RESCUE_AGE_MIN = 10
+AFTER_HOURS_RESCUE_COOLDOWN_S = 6 * 3600  # não reenvia para mesma conv em 6h
+
+
+def _was_after_hours_msg_recently_sent(msgs):
+    """Detecta se alguma das mensagens recentes do bot já é AFTER_HOURS (evita duplicar)."""
+    fps = ('nosso time de atendimento humano está fora do horário',
+           'fora do nosso horário de atendimento',
+           'nosso time retorna o atendimento')
+    for m in msgs[:6]:
+        if m.get('received', True):
+            continue
+        body = (m.get('body', '') or '').lower()
+        if any(fp in body for fp in fps):
+            return True
+    return False
+
+
+def process_after_hours_rescue():
+    """Fora do expediente, garante resposta ao aluno mesmo quando há atendente
+    'fantasma' atribuído à conversa (humano off, não vai responder).
+
+    - Só roda fora do expediente.
+    - Pega conversas open com lastReceived > lastSended há > AFTER_HOURS_RESCUE_AGE_MIN min.
+    - Inclui conversas com attendant (porque a noite ninguém responde).
+    - Envia AFTER_HOURS_FIRST_MSG (uma vez, com cooldown de 6h por conv).
+    """
+    global student_profile, _current_phone
+
+    if is_within_business_hours():
+        return
+    try:
+        r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
+                         params={'limit': 200, 'status': 'open'}, timeout=30)
+        if r.status_code != 200:
+            return
+        data = r.json()
+        convs = data.get('data', data) if isinstance(data, dict) else data
+    except Exception as e:
+        p(f"  [AH-RESCUE] erro lista: {e}")
+        return
+
+    if not isinstance(convs, list):
+        return
+
+    now_ts = time.time()
+    rescued = 0
+    for c in convs:
+        try:
+            cid = c.get('id', '')
+            if not cid:
+                continue
+            inst = c.get('instance', {}) or {}
+            iid = inst.get('id', '') if isinstance(inst, dict) else str(inst)
+            if iid != INSTANCE_ACADEMICO_ID:
+                continue
+            statuses = c.get('statuses', []) or []
+            if 'finished' in statuses:
+                continue
+            recv = c.get('lastReceivedMessageDate', '') or ''
+            sent = c.get('lastSendedMessageDate', '') or ''
+            if not recv or (sent and recv <= sent):
+                continue
+            try:
+                from datetime import datetime as _dt
+                dt_recv = _dt.fromisoformat(str(recv).replace('Z', '+00:00'))
+                age_min = (time.time() - dt_recv.timestamp()) / 60
+            except Exception:
+                continue
+            if age_min < AFTER_HOURS_RESCUE_AGE_MIN or age_min > 24 * 60:
+                continue
+            last_done = _AFTER_HOURS_RESCUE_RECENT.get(cid, 0)
+            if last_done and (now_ts - last_done) < AFTER_HOURS_RESCUE_COOLDOWN_S:
+                continue
+            ct = c.get('contact', {}) or {}
+            phone = (ct.get('phoneNumber', '') or ct.get('contactId', '') or '').replace('+', '').replace(' ', '')
+            if phone.startswith('55') and len(phone) > 11:
+                phone = phone[2:]
+            name = (ct.get('name', '') or '').strip()
+            first = name.split()[0] if name else ''
+            try:
+                msgs = get_conversation_messages_api(cid, limit=8)
+            except Exception:
+                msgs = []
+            if _was_after_hours_msg_recently_sent(msgs):
+                _AFTER_HOURS_RESCUE_RECENT[cid] = now_ts
+                continue
+
+            _current_phone = phone
+            student_profile = {'name': name, 'first_name': first, 'phone': phone}
+            _conv_states.setdefault(cid, _default_conv_state())['phone'] = phone
+            if name:
+                _conv_states[cid]['student_profile'] = {'name': name, 'first_name': first}
+
+            try:
+                send_after_hours_response(cid, allow_continue=False,
+                                          reason='after_hours_rescue',
+                                          question='[varredura noturna]')
+                _AFTER_HOURS_RESCUE_RECENT[cid] = now_ts
+                rescued += 1
+                p(f"  [AH-RESCUE] Resposta enviada conv={cid[:12]} ...{phone[-4:]} ({age_min:.0f}min)")
+            except Exception as e_sah:
+                p(f"  [AH-RESCUE] falha envio {cid[:12]}: {e_sah}")
+        except Exception as e_one:
+            p(f"  [AH-RESCUE] erro conv {c.get('id','?')[:12]}: {e_one}")
+
+    if rescued:
+        p(f"  [AH-RESCUE] Total atendidos: {rescued}")
+
+
+# ===================== IN-HOURS RESCUE (orfas dentro do horario) =====================
+_IN_HOURS_RESCUE_RECENT = {}  # conv_id -> last_rescue_ts
+IN_HOURS_RESCUE_AGE_MIN = 10
+IN_HOURS_RESCUE_MAX_AGE_MIN = 6 * 60  # ignora alem disso (provavelmente foi resolvido manualmente)
+IN_HOURS_RESCUE_COOLDOWN_S = 30 * 60  # nao re-resgata mesma conv em 30min
+
+
+def process_in_hours_rescue():
+    """Dentro do horario, resgata conversas orfas:
+    - cliente mandou msg sem resposta ha >= IN_HOURS_RESCUE_AGE_MIN min
+    - sem atendentes atribuidos
+    - dentro do horario comercial
+    Envia msg humanizada de desculpa e atribui ao consultor com menor fila.
+    """
+    global student_profile, _current_phone
+    if not is_within_business_hours():
+        return
+    try:
+        r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
+                         params={'limit': 300, 'status': 'open'}, timeout=30)
+        if r.status_code != 200:
+            return
+        data = r.json()
+        convs = data.get('data', data) if isinstance(data, dict) else data
+    except Exception as e:
+        p(f"  [IN-HOURS-RESCUE] erro lista: {e}")
+        return
+
+    if not isinstance(convs, list):
+        return
+
+    now_ts = time.time()
+    rescued = 0
+    for c in convs:
+        try:
+            cid = c.get('id', '')
+            if not cid:
+                continue
+            inst = c.get('instance', {}) or {}
+            iid = inst.get('id', '') if isinstance(inst, dict) else str(inst)
+            if iid != INSTANCE_ACADEMICO_ID:
+                continue
+            statuses = c.get('statuses', []) or []
+            if 'finished' in statuses:
+                continue
+            atts = c.get('attendants', []) or []
+            if atts:
+                continue
+            recv = c.get('lastReceivedMessageDate', '') or ''
+            sent = c.get('lastSendedMessageDate', '') or ''
+            if not recv:
+                continue
+            if sent and recv <= sent:
+                continue
+            try:
+                from datetime import datetime as _dt
+                dt_recv = _dt.fromisoformat(str(recv).replace('Z', '+00:00'))
+                age_min = (time.time() - dt_recv.timestamp()) / 60
+            except Exception:
+                continue
+            if age_min < IN_HOURS_RESCUE_AGE_MIN or age_min > IN_HOURS_RESCUE_MAX_AGE_MIN:
+                continue
+            last_done = _IN_HOURS_RESCUE_RECENT.get(cid, 0)
+            if last_done and (now_ts - last_done) < IN_HOURS_RESCUE_COOLDOWN_S:
+                continue
+
+            ct = c.get('contact', {}) or {}
+            phone = (ct.get('phoneNumber', '') or ct.get('contactId', '') or '').replace('+', '').replace(' ', '')
+            if phone.startswith('55') and len(phone) > 11:
+                phone = phone[2:]
+            name = (ct.get('name', '') or '').strip()
+            first = name.split()[0] if name else ''
+
+            consultant = get_available_consultant()
+            if not consultant:
+                p(f"  [IN-HOURS-RESCUE] sem consultor disponivel - registrando pending")
+                try:
+                    _current_phone = phone
+                    student_profile = {'name': name, 'first_name': first, 'phone': phone}
+                    _conv_states.setdefault(cid, _default_conv_state())['phone'] = phone
+                    record_pending_escalation(
+                        cid, reason='human_unavailable',
+                        tier='pending',
+                        retorno_label='assim que houver consultor disponivel',
+                        question='[varredura interna - orfa sem consultor]',
+                    )
+                except Exception as e_pe:
+                    p(f"  [IN-HOURS-RESCUE] erro pending: {e_pe}")
+                _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                continue
+
+            consultant_name = consultant.get('nome', '')
+            consultant_first = consultant_name.split()[0] if consultant_name else ''
+            student_first_part = f" {first}" if first else ''
+            apology = (
+                f"Oii{student_first_part}! Desculpa a demora pra te responder 🙏\n\n"
+                f"Vou te conectar agora com o(a) *{consultant_first}*, que vai dar continuidade ao seu atendimento. "
+                f"Em pouquinho ele(a) assume aqui 😊"
+            )
+            try:
+                meta_typing_on()
+                send_and_track(cid, apology)
+            except Exception as e_msg:
+                p(f"  [IN-HOURS-RESCUE] falha apology: {e_msg}")
+
+            try:
+                lead_id = ''
+                if name and phone:
+                    prof = identify_student(phone)
+                    if prof and prof.get('lead_id'):
+                        lead_id = prof['lead_id']
+                        if prof.get('business_id'):
+                            _dcz_transfer_business(prof['business_id'], consultant_name)
+                if lead_id:
+                    _dcz_transfer_lead(lead_id, consultant_name)
+                _dcz_transfer_chat(cid, consultant_name)
+                _supabase_increment_fila(consultant.get('id', ''), int(consultant.get('fila', 0)))
+            except Exception as e_t:
+                p(f"  [IN-HOURS-RESCUE] erro transferencia: {e_t}")
+
+            try:
+                note = (
+                    f"🤝 *Resgate automatico* — aluno ficou sem resposta por {int(age_min)}min sem atendente. "
+                    f"Conversa atribuida ao(a) {consultant_first} (menor fila). "
+                    f"IA enviou desculpas no chat."
+                )
+                requests.post(
+                    f'{DCZ_API}/api/v1/conversations/{cid}/messages',
+                    headers=H, json={'body': note, 'isInternal': True}, timeout=10,
+                )
+            except Exception:
+                pass
+
+            try:
+                update_pending_escalation_status(
+                    cid, 'resolved',
+                    note=f'Resgate automatico - atribuido a {consultant_first}',
+                )
+            except Exception:
+                pass
+
+            _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+            rescued += 1
+            p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} ({int(age_min)}min) -> {consultant_first}")
+        except Exception as e_one:
+            p(f"  [IN-HOURS-RESCUE] erro conv {c.get('id','?')[:12]}: {e_one}")
+
+    if rescued:
+        p(f"  [IN-HOURS-RESCUE] Total resgatadas: {rescued}")
+
+
+# ===================== POST-CLOSE RESCUE (reabertura apos encerramento) =====================
+_POST_CLOSE_RESCUE_RECENT = {}  # conv_id -> last_action_ts
+POST_CLOSE_RESCUE_AGE_MIN = 5
+POST_CLOSE_RESCUE_MAX_AGE_MIN = 60  # apos 1h, vira problema do in_hours_rescue normal
+POST_CLOSE_RESCUE_COOLDOWN_S = 30 * 60
+
+# Padroes que indicam que houve encerramento no historico recente
+_CLOSE_EVENT_PATTERNS = (
+    'finalizou o atendimento',
+    'atendimento foi encerrado',
+    'este atendimento foi encerrado',
+    'atendimento foi finalizado',
+    'este atendimento foi finalizado',
+    'se quiser retornar para conversar',
+    'encerrando esta conversa',
+)
+
+# Padroes de despedida (msg do aluno apos encerramento que NAO requer atendente)
+_FAREWELL_KEYWORDS = (
+    'obrigad', 'valeu', 'vlw', 'agradeco', 'agradeço',
+    'tchau', 'ate mais', 'até mais', 'ate logo', 'até logo',
+    'beleza', 'blz', 'ok', 'okay', 'okey', 'show',
+    'perfeito', 'otimo', 'ótimo', 'maravilha', 'tranquilo',
+    'entendido', 'ciente', 'bom dia', 'boa tarde', 'boa noite',
+    'nada', 'so isso', 'só isso', 'era isso',
+)
+_FAREWELL_EMOJIS = ('👍', '🙏', '❤', '❤️', '😊', '🙌', '👏', '✅', '😉', '😘')
+
+
+def _is_farewell_message(text):
+    """Detecta se a mensagem do aluno e apenas uma despedida/agradecimento."""
+    if not text:
+        return False
+    import unicodedata
+    t = text.strip().lower()
+    if len(t) > 80:
+        return False
+    t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
+                     if unicodedata.category(c) != 'Mn')
+    if any(emo in text for emo in _FAREWELL_EMOJIS) and len(t) <= 30:
+        return True
+    for kw in _FAREWELL_KEYWORDS:
+        if kw in t_norm:
+            remaining = t_norm
+            for kw2 in _FAREWELL_KEYWORDS:
+                remaining = remaining.replace(kw2, ' ')
+            remaining = ''.join(c if c.isalnum() else ' ' for c in remaining)
+            words = [w for w in remaining.split() if len(w) > 2]
+            if len(words) <= 2:
+                return True
+    return False
+
+
+def _extract_last_attendant_from_history(msgs):
+    """Procura o nome do atendente que encerrou no historico recente.
+    Padrao: 'Camila Ferreira finalizou o atendimento'.
+    Retorna primeiro nome em lowercase ou None.
+    """
+    if not msgs:
+        return None
+    import re
+    for m in reversed(msgs):
+        body = (m.get('body') or m.get('text') or '').strip()
+        if not body:
+            continue
+        match = re.match(r'^([A-Z][a-zA-ZÀ-ÿ]+)(?:\s+[A-Z][a-zA-ZÀ-ÿ]+)*\s+finalizou\s+o\s+atendimento',
+                         body)
+        if match:
+            return match.group(1).strip().lower()
+    return None
+
+
+def _had_close_event_recently(msgs, max_hours=2):
+    """True se houve evento de encerramento nas ultimas N horas do historico."""
+    if not msgs:
+        return False
+    from datetime import datetime as _dt
+    now_ts = time.time()
+    for m in msgs:
+        body = (m.get('body') or m.get('text') or '').strip().lower()
+        if not body:
+            continue
+        if any(p in body for p in _CLOSE_EVENT_PATTERNS):
+            ts_str = m.get('createdAt') or m.get('timestamp') or ''
+            try:
+                if ts_str:
+                    dt = _dt.fromisoformat(str(ts_str).replace('Z', '+00:00'))
+                    age_h = (now_ts - dt.timestamp()) / 3600
+                    if age_h > max_hours:
+                        continue
+            except Exception:
+                pass
+            return True
+    return False
+
+
+def _last_received_message(msgs):
+    """Retorna a ultima mensagem RECEBIDA do aluno (received=true)."""
+    if not msgs:
+        return None
+    for m in reversed(msgs):
+        if m.get('received', False):
+            body = (m.get('body') or m.get('text') or '').strip()
+            if body and not body.startswith('[') and len(body) > 0:
+                return m
+    return None
+
+
+def process_post_close_rescue():
+    """Detecta conversas reabertas apos encerramento humano e age conforme conteudo:
+    - despedida -> bot responde curto + finaliza novamente
+    - duvida real -> tenta re-atribuir ao mesmo atendente (sticky); senao distribui
+    Roda apenas dentro do horario comercial.
+    """
+    global student_profile, _current_phone
+    if not is_within_business_hours():
+        return
+    try:
+        r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
+                         params={'limit': 200, 'status': 'open'}, timeout=30)
+        if r.status_code != 200:
+            return
+        data = r.json()
+        convs = data.get('data', data) if isinstance(data, dict) else data
+    except Exception as e:
+        p(f"  [POST-CLOSE-RESCUE] erro lista: {e}")
+        return
+
+    if not isinstance(convs, list):
+        return
+
+    now_ts = time.time()
+    rescued = 0
+    for c in convs:
+        try:
+            cid = c.get('id', '')
+            if not cid:
+                continue
+            inst = c.get('instance', {}) or {}
+            iid = inst.get('id', '') if isinstance(inst, dict) else str(inst)
+            if iid != INSTANCE_ACADEMICO_ID:
+                continue
+            statuses = c.get('statuses', []) or []
+            if 'finished' in statuses:
+                continue
+            atts = c.get('attendants', []) or []
+            if atts:
+                continue
+            recv = c.get('lastReceivedMessageDate', '') or ''
+            sent = c.get('lastSendedMessageDate', '') or ''
+            if not recv:
+                continue
+            if sent and recv <= sent:
+                continue
+            try:
+                from datetime import datetime as _dt
+                dt_recv = _dt.fromisoformat(str(recv).replace('Z', '+00:00'))
+                age_min = (time.time() - dt_recv.timestamp()) / 60
+            except Exception:
+                continue
+            if age_min < POST_CLOSE_RESCUE_AGE_MIN or age_min > POST_CLOSE_RESCUE_MAX_AGE_MIN:
+                continue
+            last_done = _POST_CLOSE_RESCUE_RECENT.get(cid, 0)
+            if last_done and (now_ts - last_done) < POST_CLOSE_RESCUE_COOLDOWN_S:
+                continue
+
+            try:
+                msgs = get_conversation_messages_api(cid, limit=15)
+            except Exception:
+                msgs = []
+            if not msgs:
+                continue
+            if not _had_close_event_recently(msgs, max_hours=2):
+                continue
+
+            last_user_msg = _last_received_message(msgs)
+            if not last_user_msg:
+                continue
+            user_text = (last_user_msg.get('body') or last_user_msg.get('text') or '').strip()
+            if not user_text:
+                continue
+
+            ct = c.get('contact', {}) or {}
+            phone = (ct.get('phoneNumber', '') or ct.get('contactId', '') or '').replace('+', '').replace(' ', '')
+            if phone.startswith('55') and len(phone) > 11:
+                phone = phone[2:]
+            name = (ct.get('name', '') or '').strip()
+            first = name.split()[0] if name else ''
+            first_part = f' *{first}*' if first else ''
+
+            if _is_farewell_message(user_text):
+                farewell_reply = (
+                    f"Obrigado pelo contato{first_part}! 🙏\n\n"
+                    f"Estamos sempre por aqui — se precisar de qualquer outra coisa, "
+                    f"é só me chamar de novo 😊"
+                )
+                try:
+                    meta_typing_on()
+                    send_and_track(cid, farewell_reply)
+                except Exception as e_msg:
+                    p(f"  [POST-CLOSE-RESCUE] falha farewell: {e_msg}")
+
+                try:
+                    note = (
+                        f"🙏 *Despedida automatica* — aluno respondeu '{user_text[:50]}' "
+                        f"apos encerramento. IA agradeceu e finalizou novamente."
+                    )
+                    requests.post(
+                        f'{DCZ_API}/api/v1/conversations/{cid}/messages',
+                        headers=H, json={'body': note, 'isInternal': True}, timeout=10,
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    close_conversation_crm(cid, phone=phone)
+                except Exception as e_c:
+                    p(f"  [POST-CLOSE-RESCUE] erro close: {e_c}")
+
+                _POST_CLOSE_RESCUE_RECENT[cid] = now_ts
+                rescued += 1
+                p(f"  [POST-CLOSE-RESCUE] DESPEDIDA conv={cid[:12]} ...{phone[-4:]} ({int(age_min)}min) '{user_text[:40]}' -> finalizada")
+                continue
+
+            last_attendant_first = _extract_last_attendant_from_history(msgs)
+            consultant_used = None
+
+            if last_attendant_first and is_attendant_active_now(last_attendant_first):
+                target = last_attendant_first.capitalize()
+                msg = (
+                    f"Oii{first_part}! Vi que voltou para falar com a gente 😊\n\n"
+                    f"Vou pedir para o(a) *{target}*, que estava te atendendo, "
+                    f"dar continuidade ao seu atendimento. Em pouquinho ele(a) assume aqui."
+                )
+                try:
+                    meta_typing_on()
+                    send_and_track(cid, msg)
+                except Exception:
+                    pass
+
+                try:
+                    prof = identify_student(phone) if phone else None
+                    lead_id = (prof or {}).get('lead_id', '')
+                    biz_id = (prof or {}).get('business_id', '')
+                    if lead_id:
+                        _dcz_transfer_lead(lead_id, target)
+                    if biz_id:
+                        _dcz_transfer_business(biz_id, target)
+                    _dcz_transfer_chat(cid, target)
+                except Exception as e_t:
+                    p(f"  [POST-CLOSE-RESCUE] erro transfer sticky: {e_t}")
+
+                try:
+                    note = (
+                        f"🔁 *Sticky last attendant* — aluno voltou apos encerramento. "
+                        f"Re-atribuido a {target} (mesma pessoa que encerrou)."
+                    )
+                    requests.post(
+                        f'{DCZ_API}/api/v1/conversations/{cid}/messages',
+                        headers=H, json={'body': note, 'isInternal': True}, timeout=10,
+                    )
+                except Exception:
+                    pass
+
+                consultant_used = target
+            else:
+                consultant = get_available_consultant()
+                if not consultant:
+                    p(f"  [POST-CLOSE-RESCUE] sem consultor - registra pending")
+                    try:
+                        _current_phone = phone
+                        student_profile = {'name': name, 'first_name': first, 'phone': phone}
+                        _conv_states.setdefault(cid, _default_conv_state())['phone'] = phone
+                        record_pending_escalation(
+                            cid, reason='human_unavailable',
+                            tier='pending',
+                            retorno_label='assim que houver consultor disponivel',
+                            question=f'[post-close - {user_text[:60]}]',
+                        )
+                    except Exception as e_pe:
+                        p(f"  [POST-CLOSE-RESCUE] erro pending: {e_pe}")
+                    _POST_CLOSE_RESCUE_RECENT[cid] = now_ts
+                    continue
+
+                consultant_name = consultant.get('nome', '')
+                consultant_first = consultant_name.split()[0] if consultant_name else ''
+                msg = (
+                    f"Oii{first_part}! Vi que voltou para falar com a gente 😊\n\n"
+                    f"Vou te conectar com o(a) *{consultant_first}*, que vai dar continuidade "
+                    f"ao seu atendimento. Em pouquinho ele(a) assume aqui."
+                )
+                try:
+                    meta_typing_on()
+                    send_and_track(cid, msg)
+                except Exception:
+                    pass
+
+                try:
+                    prof = identify_student(phone) if phone else None
+                    lead_id = (prof or {}).get('lead_id', '')
+                    biz_id = (prof or {}).get('business_id', '')
+                    if lead_id:
+                        _dcz_transfer_lead(lead_id, consultant_name)
+                    if biz_id:
+                        _dcz_transfer_business(biz_id, consultant_name)
+                    _dcz_transfer_chat(cid, consultant_name)
+                    _supabase_increment_fila(consultant.get('id', ''), int(consultant.get('fila', 0)))
+                except Exception as e_t:
+                    p(f"  [POST-CLOSE-RESCUE] erro transferencia: {e_t}")
+
+                try:
+                    note = (
+                        f"🔁 *Resgate pos-encerramento* — aluno voltou com nova duvida apos "
+                        f"encerramento. Atendente anterior nao disponivel. "
+                        f"Atribuido a {consultant_first} (menor fila)."
+                    )
+                    requests.post(
+                        f'{DCZ_API}/api/v1/conversations/{cid}/messages',
+                        headers=H, json={'body': note, 'isInternal': True}, timeout=10,
+                    )
+                except Exception:
+                    pass
+
+                consultant_used = consultant_first
+
+            try:
+                update_pending_escalation_status(
+                    cid, 'resolved',
+                    note=f'Resgate pos-encerramento - {consultant_used}',
+                )
+            except Exception:
+                pass
+
+            _POST_CLOSE_RESCUE_RECENT[cid] = now_ts
+            rescued += 1
+            p(f"  [POST-CLOSE-RESCUE] REABERTURA conv={cid[:12]} ...{phone[-4:]} ({int(age_min)}min) -> {consultant_used}")
+        except Exception as e_one:
+            p(f"  [POST-CLOSE-RESCUE] erro conv {c.get('id','?')[:12]}: {e_one}")
+
+    if rescued:
+        p(f"  [POST-CLOSE-RESCUE] Total tratadas: {rescued}")
+
+
+def _after_hours_escalation_tier(conv_id):
+    """Retorna 'first' ou 'insist' baseado em quantos pedidos de atendente
+    o aluno fez dentro da janela AFTER_HOURS_INSIST_WINDOW_MIN.
+    """
+    st = _conv_states.setdefault(conv_id, _default_conv_state())
+    last_ts = st.get('_after_hours_escalation_ts') or 0
+    count = int(st.get('_after_hours_escalation_count') or 0)
+    now_ts = time.time()
+    window_s = AFTER_HOURS_INSIST_WINDOW_MIN * 60
+
+    if last_ts and (now_ts - last_ts) > window_s:
+        count = 0
+    count += 1
+    st['_after_hours_escalation_ts'] = now_ts
+    st['_after_hours_escalation_count'] = count
+    return 'first' if count == 1 else 'insist'
 
 
 def _em_intervalo(hora_str, ante_min, duracao_min, ref_now):
@@ -2885,26 +4223,42 @@ def _supabase_increment_fila(consultant_id, current_fila):
         return False
 
 
-def distribute_to_attendant(conv_id, reason=''):
+def distribute_to_attendant(conv_id, reason='', silent_after_hours=True):
     """Distribui o aluno para um atendente humano real.
     1) Verifica horário  2) Escolhe consultor  3) Transfere lead/negócio/chat
     4) Atualiza fila no Supabase  5) Envia mensagem ao aluno.
-    Retorna True se distribuiu, False se não conseguiu.
+
+    Retorna True se distribuiu de fato; False caso contrário.
+    Fora do horário NÃO envia mensagem nem marca _human_took_over —
+    o caller é responsável por exibir AFTER_HOURS_FIRST_MSG / AFTER_HOURS_INSIST_MSG.
     """
     if not is_within_business_hours():
-        p(f"  [DIST] Fora do horário de atendimento")
-        meta_typing_on()
-        send_and_track(conv_id, OUT_OF_HOURS_MSG)
+        p(f"  [DIST] [MODE] after_hours — distribuição abortada (motivo='{reason}')")
         return False
 
     consultant = get_available_consultant()
     if not consultant:
-        p(f"  [DIST] Nenhum consultor disponível -> fallback nota interna")
-        msg = ("Nossos atendentes estão todos em atendimento agora, mas fica tranquilo! "
-               "Em pouquinho alguém vai te chamar aqui 😊")
+        p(f"  [DIST] [MODE] human_unavailable — fallback nota interna (motivo='{reason}')")
+        first_name = ''
+        try:
+            st_first = _conv_states.get(conv_id, {})
+            if st_first.get('student_profile') and st_first['student_profile'].get('name'):
+                first_name = ' ' + st_first['student_profile']['name'].split()[0]
+        except Exception:
+            pass
         meta_typing_on()
-        send_and_track(conv_id, msg)
+        send_and_track(conv_id, HUMAN_BUSY_MSG.format(name=first_name))
         transfer_to_human(conv_id, reason)
+        try:
+            record_pending_escalation(
+                conv_id,
+                reason='human_unavailable',
+                tier='pending',
+                retorno_label='assim que houver consultor disponível',
+                question=(reason or '')[:500],
+            )
+        except Exception as e_pe:
+            p(f"  [DIST] erro ao registrar pending_escalation: {e_pe}")
         return False
 
     nome = consultant['nome']
@@ -2995,6 +4349,10 @@ def distribute_to_attendant(conv_id, reason=''):
     _conv_states[conv_id]['inactivity_start'] = 0
     _conv_states[conv_id]['followup_stage'] = 0
     _conv_states[conv_id]['_last_responded_ts'] = time.time()
+    update_pending_escalation_status(
+        conv_id, 'in_progress',
+        note='🔔 Distribuição humana concluída — fila Cockpit atualizada para *Em atendimento*.',
+    )
     return True
 
 
@@ -3101,6 +4459,204 @@ def is_retention_intent(text):
     return False
 
 
+# Pistas de que o aluno está PEDINDO o atendente pelo nome (não só citando casualmente).
+_ATTENDANT_REQUEST_HINTS = (
+    'falar com', 'queria com', 'quero com', 'queria o ', 'queria a ',
+    'quero o ', 'quero a ', 'pode ser o ', 'pode ser a ',
+    'gostaria de falar com', 'pode chamar', 'me passa pra', 'me passa o ',
+    'me passa a ', 'manda pro ', 'manda pra ',
+)
+
+def detect_preferred_attendant(text):
+    """Detecta se o aluno está pedindo um consultor especifico pelo nome.
+
+    Para casar exige UM hint de 'pedido' + nome do consultor. Isso evita falso
+    positivo do tipo 'Ontem a Mariana ja me ajudou' (que cita o nome sem pedir).
+    Retorna o nome canônico (capitalizado) ou None.
+    """
+    if not text:
+        return None
+    t = text.lower().strip()
+    has_hint = any(h in t for h in _ATTENDANT_REQUEST_HINTS)
+    if not has_hint:
+        return None
+    for canonical, aliases in ATTENDANT_ALIASES.items():
+        for al in aliases:
+            if al.strip() in t:
+                return canonical.capitalize()
+    return None
+
+
+def get_active_preferred_attendant_promise(conv_id, max_age_hours=24):
+    """Retorna a 'promessa' (preferred_attendant) ativa para essa conversa, se houver.
+
+    Retorna dict {name, created_at, hours_ago, was_yesterday, escalation_id} ou None.
+    Só considera escalations com status pending/in_progress e idade <= max_age_hours.
+    """
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, preferred_attendant, created_at,
+                   EXTRACT(EPOCH FROM (NOW() - created_at))/3600 AS hours_ago
+              FROM pending_escalation
+             WHERE conv_id = %s
+               AND status IN ('pending', 'in_progress')
+               AND preferred_attendant IS NOT NULL
+               AND preferred_attendant <> ''
+               AND created_at > NOW() - INTERVAL '%s hours'
+             ORDER BY created_at DESC
+             LIMIT 1
+        """, (conv_id, max_age_hours))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if not row:
+            return None
+        eid, name, created_at, hours_ago = row
+        try:
+            now_sp = _now_sp()
+            created_sp = created_at + timedelta(hours=-3) if created_at.tzinfo is None else created_at.astimezone(now_sp.tzinfo) if hasattr(now_sp, 'tzinfo') else created_at
+            was_yesterday = (now_sp.date() != created_at.date())
+        except Exception:
+            was_yesterday = float(hours_ago or 0) > 12
+        return {
+            'escalation_id': eid,
+            'name': name,
+            'created_at': created_at,
+            'hours_ago': float(hours_ago or 0),
+            'was_yesterday': bool(was_yesterday),
+        }
+    except Exception as e:
+        p(f"  [PROMISE] erro consulta: {e}")
+        return None
+
+
+def is_attendant_active_now(attendant_name):
+    """Verifica no Supabase se o consultor está Ativo (passa nos mesmos filtros do dispatch)."""
+    try:
+        nome_norm = attendant_name.strip().lower()
+        nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm)
+                            if __import__('unicodedata').category(c) != 'Mn')
+        url = (f'{SUPABASE_URL}/rest/v1/{DISTRIBUICAO_TABLE}'
+               f'?ativo_inativo=eq.Ativo&tipo_atendimento=eq.Atendimento&select=*')
+        r = requests.get(url, headers=SUPABASE_HEADERS, timeout=10)
+        if r.status_code != 200:
+            return False
+        now = _now_sp()
+        dow = now.weekday()
+        fim_de_semana = dow >= 5
+        for row in r.json() or []:
+            resp = (row.get('responsavel') or '').strip().lower()
+            resp_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', resp)
+                                if __import__('unicodedata').category(c) != 'Mn')
+            first = resp_norm.split()[0] if resp_norm else ''
+            if first != nome_norm.split()[0]:
+                continue
+            if row.get('status_almoco') != 'Ativo':
+                return False
+            if row.get('status_final_expediente') != 'Ativo':
+                return False
+            fila = int(row.get('fila') or 0)
+            limite = int(row.get('volume_distribuicao') or 10)
+            if fila >= limite:
+                return False
+            almoco_hora = row.get('almoco_real') or row.get('almoco')
+            saida_hora = row.get('final_expediente')
+            if not fim_de_semana and _em_intervalo(almoco_hora, ALMOCO_ANTE_MIN, ALMOCO_DURACAO_MIN, now):
+                return False
+            if _em_intervalo(saida_hora, SAIDA_ANTE_MIN, 0, now):
+                return False
+            return True
+        return False
+    except Exception as e:
+        p(f"  [PROMISE] is_active erro: {e}")
+        return False
+
+
+def honor_preferred_attendant_promise(conv_id, promise):
+    """Cumpre a promessa: transfere para o consultor prometido + msg humanizada.
+
+    Se o consultor ainda não está ativo, envia msg explicando e mantém a fila aguardando.
+    Retorna True se a interação foi consumida (não chamar fluxo normal depois).
+    """
+    name = promise.get('name') or ''
+    if not name:
+        return False
+    first_name = name.split()[0]
+    st = _conv_states.setdefault(conv_id, _default_conv_state())
+    student_first = ''
+    prof = st.get('student_profile') or {}
+    if prof.get('first_name'):
+        student_first = ', *' + prof['first_name'] + '*'
+
+    if is_attendant_active_now(name):
+        was_yesterday = bool(promise.get('was_yesterday'))
+        when_phrase = 'ontem' if was_yesterday else 'mais cedo'
+        msg = (
+            f"Oii{student_first}! Conforme combinamos {when_phrase}, vou te conectar "
+            f"com o(a) *{first_name}* agora 😊\n\n"
+            f"Em pouquinho ele(a) assume aqui e dá continuidade ao seu atendimento."
+        )
+        meta_typing_on()
+        send_and_track(conv_id, msg)
+        log_to_db(conv_id, '[promessa_honrada]', msg, 1.0, 'preferred_attendant_honored')
+
+        try:
+            lead_id = ''
+            if prof.get('lead_id'):
+                lead_id = prof['lead_id']
+            if lead_id:
+                _dcz_transfer_lead(lead_id, name)
+            biz_id = ''
+            if prof.get('business_id'):
+                biz_id = prof['business_id']
+            if biz_id:
+                _dcz_transfer_business(biz_id, name)
+            _dcz_transfer_chat(conv_id, name)
+        except Exception as e_t:
+            p(f"  [PROMISE] erro na transferência DCZ: {e_t}")
+
+        try:
+            note = (
+                f"🤝 *Promessa honrada* — IA havia avisado o aluno que o(a) {first_name} "
+                f"daria continuidade. Conversa transferida automaticamente."
+            )
+            requests.post(
+                f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                headers=H, json={'body': note, 'isInternal': True}, timeout=10,
+            )
+        except Exception:
+            pass
+
+        try:
+            update_pending_escalation_status(
+                conv_id, 'resolved',
+                note=f'Conversa transferida para {first_name} (promessa cumprida).',
+            )
+        except Exception as e_pe:
+            p(f"  [PROMISE] erro update escalation: {e_pe}")
+
+        st['_human_took_over'] = True
+        st['waiting_for_client'] = False
+        st['_last_responded_ts'] = time.time()
+        p(f"  [PROMISE] Honrada -> {first_name} (conv={conv_id[:12]})")
+        return True
+
+    msg = (
+        f"Oii{student_first}! O(a) *{first_name}* ainda não retomou o atendimento por aqui, "
+        f"mas é quem vai dar continuidade com você 🤝\n\n"
+        f"Assim que ele(a) estiver disponível eu te conecto. Se preferir não esperar, "
+        f"posso te passar para outro(a) consultor(a) que já está atendendo — é só me avisar 😊"
+    )
+    meta_typing_on()
+    send_and_track(conv_id, msg)
+    log_to_db(conv_id, '[promessa_aguardando]', msg, 1.0, 'preferred_attendant_waiting')
+    st['waiting_for_client'] = True
+    st['_last_responded_ts'] = time.time()
+    p(f"  [PROMISE] {first_name} ainda inativo - aluno informado (conv={conv_id[:12]})")
+    return True
+
+
 def get_conversation_messages_api(conv_id, limit=15):
     try:
         r = requests.get(f'{DCZ_MSG}/messaging/conversations/{conv_id}/messages',
@@ -3150,9 +4706,14 @@ BOT_RESPONSE_FINGERPRINTS = [
 
 def _is_template_message(msg):
     """Detecta mensagens de template/HSM do WhatsApp (disparos).
-    Templates possuem o campo 'header' preenchido na API do DataCrazy."""
+    Templates costumam vir com `header` na API DataCrazy ou type template/hsm."""
+    if not msg or not isinstance(msg, dict):
+        return False
     header = msg.get('header')
     if header and isinstance(header, str) and header.strip():
+        return True
+    t = (msg.get('type') or msg.get('messageType') or '').lower()
+    if t in ('template', 'hsm', 'whatsapp_template'):
         return True
     return False
 
@@ -3197,6 +4758,24 @@ OUR_MSG_FINGERPRINTS = (
     'percebi que você não respondeu',
     'nenhuma nova mensagem foi recebida',
     'vou encerrar esta conversa',
+    # Automação/fluxos do DataCrazy (não são humano, são bots de menu/trancamento).
+    # Frases específicas o suficiente para evitar falso match em mensagens reais.
+    'quer solicitar o trancamento',
+    'solicitar o trancamento da sua matrícula',
+    'siga os passos abaixo',
+    'o processo pode levar até 30 dias',
+    'receberá uma ligação ou mensagem de validação',
+    'atenção: você receberá uma ligação',
+    'clique em uma das opções disponíveis',
+    'assista ao tutorial para entender',
+    'em breve um de nossos consultores irá te chamar',
+    'sobre *acesso*, qual sua dúvida',
+    'sobre *financeiro*, qual sua dúvida',
+    'sobre *aulas e conteúdo*',
+    'sobre *documentos*, qual sua dúvida',
+    'sobre *rematrícula*',
+    'é rapidinho! 😉',
+    'ficou claro?',
 )
 
 def _automation_already_responded(conv_id, user_msg_id):
@@ -3305,8 +4884,7 @@ def get_new_client_message(conv_id, force=False):
     last_incoming_ts = ''
     last_outgoing_ts = ''
     for m in msgs:
-        body_check = (m.get('body', '') or '').strip()
-        if not body_check or m.get('isInternal', False):
+        if not _message_has_thread_payload(m):
             continue
         ts = m.get('createdAt', '') or m.get('timestamp', '') or ''
         if m.get('received', False):
@@ -3674,6 +5252,12 @@ def _handle_cpf_input(conv_id, question, name_suffix):
             if student_profile:
                 student_profile['academic'] = _acad_cpf
                 student_profile['_acad_loaded'] = True
+                try:
+                    _caa = fetch_caa_solicitacoes(cpf_raw)
+                    if _caa:
+                        student_profile['caa_solicitacoes'] = _caa
+                except Exception as _e_caa:
+                    p(f"    [CAA] Erro: {_e_caa}")
             _polo_aluno = (_acad_cpf.get('polo') or '').strip()
             if _polo_aluno and not _is_nosso_polo(_polo_aluno):
                 p(f"  [POLO-CPF] Polo '{_polo_aluno}' NÃO é nosso -> redirecionando")
@@ -3760,6 +5344,13 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         else:
             p(f"  Vision: falha no download, processando apenas texto")
 
+        # Fallback media-only: imagem sem caption E Vision nao conseguiu descrever
+        if question == '[imagem enviada pelo aluno]' and not (image_desc and image_desc.strip()):
+            p(f"  [MEDIA-ONLY] imagem sem caption + Vision falhou -> resposta padrao")
+            send_media_only_response(conv_id, media_type='imagem', question_label='[imagem sem texto]')
+            conversation_messages.append({'role': 'user', 'text': '[Imagem enviada]'})
+            return
+
     p(f"")
     p(f"{'='*55}")
     p(f"  NOVA MSG: \"{question[:120]}\"")
@@ -3803,6 +5394,18 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         p(f"  Identificando aluno...")
         student_profile = identify_student(cur_phone)
 
+    if is_within_business_hours():
+        try:
+            promise = get_active_preferred_attendant_promise(conv_id, max_age_hours=24)
+            if promise:
+                p(f"  [PROMISE] Detectada promessa ativa: {promise['name']} ({promise['hours_ago']:.1f}h atras)")
+                if honor_preferred_attendant_promise(conv_id, promise):
+                    return
+        except Exception as e_pr:
+            p(f"  [PROMISE] erro ao checar promessa: {e_pr}")
+
+    maybe_auto_avaliacao_correta_por_agradecimento(_current_phone or cur_phone, conv_id, question)
+
     if student_profile and not student_profile.get('_acad_loaded'):
         _acad_cpf = student_profile.get('cpf')
         _acad_phone = _current_phone or cur_phone
@@ -3810,6 +5413,13 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             acad = fetch_academic_data(_acad_cpf, phone=_acad_phone)
             if acad:
                 student_profile['academic'] = acad
+                if _acad_cpf:
+                    try:
+                        _caa = fetch_caa_solicitacoes(_acad_cpf)
+                        if _caa:
+                            student_profile['caa_solicitacoes'] = _caa
+                    except Exception as _e_caa:
+                        p(f"    [CAA] Erro: {_e_caa}")
                 _all_courses_list = acad.get('_all_courses', [])
                 if len(_all_courses_list) > 1:
                     _all_ci = []
@@ -3840,9 +5450,9 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                 waiting_for_client = False; inactivity_start = 0
                 return
 
-    # === ÁUDIO: identificar aluno + criar lead se necessário + distribuir ===
+    # === ÁUDIO: mensagem padrão (IA não confirma conteúdo) + opção de texto ===
     if msg_body == '[audio]':
-        p(f"  [AUDIO] Áudio detectado -> distribuindo para consultor")
+        p(f"  [AUDIO] Áudio detectado -> respondendo (media-only) e oferecendo texto")
         if not student_profile:
             contact_name = ''
             cached = _cached_msgs.get(conv_id, [])
@@ -3856,20 +5466,10 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                 student_profile = {'lead_id': new_lead_id, 'name': contact_name,
                                    'first_name': contact_name.split()[0] if contact_name else ''}
                 p(f"  [AUDIO] Lead criado: {new_lead_id}")
-        msg_audio = ("Recebi seu áudio! Como sou uma assistente virtual, "
-                     "não consigo ouvir áudios. Vou te transferir para um "
-                     "de nossos consultores que poderá te atender. Um momento! 😊")
-        meta_typing_on()
-        send_and_track(conv_id, msg_audio)
+        send_media_only_response(conv_id, media_type='áudio', question_label='[áudio]')
         conversation_messages.append({'role': 'user', 'text': '[Áudio enviado]'})
-        conversation_messages.append({'role': 'bot', 'text': msg_audio})
-        distributed = distribute_to_attendant(conv_id, reason='Áudio recebido')
-        if distributed:
-            log_to_db(conv_id, '[audio]', msg_audio, 1.0, 'audio_distribute')
-        else:
-            log_to_db(conv_id, '[audio]', msg_audio, 1.0, 'audio_no_consultant')
-            waiting_for_client = True
-            inactivity_start = time.time()
+        waiting_for_client = True
+        inactivity_start = time.time()
         return
 
     memory = load_memory(cur_phone)
@@ -3908,7 +5508,12 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                 if new_lead_id:
                     student_profile = {'lead_id': new_lead_id, 'name': '', 'first_name': ''}
                     p(f"  Lead criado para polo não encontrado: {new_lead_id}")
-            distribute_to_attendant(conv_id, 'Aluno não encontrado no polo - encaminhar para comercial')
+            if is_within_business_hours():
+                distribute_to_attendant(conv_id, 'Aluno não encontrado no polo - encaminhar para comercial')
+            else:
+                p(f"  [POLO] [MODE] after_hours — sem distribuir, retorno será {next_human_available_label()}")
+                send_after_hours_response(conv_id, allow_continue=False,
+                                         reason='polo_commercial_after_hours', question=question)
             waiting_for_client = False; inactivity_start = 0
             return
 
@@ -3957,6 +5562,20 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             _esc_reason = f'Dúvida do aluno: "{_student_doubt[:200]}"'
         else:
             _esc_reason = ''
+
+        if not is_within_business_hours():
+            p(f"  [ESCALADO] [MODE] after_hours — sem distribuir (motivo='{_esc_reason}')")
+            tier = send_after_hours_response(conv_id, allow_continue=False,
+                                             reason='escalate_after_hours', question=question)
+            log_to_db(conv_id, question, AFTER_HOURS_INSIST_MSG if tier == 'insist' else AFTER_HOURS_FIRST_MSG,
+                      1.0, f'escalate_after_hours_{tier}')
+            try:
+                summary = generate_conversation_summary(conversation_messages)
+                save_memory(cur_phone, student_profile, 'escalacao_after_hours', summary, sentiment)
+            except Exception as e_esc:
+                p(f"  [ESCALADO] Erro na memória (after_hours): {e_esc}")
+            waiting_for_client = False; inactivity_start = 0
+            return
 
         log_to_db(conv_id, question, ESCALATION_MSG, 1.0, 'escalate_request')
         distributed = distribute_to_attendant(conv_id, _esc_reason)
@@ -4029,6 +5648,38 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     # === RETENÇÃO (cancelamento / trancamento) — ANTES de is_first ===
     if is_retention_intent(question):
         p(f"  [RETENÇÃO] Intenção detectada: \"{question[:80]}\"")
+
+        # Fora do horário: NÃO orientar passos de cancelamento, apenas avisar do Wesley
+        if not is_within_business_hours():
+            retorno = next_human_available_label()
+            name_prefix = _student_first_name_prefix(conv_id)
+            msg_after = RETENTION_AFTER_HOURS_MSG.format(name=name_prefix, retorno_label=retorno)
+            meta_typing_on()
+            send_and_track(conv_id, msg_after)
+            conversation_messages.append({'role': 'bot', 'text': msg_after})
+            log_to_db(conv_id, question, msg_after, 1.0, 'retention_after_hours')
+            try:
+                requests.post(
+                    f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                    headers=H,
+                    json={'body': f'🤝 *Retenção fora do horário* — IA orientou aluno; Wesley deve retomar {retorno}.',
+                          'isInternal': True},
+                    timeout=10,
+                )
+            except Exception:
+                pass
+            try:
+                summary = generate_conversation_summary(conversation_messages)
+                save_memory(cur_phone, student_profile, 'retencao_after_hours', summary, sentiment)
+            except Exception as e_ret:
+                p(f"  [RETENÇÃO] Erro na memória (after_hours): {e_ret}")
+            record_pending_escalation(conv_id, 'retention_after_hours', tier='insist',
+                                    retorno_label=retorno, question=question,
+                                    preferred_attendant='Wesley')
+            p(f"  [RETENÇÃO] [MODE] after_hours — sem trigger_retention, retorno {retorno}, preferred=Wesley")
+            waiting_for_client = True; inactivity_start = time.time()
+            return
+
         meta_typing_on()
         send_and_track(conv_id, RETENTION_MSG)
         conversation_messages.append({'role': 'bot', 'text': RETENTION_MSG})
@@ -4085,7 +5736,12 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             if new_lead_id:
                 student_profile = {'lead_id': new_lead_id, 'name': contact_name, 'first_name': contact_name.split()[0] if contact_name else ''}
                 p(f"  Lead criado para interessado em matrícula: {new_lead_id}")
-        distribute_to_attendant(conv_id, 'Interessado em matrícula - encaminhar para comercial')
+        if is_within_business_hours():
+            distribute_to_attendant(conv_id, 'Interessado em matrícula - encaminhar para comercial')
+        else:
+            p(f"  [MATRÍCULA] [MODE] after_hours — sem distribuir, retorno será {next_human_available_label()}")
+            send_after_hours_response(conv_id, allow_continue=False,
+                                     reason='matricula_after_hours', question=question)
         waiting_for_client = False; inactivity_start = 0
         return
 
@@ -4240,6 +5896,23 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     should_escalate, reason = is_escalation_trigger(question)
     if should_escalate:
         meta_typing_on()
+        if not is_within_business_hours():
+            p(f"  [ESCALADO][CPF] [MODE] after_hours — sem distribuir, retorno {next_human_available_label()}")
+            send_after_hours_response(conv_id, allow_continue=False,
+                                     reason='cpf_after_hours', question=question)
+            log_to_db(conv_id, question, AFTER_HOURS_FIRST_MSG, 0.1, 'escalate_cpf_after_hours')
+            try:
+                requests.post(
+                    f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                    headers=H,
+                    json={'body': '🔒 Dados sensíveis (CPF/RGM) detectados fora do horário — IA orientou aluno aguardar retorno.',
+                          'isInternal': True},
+                    timeout=10,
+                )
+            except Exception:
+                pass
+            waiting_for_client = False; inactivity_start = 0
+            return
         log_to_db(conv_id, question, ESCALATION_MSG, 0.1, 'escalate_cpf')
         distributed = distribute_to_attendant(conv_id, 'Dados sensíveis detectados (CPF/RGM)')
         conversation_messages.append({'role': 'bot', 'text': ESCALATION_MSG})
@@ -4253,6 +5926,13 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         stripped = stripped.replace(e + ' ', '').replace(e, '')
     stripped = stripped.strip()
 
+    # Várias linhas (ex.: citação do menu + opção) — tentar cada trecho
+    _stripped_variants = [stripped]
+    for _seg in stripped.replace('\r', '\n').split('\n'):
+        _s2 = _seg.strip()
+        if _s2 and _s2 not in _stripped_variants:
+            _stripped_variants.append(_s2)
+
     # =====================================================================
     # VERIFICA SE O TEXTO CORRESPONDE A UM ITEM DE MENU CONHECIDO
     # Agente envia diretamente submenus e conteúdo (100% agente).
@@ -4262,24 +5942,36 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     _matched_direct_key = None
     _matched_rag_key = None
 
-    for menu_key, mapped_key in MAIN_MENU_KEYS.items():
-        if menu_key in stripped or stripped == menu_key:
-            _matched_l1_key = mapped_key
+    for _try in _stripped_variants:
+        for menu_key, mapped_key in MAIN_MENU_KEYS.items():
+            if _menu_body_matches_normalised(_try, menu_key):
+                _matched_l1_key = mapped_key
+                break
+        if _matched_l1_key:
             break
     if not _matched_l1_key:
-        for l3_key in SUBMENU_L3:
-            if l3_key in stripped or stripped == l3_key:
-                _matched_l3_key = l3_key
+        for _try in _stripped_variants:
+            for l3_key in SUBMENU_L3:
+                if _menu_body_matches_normalised(_try, l3_key):
+                    _matched_l3_key = l3_key
+                    break
+            if _matched_l3_key:
                 break
     if not _matched_l1_key and not _matched_l3_key:
-        for direct_key in SUBMENU_DIRECT_RESPONSE:
-            if direct_key in stripped or stripped == direct_key:
-                _matched_direct_key = direct_key
+        for _try in _stripped_variants:
+            for direct_key in SUBMENU_DIRECT_RESPONSE:
+                if _menu_body_matches_normalised(_try, direct_key):
+                    _matched_direct_key = direct_key
+                    break
+            if _matched_direct_key:
                 break
     if not _matched_l1_key and not _matched_l3_key and not _matched_direct_key:
-        for sub_key in SUBMENU_TO_QUESTION:
-            if sub_key in stripped or stripped == sub_key:
-                _matched_rag_key = sub_key
+        for _try in _stripped_variants:
+            for sub_key in SUBMENU_TO_QUESTION:
+                if _menu_body_matches_normalised(_try, sub_key):
+                    _matched_rag_key = sub_key
+                    break
+            if _matched_rag_key:
                 break
 
     # --- Menu L1 (ex: "Financeiro") → agente envia submenu L2 ---
@@ -4367,6 +6059,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         ci = (student_profile or {}).get('course_info')
         if _has_multi_courses:
             p(f"  [GRADE] Multi-curso detectado, delegando ao LLM para perguntar qual curso")
+            # Não retorna; segue para o pipeline RAG para LLM perguntar qual curso.
         elif ci and ci.get('grade_link'):
             fname = (student_profile or {}).get('first_name', '')
             name_part = f", {fname}" if fname else ''
@@ -4410,7 +6103,9 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                 conversation_messages.append({'role': 'bot', 'text': grade_msg})
                 log_to_db(conv_id, question, grade_msg, 0.9, 'grade_link_busca')
                 waiting_for_client = True; inactivity_start = time.time()
-        return
+                return
+            # Sem grade_link encontrada -> segue para o pipeline RAG (não retorna).
+            p(f"  [GRADE] sem grade_link disponível -> caindo no RAG")
 
     # === PIPELINE RAG ===
     p(f"  Pipeline RAG... (sentimento: {sentiment})")
@@ -4430,7 +6125,12 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     if top_score < 0.50:
         msg = "Hmm, não encontrei uma resposta exata para isso. Posso te ajudar de outra forma?"
         meta_typing_on()
-        send_and_track(conv_id, msg, buttons=['Tentar de novo', 'Falar com atendente', 'Ver opções'])
+        if is_within_business_hours():
+            _low_sim_buttons = ['Tentar de novo', 'Falar com atendente', 'Ver opções']
+        else:
+            _low_sim_buttons = ['Tentar de novo', 'Ver opções']
+            p(f"  [LOW-SIM] [MODE] after_hours — removido botão 'Falar com atendente'")
+        send_and_track(conv_id, msg, buttons=_low_sim_buttons)
         conversation_messages.append({'role': 'bot', 'text': msg})
         log_to_db(conv_id, question, msg, top_score, 'escalate_low_sim')
         cur_phone = _current_phone or PHONE_TO_MONITOR
@@ -4729,7 +6429,32 @@ def main():
             _cached_msgs.clear()
             maybe_reload()
 
-            if cycle % 5 == 0:
+            try:
+                _heartbeat('online', f'cycle={cycle} (loop start)')
+            except Exception:
+                pass
+
+            if cycle % 3 == 0:
+                try:
+                    process_pending_escalation_auto_dispatch()
+                except Exception as e_fila:
+                    p(f"  [FILA] Erro no auto-dispatch: {e_fila}")
+
+            if cycle % 10 == 0:
+                try:
+                    process_after_hours_rescue()
+                except Exception as e_rescue:
+                    p(f"  [AH-RESCUE] Erro: {e_rescue}")
+                try:
+                    process_in_hours_rescue()
+                except Exception as e_ihr:
+                    p(f"  [IN-HOURS-RESCUE] Erro: {e_ihr}")
+                try:
+                    process_post_close_rescue()
+                except Exception as e_pcr:
+                    p(f"  [POST-CLOSE-RESCUE] Erro: {e_pcr}")
+
+            if cycle % 2 == 0:
                 active_count = sum(1 for s in _conv_states.values() if s.get('waiting_for_client'))
                 if cycle % 10 == 0:
                     p(f"  ...ativo ({cycle * POLL_INTERVAL}s | {len(processed_msg_ids)} msgs | {len(_conv_states)} convs | {active_count} aguardando)")
@@ -4752,7 +6477,8 @@ def main():
                 continue
 
             # ============================================================
-            # FILTRO: Instância X + Base de Alunos + sem atendente + Não Iniciados
+            # FILTRO: Instância acadêmica + sem atendente humano + unstarted/hidden OU opened
+            # (opened entra na mesma fila de processamento — ver merge em PRIORIDADE 2)
             # ============================================================
             _MAX_CONV_AGE_S = 72 * 3600
             _now_utc = time.time()
@@ -4790,8 +6516,9 @@ def main():
                         _no_pipeline += 1
                         continue
                 elif PIPELINE_ALUNOS_ID not in _pids:
+                    # Conta fora da Base de Alunos, mas NÃO exclui: com bot por último precisa
+                    # de follow-up/encerramento; excluir travava Priscila/Claudia em outro funil.
                     _other_pipeline += 1
-                    continue
                 _last_recv = _cf.get('lastReceivedMessageDate', '') or _cf.get('lastMessageDate', '') or ''
                 if _last_recv:
                     try:
@@ -4813,7 +6540,7 @@ def main():
             # PRIORIDADE 1: Encerrar follow-ups > 15 min (antes de tudo)
             # ============================================================
             _fu_close_count = 0
-            _MAX_FU_CLOSE = 10
+            _MAX_FU_CLOSE = 18
             _all_bot_last = list(convs_opened) + [c for c in convs_nao_iniciados
                 if (c.get('lastSendedMessageDate','') or '') > (c.get('lastReceivedMessageDate','') or '')]
             for _fc in _all_bot_last:
@@ -4831,11 +6558,7 @@ def main():
                     'tudo certo por a', 'ainda est', 'não tive retorno',
                     'pode mandar', 'precisar de mais alguma',
                 ])
-                _is_close = any(fp in _lm_body for fp in [
-                    'muito obrigado por falar', 'encerrar por aqui',
-                    'encerrando esta conversa', 'não respondeu mais',
-                    'percebi que você não respondeu', 'atendimento será encerrado',
-                ])
+                _is_close = any(fp in _lm_body for fp in LAST_MSG_CLOSE_PHRASES)
                 if not _is_fu and not _is_close:
                     continue
                 try:
@@ -4859,13 +6582,23 @@ def main():
 
             # ============================================================
             # PRIORIDADE 2+3: Separar waiting vs rest, com "falar com atendente" primeiro
+            # Inclui 'opened' e 'unstarted'/'hidden' — antes só unstarted ia para a fila e
+            # conversas só em 'opened' ficavam sem resposta do agente.
             # ============================================================
             waiting_atendente = []
             waiting_normal = []
             rest = []
+            _seen_queue = set()
+            _convs_queue_source = []
+            for c in convs_nao_iniciados + convs_opened:
+                _qid = c.get('id', '')
+                if not _qid or _qid in _seen_queue:
+                    continue
+                _seen_queue.add(_qid)
+                _convs_queue_source.append(c)
             _ATENDENTE_KEYWORDS = ['falar com atendente', 'atendente', 'falar com humano',
                                    'quero falar com alguem', 'falar com pessoa']
-            for c in convs_nao_iniciados:
+            for c in _convs_queue_source:
                 recv = c.get('lastReceivedMessageDate', '') or ''
                 sent = c.get('lastSendedMessageDate', '') or ''
                 if recv > sent:
@@ -4909,9 +6642,16 @@ def main():
                 _oc_id = _oc.get('id', '')
                 if not _oc_id:
                     continue
-                if _oc_id in _conv_states and _conv_states[_oc_id].get('waiting_for_client'):
-                    continue
                 if _oc_id in _conv_states and _conv_states[_oc_id].get('_human_took_over'):
+                    continue
+                # Disparo WhatsApp (HSM/template): não monitorar follow-up do agente
+                _lm_raw = _oc.get('lastMessage', '') or ''
+                if isinstance(_lm_raw, dict) and _is_template_message(_lm_raw):
+                    _conv_states.setdefault(_oc_id, _default_conv_state())
+                    _conv_states[_oc_id]['waiting_for_client'] = False
+                    _conv_states[_oc_id]['followup_stage'] = 0
+                    _conv_states[_oc_id]['inactivity_start'] = 0
+                    _fu_tracked += 1
                     continue
                 _oc_sent = _oc.get('lastSendedMessageDate', '') or ''
                 _oc_recv = _oc.get('lastReceivedMessageDate', '') or ''
@@ -4936,25 +6676,23 @@ def main():
                 if not _existing_profile:
                     _conv_states[_oc_id]['student_profile'] = {'name': _oc_name, 'first_name': _oc_fname} if _oc_name else None
                 _conv_states[_oc_id]['waiting_for_client'] = True
+                # Sempre alinhar ao último envio da API (re-sync a cada ciclo — evita estado preso)
                 _conv_states[_oc_id]['inactivity_start'] = _oc_start
-                _lm_raw = _oc.get('lastMessage', '') or ''
                 _last_msg = (_lm_raw.get('body', '') if isinstance(_lm_raw, dict) else str(_lm_raw)).lower()
                 _is_followup_msg = any(fp in _last_msg for fp in [
                     'tudo certo por a', 'ainda est', 'não tive retorno',
                     'pode mandar', 'precisar de mais alguma',
                 ])
-                _is_close_msg = any(fp in _last_msg for fp in [
-                    'muito obrigado por falar', 'encerrar por aqui',
-                    'encerrando esta conversa', 'não respondeu mais',
-                    'percebi que você não respondeu',
-                    'atendimento será encerrado',
-                ])
+                _is_close_msg = any(fp in _last_msg for fp in LAST_MSG_CLOSE_PHRASES)
+                _prev_stage = int(_conv_states[_oc_id].get('followup_stage', 0) or 0)
                 if _is_close_msg:
-                    _conv_states[_oc_id]['followup_stage'] = 2
+                    _new_st = 2
                 elif _is_followup_msg:
-                    _conv_states[_oc_id]['followup_stage'] = 1
+                    _new_st = 1
                 else:
-                    _conv_states[_oc_id]['followup_stage'] = 0
+                    _new_st = 0
+                # Não rebaixar estágio (ex.: FOLLOWUP-SKIP pôs 1 mas o texto da última msg não bate com L2)
+                _conv_states[_oc_id]['followup_stage'] = max(_prev_stage, _new_st)
                 _fu_tracked += 1
             def _get_last_msg_body(c):
                 lm = c.get('lastMessage', '') or ''
@@ -5028,8 +6766,7 @@ def main():
                         _latest_recv_ts = ''
                         _latest_out_ts = ''
                         for m in _pre_msgs:
-                            body_ck = (m.get('body', '') or '').strip()
-                            if not body_ck or m.get('isInternal', False):
+                            if not _message_has_thread_payload(m):
                                 continue
                             ts_ck = m.get('createdAt', '') or m.get('timestamp', '') or ''
                             if m.get('received', False):
@@ -5158,7 +6895,7 @@ def main():
 
             # === FOLLOW-UP & ENCERRAMENTO POR INATIVIDADE (para TODAS conversas) ===
             _closes_this_cycle = 0
-            _MAX_CLOSES_PER_CYCLE = 8
+            _MAX_CLOSES_PER_CYCLE = 20
             for cid, st in list(_conv_states.items()):
                 if st.get('_human_took_over'):
                     continue
@@ -5183,20 +6920,31 @@ def main():
                         continue
 
                     if st.get('followup_stage', 0) == 0 and elapsed >= FOLLOWUP_1_DELAY:
-                        if elapsed <= 3600:
-                            try:
-                                r_fu_check = requests.get(
-                                    f'{DCZ_MSG}/messaging/conversations/{cid}',
-                                    headers=H, timeout=10)
-                                if r_fu_check.status_code == 200:
-                                    fu_data = r_fu_check.json()
-                                    if fu_data.get('attendants', []):
-                                        p(f"  [FOLLOWUP-1] [{cur_phone[-4:] if cur_phone else '????'}] Atendente presente -> cancelando follow-up")
-                                        st['_human_took_over'] = True
-                                        st['waiting_for_client'] = False
-                                        continue
-                            except Exception:
-                                pass
+                        # Muitas horas sem 1o follow-up (ex.: agente parado): não mandar ping tardio; ir ao encerramento
+                        if elapsed >= 28800:
+                            st['followup_stage'] = 1
+                            p(f"  [FOLLOWUP-SKIP] [{cur_phone[-4:] if cur_phone else '????'}] {int(elapsed)}s -> pulando 1o follow-up (muito tempo); encerramento via estágio 1")
+                            continue
+                        try:
+                            r_fu_check = requests.get(
+                                f'{DCZ_MSG}/messaging/conversations/{cid}',
+                                headers=H, timeout=10)
+                            if r_fu_check.status_code == 200:
+                                fu_data = r_fu_check.json()
+                                _tlm = fu_data.get('lastMessage') or {}
+                                if isinstance(_tlm, dict) and _is_template_message(_tlm):
+                                    p(f"  [FOLLOWUP-1] [{cur_phone[-4:] if cur_phone else '????'}] Última msg é template/HSM (disparo) -> sem follow-up")
+                                    st['waiting_for_client'] = False
+                                    st['followup_stage'] = 0
+                                    st['inactivity_start'] = 0
+                                    continue
+                                if elapsed <= 3600 and fu_data.get('attendants', []):
+                                    p(f"  [FOLLOWUP-1] [{cur_phone[-4:] if cur_phone else '????'}] Atendente presente -> cancelando follow-up")
+                                    st['_human_took_over'] = True
+                                    st['waiting_for_client'] = False
+                                    continue
+                        except Exception:
+                            pass
                         msg1 = FOLLOWUP_1_MSG.format(name=name_fmt)
                         p(f"  [FOLLOWUP-1] [{cur_phone[-4:] if cur_phone else '????'}] {int(elapsed)}s sem resposta")
                         send_message_crm(cid, msg1, buttons=FOLLOWUP_1_BUTTONS)
@@ -5206,7 +6954,7 @@ def main():
 
                     elif st.get('followup_stage', 0) == 1 and elapsed >= CLOSE_DELAY:
                         _safe_to_close = False
-                        if elapsed > 3600:
+                        if elapsed >= 3600:
                             _safe_to_close = True
                         else:
                             try:
@@ -5233,6 +6981,9 @@ def main():
                                     p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] API retornou {r_check.status_code} -> adiando close")
                             except Exception as e_check:
                                 p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Erro ao verificar API: {e_check} -> adiando close")
+                        if not _safe_to_close and elapsed >= 2700:
+                            _safe_to_close = True
+                            p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] fallback 45min+ pós-follow-up (API incerta)")
                         if not _safe_to_close:
                             continue
                         if _closes_this_cycle >= _MAX_CLOSES_PER_CYCLE:
@@ -5277,7 +7028,7 @@ def main():
                 except Exception as e_deep:
                     p(f"  [DEEP-SCAN] Erro: {e_deep}")
 
-            if cycle % 5 == 0:
+            if cycle % 2 == 0:
                 active_count = sum(1 for s in _conv_states.values() if s.get('waiting_for_client'))
                 if cycle % 10 == 0:
                     p(f"  ...ativo ({cycle * POLL_INTERVAL}s | {len(processed_msg_ids)} msgs | {len(_conv_states)} convs | {active_count} aguardando)")

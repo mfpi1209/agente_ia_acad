@@ -60,7 +60,20 @@ testar_*.py
 teste_*.py
 update_prompt.py
 verify_workflow.py
-_check_kb.py
+
+# ===== Local debug/rescue scripts (underscore-prefixed) =====
+# Scripts de inspecao / resgate manual / migracoes pontuais.
+# Nao vao para o repo de producao, sao one-off locais.
+_*.py
+
+# ===== Local helper scripts =====
+start_dashboard.ps1
+*.local.ps1
+*.local.sh
+
+# ===== Snapshots de dados (XLSX/CSV grandes) =====
+*.xlsx
+*.csv
 
 # ===== IDE =====
 .vscode/

@@ -91,6 +91,36 @@ def api_stats(days: int = Query(7, ge=1, le=90)):
     """, (since,))
     por_hora = cur.fetchall()
 
+    cur.execute("""
+        SELECT
+          COUNT(*) FILTER (WHERE avaliacao = 'correta') as corretas,
+          COUNT(*) FILTER (WHERE avaliacao = 'incorreta') as incorretas,
+          COUNT(*) FILTER (WHERE avaliacao IS NULL OR trim(avaliacao) = '') as pendentes
+        FROM interaction_summary WHERE created_at >= %s
+    """, (since,))
+    av = cur.fetchone()
+    avaliadas = (av['corretas'] or 0) + (av['incorretas'] or 0)
+    taxa_acerto = round((av['corretas'] or 0) / avaliadas * 100, 1) if avaliadas > 0 else 0
+
+    cur.execute("""
+        SELECT phone, student_name, COUNT(*) as cnt,
+               ROUND(AVG(nps_implicito)::numeric, 1) as avg_nps
+        FROM interaction_summary
+        WHERE created_at >= %s AND student_name IS NOT NULL AND trim(student_name) <> ''
+        GROUP BY phone, student_name
+        ORDER BY cnt DESC LIMIT 8
+    """, (since,))
+    top_alunos = cur.fetchall()
+
+    kb_total = kb_emb = 0
+    try:
+        cur.execute("SELECT COUNT(*) as c FROM knowledge_base")
+        kb_total = cur.fetchone()['c']
+        cur.execute("SELECT COUNT(*) as c FROM knowledge_base WHERE embedding IS NOT NULL")
+        kb_emb = cur.fetchone()['c']
+    except Exception:
+        pass
+
     conn.close()
     return {
         'total': total, 'temas': temas, 'sentimentos': sentimentos, 'nps': nps,
@@ -98,12 +128,25 @@ def api_stats(days: int = Query(7, ge=1, le=90)):
         'avg_nps': float(avg_nps) if avg_nps else 0, 'taxa_resolucao': taxa_res,
         'nps_score': nps_score, 'por_hora': por_hora,
         'promotores': nps_row['promotores'], 'neutros': nps_row['neutros'], 'detratores': nps_row['detratores'],
+        'avaliacoes': {
+            'corretas': av['corretas'] or 0,
+            'incorretas': av['incorretas'] or 0,
+            'pendentes': av['pendentes'] or 0,
+            'taxa_acerto': taxa_acerto,
+        },
+        'top_alunos': [
+            {'phone': r['phone'], 'name': r['student_name'], 'cnt': r['cnt'],
+             'avg_nps': float(r['avg_nps']) if r['avg_nps'] is not None else None}
+            for r in top_alunos
+        ],
+        'knowledge_base': {'total': kb_total, 'com_embedding': kb_emb},
     }
 
 
 @app.get("/api/recent")
 def api_recent(limit: int = Query(30, ge=1, le=200), page: int = Query(1, ge=1),
-               tema: str = Query(None), sentimento: str = Query(None), search: str = Query(None)):
+               tema: str = Query(None), sentimento: str = Query(None), search: str = Query(None),
+               avaliacao: str = Query(None)):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     where = ["1=1"]
@@ -114,6 +157,11 @@ def api_recent(limit: int = Query(30, ge=1, le=200), page: int = Query(1, ge=1),
     if sentimento:
         where.append("sentimento = %s")
         params.append(sentimento)
+    if avaliacao == 'pendente':
+        where.append("(avaliacao IS NULL OR trim(avaliacao) = '')")
+    elif avaliacao in ('correta', 'incorreta'):
+        where.append("avaliacao = %s")
+        params.append(avaliacao)
     if search:
         where.append("(student_name ILIKE %s OR pergunta_aluno ILIKE %s OR phone ILIKE %s)")
         params.extend([f'%{search}%'] * 3)
@@ -172,24 +220,19 @@ def api_corrigir(record_id: int, body: CorrecaoBody):
     pergunta = row['pergunta_aluno']
     tema = row.get('tema') or 'OUTRO'
     try:
-        cur.execute("""
-            INSERT INTO knowledge_base (pergunta, resposta, tema, confianca, created_at)
-            VALUES (%s, %s, %s, 1.0, NOW())
-        """, (pergunta, resposta, tema))
-    except Exception:
-        pass
-    try:
         import openai
         client = openai.OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
-        emb_resp = client.embeddings.create(input=pergunta, model='text-embedding-3-small')
+        emb_resp = client.embeddings.create(
+            input=pergunta[:2000], model='text-embedding-3-small', dimensions=256,
+        )
         embedding = emb_resp.data[0].embedding
+        emb_str = '[' + ','.join(str(x) for x in embedding) + ']'
         cur.execute("""
-            UPDATE knowledge_base SET embedding = %s
-            WHERE pergunta = %s AND resposta = %s AND embedding IS NULL
-            ORDER BY id DESC LIMIT 1
-        """, (str(embedding), pergunta, resposta))
-    except Exception:
-        pass
+            INSERT INTO knowledge_base (pergunta_aluno, resposta_atendente, tema, embedding, created_at)
+            VALUES (%s, %s, %s, %s::float8[], NOW())
+        """, (pergunta, resposta, tema, emb_str))
+    except Exception as e:
+        print(f"  [corrigir] Erro KB: {e}")
     conn.commit()
     conn.close()
     return {"ok": True, "msg": "Correção salva na base de conhecimento"}
@@ -279,6 +322,56 @@ def api_alerts():
             r['created_at'] = r['created_at'].isoformat()
     conn.close()
     return rows
+
+
+@app.get("/api/export/csv")
+def api_export_csv(days: int = Query(30, ge=1, le=365)):
+    """Exporta interações do período em CSV."""
+    import csv
+    from io import StringIO
+    since = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT id, created_at, student_name, phone, tema, subtema, sentimento,
+               resolvido, nps_implicito, pergunta_aluno, resposta_agente, avaliacao, conv_id
+        FROM interaction_summary WHERE created_at >= %s
+        ORDER BY id DESC
+    """, (since,))
+    rows = cur.fetchall()
+    conn.close()
+    buf = StringIO()
+    w = csv.writer(buf)
+    w.writerow(['id', 'created_at', 'student_name', 'phone', 'tema', 'subtema', 'sentimento',
+                'resolvido', 'nps_implicito', 'pergunta_aluno', 'resposta_agente', 'avaliacao', 'conv_id'])
+    for r in rows:
+        w.writerow([
+            r.get('id'), r.get('created_at'), r.get('student_name'), r.get('phone'),
+            r.get('tema'), r.get('subtema'), r.get('sentimento'), r.get('resolvido'),
+            r.get('nps_implicito'), r.get('pergunta_aluno'), r.get('resposta_agente'),
+            r.get('avaliacao'), r.get('conv_id'),
+        ])
+    from fastapi.responses import Response
+    fname = f"interacoes_agente_{days}d.csv"
+    return Response(
+        content='\ufeff' + buf.getvalue(),
+        media_type='text/csv; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename="{fname}"'},
+    )
+
+
+@app.get("/cockpit", response_class=HTMLResponse)
+def serve_cockpit_redirect():
+    """Redireciona para o Cockpit KB (kb_api na porta 8000)."""
+    return HTMLResponse("""
+    <!DOCTYPE html><html><head><meta charset="utf-8">
+    <meta http-equiv="refresh" content="0;url=http://localhost:8000/">
+  <title>Cockpit KB</title></head>
+    <body style="font-family:sans-serif;background:#0f1117;color:#e4e6ed;padding:40px">
+    <p>Abrindo Cockpit KB… Se não redirecionar, <a href="http://localhost:8000/" style="color:#818cf8">clique aqui</a>.</p>
+    <p style="color:#8b8fa3;margin-top:20px">Execute: <code>uvicorn kb_api:app --port 8000</code></p>
+    </body></html>
+    """)
 
 
 @app.get("/", response_class=HTMLResponse)

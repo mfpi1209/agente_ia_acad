@@ -87,6 +87,105 @@ def _create_indexes():
     conn.close()
 
 
+def _agent_watchdog_loop():
+    """Verifica heartbeat do agente a cada 60s.
+    Se status='online' mas last_beat > 5 min, reinicia automaticamente."""
+    import time as _t
+    import psycopg2 as _pg
+    threshold_min = float(os.environ.get('AGENT_WATCHDOG_THRESHOLD_MIN', '10'))
+    interval_s = int(os.environ.get('AGENT_WATCHDOG_INTERVAL_S', '60'))
+    while True:
+        try:
+            _t.sleep(interval_s)
+            conn = _pg.connect(**DB_CONFIG)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT status, EXTRACT(EPOCH FROM (NOW() - last_beat))/60, pid
+                FROM agent_heartbeat WHERE id=1
+            """)
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            if not row:
+                continue
+            status, age_min, pid = row
+            if status != 'online':
+                continue
+            if age_min is None or age_min < threshold_min:
+                continue
+            print(f"[WATCHDOG] Heartbeat parado ha {age_min:.1f} min (pid={pid}) -> reiniciando agente", flush=True)
+            _restart_agent_internal(reason=f'watchdog: heartbeat {age_min:.1f} min de atraso')
+        except Exception as _e:
+            print(f"[WATCHDOG] erro: {_e}", flush=True)
+
+
+def _restart_agent_internal(reason='watchdog'):
+    """Para e inicia o agente; registra alerta na fila Cockpit."""
+    global _agent_process, _agent_log_file
+    try:
+        if _agent_process is not None and _agent_process.poll() is None:
+            try:
+                _agent_process.terminate()
+                _agent_process.wait(timeout=5)
+            except Exception:
+                try:
+                    _agent_process.kill()
+                except Exception:
+                    pass
+        _agent_process = None
+        if _agent_log_file:
+            try:
+                _agent_log_file.close()
+            except Exception:
+                pass
+            _agent_log_file = None
+
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM msg_dedup WHERE processed_at > NOW() - INTERVAL '2 hours'")
+                conn.commit()
+                cur.close()
+        except Exception:
+            pass
+
+        env = os.environ.copy()
+        env['PHONE_TO_MONITOR'] = _agent_test_phone
+        env['PYTHONUNBUFFERED'] = '1'
+        _agent_log_file = open(_AGENT_LOG_PATH, 'a', encoding='utf-8', errors='replace')
+        _agent_log_file.write(f"\n\n=== [WATCHDOG] Restart automatico: {reason} ===\n")
+        _agent_log_file.flush()
+        creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        _agent_process = subprocess.Popen(
+            [sys.executable, '-u', 'agente_ao_vivo_v4.py'],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            env=env,
+            stdout=_agent_log_file, stderr=subprocess.STDOUT,
+            creationflags=creation_flags,
+        )
+        print(f"[WATCHDOG] Agente reiniciado pid={_agent_process.pid}", flush=True)
+
+        try:
+            from datetime import datetime as _dt
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO agent_config (key, value, updated_at)
+                    VALUES ('agent_last_auto_restart', %s, NOW())
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                """, (json.dumps({
+                    'when': _dt.utcnow().isoformat() + 'Z',
+                    'reason': reason,
+                    'new_pid': _agent_process.pid,
+                }),))
+                conn.commit()
+                cur.close()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[WATCHDOG] falha ao reiniciar agente: {e}", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app):
     skip = os.environ.get('SKIP_MIGRATIONS', 'false').lower() == 'true'
@@ -96,6 +195,10 @@ async def lifespan(app):
         t = threading.Thread(target=_run_migrations_background, daemon=True)
         t.start()
         print("[API] Migrations iniciadas em background", flush=True)
+    if os.environ.get('AGENT_WATCHDOG_ENABLED', 'true').lower() == 'true':
+        wd = threading.Thread(target=_agent_watchdog_loop, daemon=True)
+        wd.start()
+        print("[API] Watchdog do agente iniciado", flush=True)
     print("[API] Startup completo", flush=True)
     yield
 
@@ -1750,6 +1853,689 @@ async def tabulation_stats():
         }
 
 
+def _ensure_caa_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS caa_solicitacoes (
+            id SERIAL PRIMARY KEY,
+            cpf VARCHAR(14),
+            rgm VARCHAR(32),
+            aluno_nome VARCHAR(255),
+            polo VARCHAR(255),
+            subprocesso VARCHAR(255),
+            data_chegada DATE,
+            data_previsao DATE,
+            data_conclusao DATE,
+            protocolo VARCHAR(64),
+            aging_dias INT,
+            observacao TEXT,
+            situacao_atendimento VARCHAR(64),
+            situacao_deferimento VARCHAR(64),
+            celular VARCHAR(20),
+            email VARCHAR(255),
+            curso VARCHAR(255),
+            instituicao VARCHAR(255),
+            qtd_protocolos INT,
+            imported_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_caa_cpf ON caa_solicitacoes (cpf)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_caa_situacao "
+        "ON caa_solicitacoes (situacao_atendimento, situacao_deferimento)"
+    )
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS caa_import_history (
+            id SERIAL PRIMARY KEY,
+            imported_at TIMESTAMP DEFAULT NOW(),
+            total_rows INT,
+            open_count INT,
+            pending_count INT,
+            concluded_count INT,
+            filename VARCHAR(255),
+            uploaded_by VARCHAR(64)
+        )
+    """)
+
+
+def _ensure_pending_escalation_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS pending_escalation (
+            id SERIAL PRIMARY KEY,
+            conv_id VARCHAR(80) NOT NULL,
+            phone VARCHAR(32),
+            student_name VARCHAR(255),
+            reason VARCHAR(64) NOT NULL,
+            tier VARCHAR(16) NOT NULL DEFAULT 'insist',
+            retorno_label VARCHAR(128),
+            pergunta TEXT,
+            status VARCHAR(20) NOT NULL DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            resolved_at TIMESTAMP
+        )
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_pending_escalation_status
+        ON pending_escalation (status, created_at DESC)
+    """)
+
+
+def _load_business_hours_config():
+    """Lê horários do agent_config com fallback nos defaults do Cockpit."""
+    defaults = {
+        'business_hours_weekday_start': 9,
+        'business_hours_weekday_end': 20,
+        'business_hours_saturday_start': 9,
+        'business_hours_saturday_end': 13,
+    }
+    cfg = dict(defaults)
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            keys = tuple(defaults.keys())
+            cur.execute(
+                "SELECT key, value FROM agent_config WHERE key IN %s",
+                (keys,),
+            )
+            for key, value in cur.fetchall():
+                try:
+                    cfg[key] = int(json.loads(value))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    try:
+                        cfg[key] = int(value)
+                    except (TypeError, ValueError):
+                        pass
+            cur.close()
+    except Exception:
+        pass
+    return cfg
+
+
+def _now_sp_dt():
+    from datetime import datetime, timezone, timedelta
+    return datetime.now(timezone.utc) + timedelta(hours=-3)
+
+
+def _is_within_business_hours_api(ref_now=None):
+    cfg = _load_business_hours_config()
+    now = ref_now or _now_sp_dt()
+    dow = now.weekday()
+    hour = now.hour
+    wd_s = cfg['business_hours_weekday_start']
+    wd_e = cfg['business_hours_weekday_end']
+    sat_s = cfg['business_hours_saturday_start']
+    sat_e = cfg['business_hours_saturday_end']
+    if dow <= 4:
+        return wd_s <= hour < wd_e
+    if dow == 5:
+        return sat_s <= hour < sat_e
+    return False
+
+
+def _next_human_available_label_api(ref_now=None):
+    cfg = _load_business_hours_config()
+    now = ref_now or _now_sp_dt()
+    dow = now.weekday()
+    hour = now.hour
+    wd_s = cfg['business_hours_weekday_start']
+    wd_e = cfg['business_hours_weekday_end']
+    sat_s = cfg['business_hours_saturday_start']
+    if dow <= 4 and hour < wd_s:
+        return f"hoje às {wd_s}h"
+    if dow == 5 and hour < sat_s:
+        return f"hoje às {sat_s}h"
+    if dow <= 3 and hour >= wd_e:
+        return f"amanhã às {wd_s}h"
+    if dow == 4 and hour >= wd_e:
+        return f"amanhã às {sat_s}h"
+    if dow == 5 and hour >= cfg['business_hours_saturday_end']:
+        return f"na segunda-feira às {wd_s}h"
+    if dow == 6:
+        return f"na segunda-feira às {wd_s}h"
+    # Dentro do horário (abertura de hoje já passou) → quem insistir à noite retorna amanhã
+    if dow <= 3:
+        return f"amanhã às {wd_s}h"
+    if dow == 4:
+        return f"amanhã às {sat_s}h"
+    if dow == 5:
+        return f"na segunda-feira às {wd_s}h"
+    return f"amanhã às {wd_s}h"
+
+
+def _load_after_hours_dispatch_config():
+    """Lê flags da fila matinal (agent_config + defaults)."""
+    cfg = {
+        'auto_dispatch_morning_queue': AGENT_CONFIG_DEFAULTS.get('auto_dispatch_morning_queue', True),
+        'morning_dispatch_batch_size': AGENT_CONFIG_DEFAULTS.get('morning_dispatch_batch_size', 25),
+        'morning_queue_last_run': '',
+    }
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT key, value FROM agent_config WHERE key IN %s",
+                (('auto_dispatch_morning_queue', 'morning_dispatch_batch_size', 'morning_queue_last_run'),),
+            )
+            for key, value in cur.fetchall():
+                try:
+                    parsed = json.loads(value)
+                except (json.JSONDecodeError, TypeError):
+                    parsed = value
+                if key == 'auto_dispatch_morning_queue':
+                    cfg[key] = parsed if isinstance(parsed, bool) else str(parsed).lower() in ('1', 'true', 'yes', 'sim')
+                elif key == 'morning_dispatch_batch_size':
+                    cfg[key] = int(parsed)
+                else:
+                    cfg[key] = str(parsed).strip().strip('"')
+            cur.close()
+    except Exception:
+        pass
+    return cfg
+
+
+def _load_agent_watchdog_info():
+    """Lê status do heartbeat + último auto-restart."""
+    info = {'heartbeat_status': 'unknown', 'heartbeat_age_min': None, 'last_auto_restart': None}
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT status, EXTRACT(EPOCH FROM (NOW() - last_beat))/60
+                FROM agent_heartbeat WHERE id=1
+            """)
+            row = cur.fetchone()
+            if row:
+                info['heartbeat_status'] = row[0]
+                info['heartbeat_age_min'] = round(float(row[1]), 1) if row[1] is not None else None
+            cur.execute("SELECT value FROM agent_config WHERE key = 'agent_last_auto_restart'")
+            row = cur.fetchone()
+            if row and row[0]:
+                try:
+                    info['last_auto_restart'] = json.loads(row[0])
+                except Exception:
+                    info['last_auto_restart'] = None
+            cur.close()
+    except Exception:
+        pass
+    return info
+
+
+@app.get("/api/after-hours/status")
+async def after_hours_status():
+    """Horário atual (SP), modo de atendimento e próximo retorno humano."""
+    now = _now_sp_dt()
+    cfg = _load_business_hours_config()
+    dispatch = _load_after_hours_dispatch_config()
+    watchdog = _load_agent_watchdog_info()
+    within = _is_within_business_hours_api(now)
+    return {
+        'now_iso': now.isoformat(),
+        'now_display': now.strftime('%d/%m/%Y %H:%M:%S'),
+        'timezone': 'America/Sao_Paulo (UTC-3)',
+        'within_business_hours': within,
+        'mode': 'human_available' if within else 'after_hours',
+        'next_return_label': _next_human_available_label_api(now),
+        'business_hours': {
+            'weekday': f"{cfg['business_hours_weekday_start']}h–{cfg['business_hours_weekday_end']}h (Seg–Sex)",
+            'saturday': f"{cfg['business_hours_saturday_start']}h–{cfg['business_hours_saturday_end']}h",
+            'sunday': 'fechado',
+        },
+        'auto_dispatch': {
+            'enabled': dispatch['auto_dispatch_morning_queue'],
+            'batch_size': dispatch['morning_dispatch_batch_size'],
+            'last_run_date': dispatch['morning_queue_last_run'] or None,
+            'description': (
+                'À abertura do expediente o agente distribui a fila (insistência primeiro), '
+                'transfere no DataCrazy e marca Em atendimento no Cockpit; retenta a cada 10 min. '
+                'Ao encerrar a conversa, marca Resolvido.'
+            ),
+        },
+        'watchdog': watchdog,
+    }
+
+
+@app.get("/api/after-hours/pending")
+async def after_hours_pending(
+    status: str = Query('pending'),
+    tier: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """Lista fila de retornos fora do horário."""
+    allowed_status = {'pending', 'in_progress', 'resolved', 'all', 'active'}
+    if status not in allowed_status:
+        status = 'pending'
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        _ensure_pending_escalation_table(cur)
+        conn.commit()
+        where = ["status != 'superseded'"]
+        params = []
+        if status == 'active':
+            where.append("status IN ('pending', 'in_progress')")
+        elif status != 'all':
+            where.append("status = %s")
+            params.append(status)
+        if tier in ('first', 'insist'):
+            where.append("tier = %s")
+            params.append(tier)
+        w = " AND ".join(where)
+        cur.execute(f"""
+            SELECT id, conv_id, phone, student_name, reason, tier, retorno_label,
+                   pergunta, status, created_at, updated_at, resolved_at
+            FROM pending_escalation
+            WHERE {w}
+            ORDER BY
+              CASE tier WHEN 'insist' THEN 0 WHEN 'first' THEN 1 ELSE 2 END,
+              created_at DESC
+            LIMIT %s
+        """, params + [limit])
+        rows = []
+        for r in cur.fetchall():
+            item = dict(r)
+            for k in ('created_at', 'updated_at', 'resolved_at'):
+                if item.get(k):
+                    item[k] = item[k].isoformat()
+            rows.append(item)
+        cur.execute(f"""
+            SELECT status, COUNT(*) as cnt FROM pending_escalation
+            WHERE status != 'superseded' GROUP BY status
+        """)
+        counts = {r['status']: r['cnt'] for r in cur.fetchall()}
+        cur.execute("""
+            SELECT COUNT(*) as cnt FROM pending_escalation
+            WHERE status IN ('pending', 'in_progress') AND tier = 'insist'
+        """)
+        priority = cur.fetchone()['cnt']
+        return {
+            'items': rows,
+            'counts': counts,
+            'priority_pending': priority,
+        }
+
+
+@app.patch("/api/after-hours/pending/{item_id}")
+async def after_hours_pending_update(item_id: int, request: Request):
+    """Atualiza status da fila (pending → in_progress → resolved)."""
+    data = await request.json()
+    new_status = (data.get('status') or '').strip()
+    if new_status not in ('pending', 'in_progress', 'resolved', 'dismissed'):
+        raise HTTPException(400, 'status inválido')
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        _ensure_pending_escalation_table(cur)
+        resolved_clause = ", resolved_at = NOW()" if new_status == 'resolved' else ", resolved_at = NULL"
+        cur.execute(
+            f"UPDATE pending_escalation SET status = %s, updated_at = NOW(){resolved_clause} WHERE id = %s RETURNING id",
+            (new_status, item_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, 'Registro não encontrado')
+        conn.commit()
+        return {'ok': True, 'id': item_id, 'status': new_status}
+
+
+# ===================== CAA SOLICITAÇÕES =====================
+
+def _clean_cpf(value) -> str:
+    if value is None:
+        return ''
+    s = re.sub(r'\D', '', str(value))
+    if not s:
+        return ''
+    if len(s) < 11:
+        s = s.zfill(11)
+    return s[:14]
+
+
+def _to_date(value):
+    if value is None or value == '':
+        return None
+    if hasattr(value, 'date'):
+        try:
+            return value.date()
+        except Exception:
+            pass
+    if hasattr(value, 'year'):
+        return value
+    s = str(value).strip()
+    if not s:
+        return None
+    from datetime import datetime as _dt
+    for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d %H:%M:%S'):
+        try:
+            return _dt.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _to_int(value):
+    if value is None or value == '':
+        return None
+    try:
+        return int(float(str(value).replace(',', '.')))
+    except (TypeError, ValueError):
+        return None
+
+
+# Header esperado (case-insensitive, aceita variações)
+_CAA_COLS = {
+    'rgm': ['RGM'],
+    'aluno_nome': ['Aluno', 'Nome'],
+    'cpf': ['CPF'],
+    'polo': ['Polo'],
+    'subprocesso': ['Subprocesso', 'Sub processo', 'Tipo'],
+    'data_chegada': ['Data Chegada', 'Data de Chegada'],
+    'data_previsao': ['Data Previsao', 'Data Previsão'],
+    'data_conclusao': ['Data Conclusao', 'Data Conclusão'],
+    'protocolo': ['Protocolo'],
+    'aging_dias': ['Aging Dias', 'Aging', 'Dias'],
+    'observacao': ['Observacao', 'Observação', 'Obs'],
+    'situacao_atendimento': ['Situacao Atendimento', 'Situação Atendimento'],
+    'situacao_deferimento': ['Situacao Deferimento', 'Situação Deferimento'],
+    'celular': ['Celular', 'Telefone'],
+    'email': ['Email', 'E-mail'],
+    'curso': ['Curso'],
+    'instituicao': ['Instituicao', 'Instituição'],
+    'qtd_protocolos': ['Qtd. Protocolos', 'Qtd Protocolos', 'Quantidade'],
+}
+
+
+def _normalize_header(h):
+    if not h:
+        return ''
+    import unicodedata
+    s = str(h).strip()
+    s = ''.join(c for c in unicodedata.normalize('NFD', s)
+                if unicodedata.category(c) != 'Mn')
+    return s.lower()
+
+
+def _build_col_index(header_row):
+    """Mapeia nome lógico -> índice da coluna na planilha."""
+    normalized = [_normalize_header(h) for h in header_row]
+    idx = {}
+    for logical, candidates in _CAA_COLS.items():
+        for cand in candidates:
+            cand_norm = _normalize_header(cand)
+            if cand_norm in normalized:
+                idx[logical] = normalized.index(cand_norm)
+                break
+    return idx
+
+
+@app.post("/api/caa/upload")
+async def caa_upload(file: UploadFile = File(...)):
+    """Recebe XLSX do SIAA, faz TRUNCATE + INSERT em transacao."""
+    if not file.filename.lower().endswith(('.xlsx', '.xlsm')):
+        raise HTTPException(400, "Arquivo deve ser .xlsx")
+    try:
+        import openpyxl
+    except ImportError:
+        raise HTTPException(500, "openpyxl nao instalado no servidor")
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Arquivo vazio")
+    if len(content) > 50 * 1024 * 1024:
+        raise HTTPException(400, "Arquivo maior que 50MB")
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Falha ao abrir XLSX: {e}")
+
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+    try:
+        header = next(rows_iter)
+    except StopIteration:
+        raise HTTPException(400, "Planilha sem cabeçalho")
+
+    col_idx = _build_col_index(header)
+    missing_required = [k for k in ('cpf', 'subprocesso', 'situacao_atendimento') if k not in col_idx]
+    if missing_required:
+        raise HTTPException(
+            400,
+            f"Colunas obrigatórias ausentes: {', '.join(missing_required)}. "
+            f"Cabeçalho recebido: {[str(h) for h in header]}"
+        )
+
+    parsed = []
+    open_count = pending_count = concluded_count = 0
+    skipped = 0
+    for row in rows_iter:
+        if not row:
+            continue
+        try:
+            cpf = _clean_cpf(row[col_idx['cpf']]) if 'cpf' in col_idx else ''
+            sub = row[col_idx['subprocesso']] if 'subprocesso' in col_idx else None
+        except IndexError:
+            skipped += 1
+            continue
+        if not cpf and not sub:
+            skipped += 1
+            continue
+
+        def g(key):
+            i = col_idx.get(key)
+            if i is None or i >= len(row):
+                return None
+            return row[i]
+
+        sit_at = (g('situacao_atendimento') or '')
+        sit_def = (g('situacao_deferimento') or '')
+        sit_at_s = str(sit_at).strip().upper()
+        sit_def_s = str(sit_def).strip().lower()
+
+        if sit_at_s == 'PENDENTE':
+            pending_count += 1
+        if 'em aberto' in sit_def_s:
+            open_count += 1
+        if sit_at_s == 'CONCLUIDO' or sit_at_s == 'CONCLUÍDO':
+            concluded_count += 1
+
+        parsed.append((
+            cpf,
+            str(g('rgm') or '')[:32],
+            str(g('aluno_nome') or '')[:255],
+            str(g('polo') or '')[:255],
+            str(sub or '')[:255],
+            _to_date(g('data_chegada')),
+            _to_date(g('data_previsao')),
+            _to_date(g('data_conclusao')),
+            str(g('protocolo') or '')[:64],
+            _to_int(g('aging_dias')),
+            str(g('observacao') or '')[:8000],
+            str(sit_at or '')[:64],
+            str(sit_def or '')[:64],
+            str(g('celular') or '')[:20],
+            str(g('email') or '')[:255],
+            str(g('curso') or '')[:255],
+            str(g('instituicao') or '')[:255],
+            _to_int(g('qtd_protocolos')),
+        ))
+
+    if not parsed:
+        raise HTTPException(400, "Nenhuma linha válida na planilha")
+
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            _ensure_caa_table(cur)
+            cur.execute("TRUNCATE TABLE caa_solicitacoes")
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO caa_solicitacoes
+                    (cpf, rgm, aluno_nome, polo, subprocesso,
+                     data_chegada, data_previsao, data_conclusao,
+                     protocolo, aging_dias, observacao,
+                     situacao_atendimento, situacao_deferimento,
+                     celular, email, curso, instituicao, qtd_protocolos)
+                VALUES %s
+                """,
+                parsed,
+                page_size=500,
+            )
+            cur.execute(
+                """
+                INSERT INTO caa_import_history
+                    (total_rows, open_count, pending_count, concluded_count, filename, uploaded_by)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id, imported_at
+                """,
+                (len(parsed), open_count, pending_count, concluded_count, file.filename[:255], 'cockpit'),
+            )
+            hist_row = cur.fetchone()
+            conn.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao importar: {e}")
+
+    return {
+        'ok': True,
+        'total': len(parsed),
+        'open': open_count,
+        'pending': pending_count,
+        'concluded': concluded_count,
+        'skipped': skipped,
+        'import_id': hist_row[0],
+        'imported_at': hist_row[1].isoformat() if hist_row[1] else None,
+        'filename': file.filename,
+    }
+
+
+@app.get("/api/caa/status")
+async def caa_status():
+    """Retorna status da ultima importacao + contagens atuais."""
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        _ensure_caa_table(cur)
+        conn.commit()
+        cur.execute("SELECT COUNT(*) AS cnt FROM caa_solicitacoes")
+        total = cur.fetchone()['cnt']
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE LOWER(situacao_deferimento) LIKE %s) AS open_count,
+                COUNT(*) FILTER (WHERE UPPER(situacao_atendimento) = 'PENDENTE') AS pending_count,
+                COUNT(*) FILTER (WHERE UPPER(situacao_atendimento) IN ('CONCLUIDO','CONCLUÍDO')) AS concluded_count,
+                COUNT(*) FILTER (WHERE UPPER(situacao_atendimento) = 'CANCELADO') AS cancelled_count
+            FROM caa_solicitacoes
+        """, ('%em aberto%',))
+        agg = dict(cur.fetchone() or {})
+        cur.execute("""
+            SELECT id, imported_at, total_rows, open_count, pending_count, concluded_count,
+                   filename, uploaded_by
+            FROM caa_import_history
+            ORDER BY imported_at DESC
+            LIMIT 5
+        """)
+        history = []
+        for r in cur.fetchall():
+            item = dict(r)
+            if item.get('imported_at'):
+                item['imported_at'] = item['imported_at'].isoformat()
+            history.append(item)
+        return {
+            'total': total,
+            'open': agg.get('open_count', 0),
+            'pending': agg.get('pending_count', 0),
+            'concluded': agg.get('concluded_count', 0),
+            'cancelled': agg.get('cancelled_count', 0),
+            'last_import': history[0] if history else None,
+            'history': history,
+        }
+
+
+@app.get("/api/caa/by-cpf/{cpf}")
+async def caa_by_cpf(cpf: str, limit: int = Query(20, ge=1, le=100)):
+    """Lista solicitacoes de um CPF (debug/preview)."""
+    clean = _clean_cpf(cpf)
+    if not clean or len(clean) != 11:
+        raise HTTPException(400, "CPF inválido")
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        _ensure_caa_table(cur)
+        conn.commit()
+        cur.execute("""
+            SELECT id, cpf, rgm, aluno_nome, polo, subprocesso,
+                   data_chegada, data_previsao, data_conclusao,
+                   protocolo, aging_dias, observacao,
+                   situacao_atendimento, situacao_deferimento,
+                   celular, email, curso, instituicao, qtd_protocolos
+            FROM caa_solicitacoes WHERE cpf = %s
+            ORDER BY data_chegada DESC NULLS LAST
+            LIMIT %s
+        """, (clean, limit))
+        items = []
+        for r in cur.fetchall():
+            item = dict(r)
+            for k in ('data_chegada', 'data_previsao', 'data_conclusao'):
+                if item.get(k):
+                    item[k] = item[k].isoformat()
+            items.append(item)
+        return {'cpf': clean, 'count': len(items), 'items': items}
+
+
+@app.get("/api/caa/list")
+async def caa_list(
+    search: str = Query('', max_length=120),
+    situacao: str = Query('', max_length=32),
+    deferimento: str = Query('', max_length=32),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(25, ge=1, le=100),
+):
+    """Lista paginada para o painel."""
+    offset = (page - 1) * per_page
+    where = ['1=1']
+    params = []
+    if search:
+        clean_search = re.sub(r'\D', '', search)
+        if len(clean_search) >= 6:
+            where.append("cpf LIKE %s")
+            params.append('%' + clean_search + '%')
+        else:
+            where.append("(LOWER(aluno_nome) LIKE %s OR LOWER(subprocesso) LIKE %s OR protocolo LIKE %s)")
+            like = '%' + search.lower() + '%'
+            params.extend([like, like, '%' + search + '%'])
+    if situacao:
+        where.append("UPPER(situacao_atendimento) = %s")
+        params.append(situacao.upper())
+    if deferimento:
+        where.append("LOWER(situacao_deferimento) LIKE %s")
+        params.append('%' + deferimento.lower() + '%')
+    w = ' AND '.join(where)
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        _ensure_caa_table(cur)
+        conn.commit()
+        cur.execute(f"SELECT COUNT(*) AS cnt FROM caa_solicitacoes WHERE {w}", params)
+        total = cur.fetchone()['cnt']
+        cur.execute(f"""
+            SELECT id, cpf, rgm, aluno_nome, polo, subprocesso,
+                   data_chegada, aging_dias,
+                   situacao_atendimento, situacao_deferimento, protocolo, curso
+            FROM caa_solicitacoes
+            WHERE {w}
+            ORDER BY data_chegada DESC NULLS LAST, id DESC
+            LIMIT %s OFFSET %s
+        """, params + [per_page, offset])
+        items = []
+        for r in cur.fetchall():
+            item = dict(r)
+            if item.get('data_chegada'):
+                item['data_chegada'] = item['data_chegada'].isoformat()
+            items.append(item)
+        return {
+            'items': items,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'pages': (total + per_page - 1) // per_page if total else 0,
+        }
+
+
 @app.get("/api/memory/list")
 async def list_memories(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=50)):
     """Lista memórias de alunos."""
@@ -2553,6 +3339,38 @@ AGENT_CONFIG_DEFAULTS = {
     "greeting_new": "Olá, *{fname}*! Bem-vindo(a) ao Suporte da *Cruzeiro do Sul* 😊\n\nComo posso te ajudar?\n\nEscolha uma opção abaixo para agilizar seu atendimento 👇",
     "greeting_anonymous": "Olá! Bem-vindo ao Suporte ao Aluno da *Cruzeiro do Sul* 😊\n\nComo posso te ajudar?\n\nEscolha uma opção abaixo para agilizar seu atendimento 👇",
     "greeting_buttons": ["Acesso Portal/App", "Financeiro", "Aulas e Conteúdo", "Documentos", "Rematrícula", "Falar com atendente"],
+    "business_hours_weekday_start": 9,
+    "business_hours_weekday_end": 20,
+    "business_hours_saturday_start": 9,
+    "business_hours_saturday_end": 13,
+    "after_hours_first_msg": (
+        "Oii{name}! Nesse momento nosso time de atendimento humano está fora do horário, "
+        "mas eu (assistente virtual) sigo por aqui pra tentar te ajudar agora mesmo 😊\n\n"
+        "📅 *Segunda a Sexta*: 09h às 20h\n"
+        "📅 *Sábado*: 09h às 13h\n\n"
+        "Me conta o que você precisa que eu já vou tentando resolver com você."
+    ),
+    "after_hours_insist_msg": (
+        "Entendi{name}! Para esse caso é melhor falar com um(a) consultor(a) mesmo, "
+        "e o nosso time retorna o atendimento *{retorno_label}*. "
+        "Vou deixar registrado por aqui pra que assim que abrir o horário, alguém te chame. "
+        "Enquanto isso, se quiser, posso te ajudar com outras dúvidas — é só me dizer 😊"
+    ),
+    "retention_after_hours_msg": (
+        "Oii{name}, entendi 💙\n\n"
+        "Essa é uma decisão importante e a gente quer te ouvir com a atenção que você merece. "
+        "Para esse assunto, quem cuida com carinho é o *Wesley*, nosso consultor especializado.\n\n"
+        "No momento ele está fora do horário de atendimento, mas assim que retomar *{retorno_label}* "
+        "ele entra em contato com você por aqui mesmo, tá? 😊\n\n"
+        "Enquanto isso, se precisar de ajuda com *acesso, boleto, aulas* ou qualquer outra coisa, "
+        "é só me chamar — eu sigo por aqui pra te ajudar."
+    ),
+    "human_busy_msg": (
+        "Nossos atendentes estão todos em atendimento agora, mas fica tranquilo{name}! "
+        "Em pouquinho alguém vai te chamar aqui 😊"
+    ),
+    "auto_dispatch_morning_queue": True,
+    "morning_dispatch_batch_size": 25,
 }
 
 

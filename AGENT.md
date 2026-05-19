@@ -1,0 +1,324 @@
+# AGENT.md — registro de decisões estruturais
+
+## Convenções
+
+- Decisões registradas em ordem cronológica decrescente.
+- Cada entrada: **Decisão**, **Contexto**, **Alternativas descartadas**, **Impacto**.
+
+---
+
+### [2026-05-19] - Integração CAA SIAA (snapshot diário de solicitações)
+
+**Decisão**
+Adicionar pipeline de ingestão das solicitações do SIAA (centro de atendimento
+ao aluno) para que o agente possa cruzar por CPF e mencionar solicitações
+existentes de forma natural quando a dúvida do aluno for relacionada.
+
+Arquitetura:
+1. **Storage:** tabelas `caa_solicitacoes` e `caa_import_history` no DB
+   principal `agente_ia` (Postgres). Cada upload é um snapshot completo
+   (`TRUNCATE` + `INSERT` em transação). Histórico em `caa_import_history`.
+2. **Upload:** endpoint `POST /api/caa/upload` em `kb_api.py` recebe XLSX,
+   parseia com `openpyxl` em `read_only=True` (streaming, suporta planilhas
+   grandes), normaliza CPF (`re.sub` + `zfill(11)`) e faz bulk insert
+   transacional. Endpoints auxiliares: `GET /api/caa/status`,
+   `GET /api/caa/by-cpf/{cpf}`, `GET /api/caa/list?...`.
+3. **UI:** nova aba **"Solicitações CAA"** no Cockpit (`kb_admin.html`) com
+   card de status (último upload + contagens), botão de upload, tabela
+   paginada com filtros (nome/CPF/protocolo, situação, deferimento) e
+   histórico das 5 últimas importações.
+4. **Agente:** função `fetch_caa_solicitacoes(cpf)` em
+   `agente_ao_vivo_v4.py`, chamada nos mesmos pontos onde
+   `fetch_academic_data` é invocada (em `handle_message` após
+   identificação do aluno e no fluxo de validação por CPF). Resultado vai
+   em `profile['caa_solicitacoes']`.
+5. **Contexto LLM:** `build_student_context` ganhou bloco
+   `## SOLICITACOES CAA` com até 8 itens (data, subprocesso, protocolo,
+   situação, observação resumida das em aberto) + regras estritas:
+   menção APENAS quando a dúvida for relacionada; uma solicitação por
+   resposta; nunca proativo na saudação; tratamento diferente para
+   `Em aberto` / `Deferido` / `Indeferido`.
+
+**Contexto**
+A operação acadêmica usa o SIAA como sistema de protocolos de solicitações
+(histórico escolar, colação, declarações, trancamento, acesso etc.). Hoje
+o aluno frequentemente abre a conversa via WhatsApp já tendo uma solicitação
+em andamento ou recém-resolvida no SIAA, e o agente respondia genericamente
+sem saber disso — gerando atrito (aluno achando que ninguém viu, ou pedindo
+algo que já está deferido). A planilha do SIAA é exportada diariamente (~150k
+linhas no histórico atual), com 18 colunas incluindo RGM, CPF, subprocesso,
+datas, observação e situação.
+
+**Alternativas descartadas**
+- *Sync direto com SIAA (API/DB):* exigiria credenciais e contrato com
+  o time do SIAA, custo desproporcional. Snapshot diário via XLSX é o que
+  o usuário já tem disponível.
+- *Pasta monitorada para auto-import:* exige rotina paralela e introduz
+  pontos de falha (arquivo corrompido, encoding etc.). Upload manual via
+  Cockpit dá controle direto e feedback imediato (contagens, erros).
+- *Mencionar proativamente na saudação:* viraria poluição quando o aluno
+  abre conversa sobre outro assunto. Decisão: LLM decide com base no
+  contexto da pergunta (`smart`).
+- *Estratégia INCREMENTAL (upsert):* dados do SIAA mudam de status, dias
+  em aberto recalculam, etc. Snapshot completo via TRUNCATE+INSERT é mais
+  simples e fiel ao estado de verdade do dia.
+
+**Impacto**
+Primeira importação: **149.999 linhas** (881 em aberto, 902 pendentes,
+147.657 concluídas, 1.440 canceladas). Contagens batem com a planilha
+fonte (apenas 3 linhas sem CPF/subprocesso foram skipped).
+
+Em runtime, o lookup é por `cpf` indexado e custa < 5ms por mensagem.
+Log mostra `[CAA] N solicitacao(oes) | em aberto: K` para cada aluno
+identificado, dando visibilidade imediata.
+
+Arquivos:
+- [kb_api.py](kb_api.py): `_ensure_caa_table`, `_clean_cpf`, `_to_date`,
+  `_to_int`, `_normalize_header`, `_build_col_index`, endpoints
+  `/api/caa/{upload,status,by-cpf/{cpf},list}`.
+- [kb_admin.html](kb_admin.html): aba `tab-caa`, funções `initCaa`,
+  `loadCaaStatus`, `loadCaaList`, `caaUpload`.
+- [agente_ao_vivo_v4.py](agente_ao_vivo_v4.py): `fetch_caa_solicitacoes`,
+  hook em `handle_message` (CPF validado + path normal), bloco
+  `SOLICITACOES CAA` em `build_student_context`.
+
+Operação: usuário substitui o snapshot diariamente arrastando o
+`data.xlsx` na aba CAA do Cockpit. Não é necessário reiniciar agente —
+o lookup lê direto da tabela.
+
+---
+
+### [2026-05-19] - Resgate automático pós-encerramento (process_post_close_rescue)
+
+**Decisão**
+Criar rotina `process_post_close_rescue()` que detecta conversas reabertas
+após encerramento de atendente humano (sem atendente atribuído + cliente
+mandou mensagem 5 a 60 min atrás + histórico recente contém evento de
+encerramento). Para cada caso:
+1. Se a última msg do aluno for **despedida** (obrigado, valeu, ok, tchau,
+   blz, 👍, 🙏, etc., detectado por `_is_farewell_message`): o bot envia
+   agradecimento humanizado curto e finaliza a conversa novamente
+   (`close_conversation_crm`). NÃO atribui atendente — não tem sentido
+   ocupar um humano com uma despedida.
+2. Se for **dúvida real**: tenta sticky last-attendant — extrai o nome
+   do atendente que encerrou via regex no histórico
+   (`_extract_last_attendant_from_history`, padrão "Camila Ferreira
+   finalizou o atendimento") e, se ele estiver ativo agora
+   (`is_attendant_active_now`), re-atribui com mensagem "Vou pedir para a
+   *Camila*, que estava te atendendo, dar continuidade". Se o atendente
+   anterior não está ativo, cai no fluxo normal de distribuição (menor
+   fila). Se nenhum consultor disponível, registra `human_unavailable`
+   em `pending_escalation` para visibilidade no Cockpit.
+
+**Contexto**
+Em 2026-05-19, o usuário reportou caso do aluno **Angelo Antonio Junior**:
+- 13:34 - Camila Ferreira finalizou o atendimento
+- 13:36 - Aluno respondeu (DCZ reabriu a conversa em "Atendimento" SEM atendente)
+- DCZ enviou card automático "Este atendimento foi encerrado, se quiser
+  retornar..."
+- Conversa ficou parada sem atendente
+
+O `process_in_hours_rescue` (criado mais cedo) pegaria isso em 10 min e
+atribuiria um consultor qualquer. Mas:
+1. Se for só despedida, ocupa um humano sem necessidade
+2. Se for dúvida real, perde continuidade ao trocar de atendente
+3. 10 min é muito para uma despedida onde 2 min basta para fechar
+
+**Alternativas descartadas**
+- *Tratar dentro do `handle_message` quando mensagem chega*: o fluxo
+  natural já tenta tratar, mas conversas reabertas pelo DCZ entram com
+  filtros diferentes (status finished migra para open, etc.) e às vezes
+  são silenciosas. Função dedicada é mais robusta.
+- *Sempre finalizar quando última msg parece despedida, sem analisar*:
+  arriscado — "obrigado, queria saber sobre X" começaria com despedida
+  mas tem dúvida real. A heurística `_is_farewell_message` exige que
+  após remover keywords sobrem ≤2 palavras significativas.
+- *Sempre re-atribuir ao mesmo atendente, mesmo offline*: criaria órfã
+  permanente. Fallback para menor fila é necessário.
+
+**Impacto**
+- Despedidas pós-encerramento são fechadas em até 10s do próximo ciclo
+  (cycle % 10), com agradecimento humanizado. Aluno não fica olhando
+  "sem resposta" e a equipe não vê órfã.
+- Reaberturas com dúvida real preservam continuidade do atendente
+  (sticky), respeitando a relação humana já estabelecida.
+- Padrão de detecção de "atendente que encerrou" é regex simples no
+  body do evento DCZ; funciona com formato atual "<Nome Sobrenome>
+  finalizou o atendimento".
+- Caso manual do Angelo: tratado em paralelo pelo `_fix_angelo.py`
+  (Camila offline → transferido para Felipe).
+
+Constantes (em `agente_ao_vivo_v4.py`):
+- `POST_CLOSE_RESCUE_AGE_MIN = 5`
+- `POST_CLOSE_RESCUE_MAX_AGE_MIN = 60`
+- `POST_CLOSE_RESCUE_COOLDOWN_S = 1800`
+- `_FAREWELL_KEYWORDS` e `_FAREWELL_EMOJIS` listam padrões de despedida
+
+---
+
+### [2026-05-19] - Resgate automático de órfãs dentro do horário (process_in_hours_rescue)
+
+**Decisão**
+Criar rotina `process_in_hours_rescue()` que roda a cada 10 ciclos do loop
+principal e, dentro do horário comercial, detecta conversas órfãs (sem
+atendente, cliente sem resposta ≥ 10 min, idade ≤ 6h) e:
+1. Atribui ao consultor ativo com menor fila (mesma lógica de `get_available_consultant`).
+2. Envia mensagem humanizada de desculpa ao aluno no chat público.
+3. Registra nota interna explicando o resgate.
+4. Incrementa `fila` no Supabase e marca `pending_escalation` como resolved
+   (se existir).
+5. Se não houver consultor disponível, registra em `pending_escalation` com
+   `reason='human_unavailable'` para aparecer no painel.
+
+**Contexto**
+Em 2026-05-19, mesmo após correções pontuais (media-only dentro do horário,
+human_unavailable em pending_escalation, fix do grade_link, preferred_attendant),
+o usuário continuou identificando conversas órfãs na aba "Não iniciados" do
+DCZ — alunos que mandaram mensagem e ficaram sem resposta por 10-70 min sem
+atendente atribuído. Foram resgatadas 8 conversas manualmente como base do
+levantamento. O padrão é recorrente porque os bugs/edge cases do agente são
+diversos (RAG falha silenciosa, dedup mata mensagem, watchdog reinicia no meio
+de um ciclo, fluxo entra em estado não previsto, etc.), e isolar caso a caso
+é jogo de Whac-A-Mole.
+
+**Alternativas descartadas**
+- *Reprocessar internamente cada conversa órfã via handle_message*:
+  arriscado — pode duplicar respostas, re-acionar fluxos travados pelo mesmo
+  bug que causou a órfã, ou cair em loop. Não vale a complexidade.
+- *Apenas notificar no painel sem atribuir*: depende de alguém olhar o
+  painel ativamente, o que é exatamente o problema que o usuário pediu para
+  evitar ("não precisar ficar sempre pedindo"). Descartado.
+- *Threshold de 5 min*: agressivo demais — pegaria conversas que o bot
+  ainda iria processar no próximo ciclo. Descartado em favor de 10 min.
+
+**Impacto**
+Conversas órfãs deixam de depender de inspeção manual. Risco controlado:
+não interfere em conversas com atendente atribuído, respeita cooldown de
+30 min por conversa, ignora finished/finalized, só age dentro do horário,
+e a mensagem ao aluno é humanizada (não delata o resgate como falha
+do sistema). Se não houver consultor disponível, ainda assim a conversa
+fica registrada no painel `pending_escalation` para ação manual.
+
+Constantes principais (em `agente_ao_vivo_v4.py`):
+- `IN_HOURS_RESCUE_AGE_MIN = 10`
+- `IN_HOURS_RESCUE_MAX_AGE_MIN = 360`
+- `IN_HOURS_RESCUE_COOLDOWN_S = 1800`
+
+---
+
+### [2026-05-19] - Consultor preferido sticky (preferred_attendant)
+
+**Decisão**
+Adicionar coluna `preferred_attendant VARCHAR(64)` na tabela `pending_escalation`
+e, dentro do horário comercial, antes do fluxo normal, honrar promessas anteriores
+de um consultor específico feito ao aluno fora do horário.
+
+**Contexto**
+Em 2026-05-19, a aluna Edna pediu trancar matrícula às 08:23 (fora do horário).
+O agente respondeu corretamente prometendo o Wesley e registrou
+`pending_escalation` com `reason='retention_after_hours'`, mas SEM marcar Wesley
+como preferred. Quando a aluna voltou após as 9h, o fluxo normal de distribuição
+rodou e ela foi enviada para outro consultor, contradizendo a promessa.
+
+**Alternativas descartadas**
+- *Tabela nova `conv_preferences`*: limpa, mas duplica a fila de escalation e
+  adiciona ponto de leitura/escrita. Preferi reutilizar `pending_escalation`
+  porque ela já rastreia "promessa feita ao aluno".
+- *Estado só em memória (`_conv_states`)*: perde após restart/watchdog;
+  no contexto noturno o agente reinicia algumas vezes, então é inviável.
+
+**Impacto**
+- Schema: nova coluna `preferred_attendant` (auto-aplicada via
+  `ALTER TABLE ADD COLUMN IF NOT EXISTS`).
+- Comportamento novo:
+  - **Retenção fora do horário** → marca `preferred_attendant='Wesley'`.
+  - **Aluno cita consultor pelo nome** + pista de pedido (ex: "queria falar com
+    a Mariana") fora do horário → marca o nome detectado.
+  - Próxima mensagem do aluno dentro do horário (até 24h depois):
+    - Se consultor está ATIVO no Supabase → transfere + msg humanizada
+      ("Conforme combinamos mais cedo/ontem, vou te conectar com X agora").
+    - Se ainda INATIVO → msg humanizada explicando que está aguardando e
+      oferecendo alternativa.
+- Janela de expiração: **24 horas**. Após isso, o vínculo é ignorado e o aluno
+  segue o fluxo normal.
+- Detecção de pedido nominal exige **um hint de pedido** + **alias do nome** para
+  evitar falsos positivos (ex: "Ontem a Mariana já me ajudou" não dispara).
+- Funções novas em `agente_ao_vivo_v4.py`:
+  - `detect_preferred_attendant(text)`
+  - `get_active_preferred_attendant_promise(conv_id, max_age_hours=24)`
+  - `is_attendant_active_now(attendant_name)`
+  - `honor_preferred_attendant_promise(conv_id, promise)`
+- Constante nova: `ATTENDANT_ALIASES` (mapeia nome canônico → variantes
+  aceitas).
+
+---
+
+### [2026-05-19] - Fallback `human_unavailable` grava em `pending_escalation`
+
+**Decisão**
+Quando o agente cai no fallback "nenhum consultor ativo" durante o horário
+comercial, além de enviar `HUMAN_BUSY_MSG` e nota interna, também registrar
+em `pending_escalation` com `reason='human_unavailable'` e `tier='pending'`.
+
+**Contexto**
+Em 18/05/2026 (segunda) à noite, ~40 conversas caíram nesse fallback porque a
+equipe foi marcando-se Inativo antes do fim do expediente (20h). Conversas com
+atendente histórico recebiam a nota interna direcionada; um lead novo (Quero
+me matricular, telefone 11986769527) ficou órfão: sem atendente, sem pipeline,
+sem entrada na fila do Cockpit. Ninguém viu.
+
+**Alternativas descartadas**
+- *Tratar como after-hours quando ninguém disponível*: confundiria o aluno
+  ("amanhã às 9h" quando ainda é 19h e o expediente formal é até 20h).
+- *Forçar distribuição a um consultor Inativo*: ele pode estar offline o resto
+  do dia; conversa fica parada do mesmo jeito.
+
+**Impacto**
+- Casos `human_unavailable` agora aparecem no painel "Fora do Horário" com
+  rótulo "Sem consultor disponível".
+- Watchdog/fila do Cockpit cobre o caso e a equipe vê pela manhã.
+
+---
+
+### [2026-05-19] - Bug `next_human_available_label` dentro do horário
+
+**Decisão**
+Função `next_human_available_label()` agora retorna `"em breve"` quando
+`is_within_business_hours()` é verdadeiro.
+
+**Contexto**
+A função retornava "amanhã às 9h" mesmo dentro do horário comercial — caso de
+borda esquecido. O bug se materializou via `send_media_only_response()` na
+manhã do dia 19/05, fazendo a aluna Paula Chioratto (já frustrada/detrator)
+receber "te retorno amanhã" quando o atendimento já estava ativo.
+
+**Alternativas descartadas**
+- *Corrigir só em `send_media_only_response`*: deixaria a função genérica
+  vulnerável a outros chamadores. Optei por defesa em profundidade.
+
+**Impacto**
+- Mensagens "fora do horário" dentro do horário não acontecem mais.
+- `send_media_only_response` também foi corrigida: dentro do horário,
+  distribui ao humano imediatamente; fora, mantém o registro em pending.
+
+---
+
+### [2026-05-19] - Watchdog do agente + after-hours rescue
+
+**Decisão**
+1. `kb_api` mantém um thread watchdog que reinicia o agente quando o heartbeat
+   passa de **10 min** sem update.
+2. Agente roda `process_after_hours_rescue()` a cada 10 ciclos fora do horário,
+   pegando conversas com "atendente fantasma" e enviando a mensagem padrão de
+   "fora do horário" (dedup persistente via histórico).
+
+**Contexto**
+Conversas com atendente atribuído ficavam mudas à noite porque o agente
+respeitava o `attendants` e não respondia, mas o humano estava offline. O
+sistema precisava cobrir esse buraco autonomamente.
+
+**Impacto**
+- Heartbeat a cada 2 ciclos + uma vez no início de cada loop.
+- Threshold do watchdog: env `AGENT_WATCHDOG_THRESHOLD_MIN`, default 10.
+- Rescue ignora conversas <10 min e >24h de idade; cooldown de 6h por
+  conversa em memória; dedup pelos fingerprints da mensagem.
