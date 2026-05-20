@@ -3886,12 +3886,15 @@ def process_post_close_rescue():
 
 
 # ===================== SUPERVISOR LOOP (follow-up / close via DCZ, sem depender de _conv_states) =====================
+# IMPORTANTE: o supervisor SO envia texto. Nunca troca atendente, nunca mexe em CRM/pipeline.
+# Pior caso: 1 mensagem a mais. Nunca pode causar caso tipo "Ana Paula" (atribuicao errada).
 _SUPERVISOR_TABLE_READY = False
-SUPERVISOR_MAX_FOLLOWUP_PER_CYCLE = 8
-SUPERVISOR_MAX_CLOSE_PER_CYCLE = 5
-SUPERVISOR_MAX_FOLLOWUP_AGE_S = 8 * 3600       # nao manda 1o follow-up se silencio > 8h
+SUPERVISOR_STATUSES = ('open', 'opened')        # scan ambos status do DCZ
+SUPERVISOR_MAX_FOLLOWUP_PER_CYCLE = 25          # era 8 - aumentado pra cobrir backlog
+SUPERVISOR_MAX_CLOSE_PER_CYCLE = 15             # era 5
+SUPERVISOR_MAX_FOLLOWUP_AGE_S = 60 * 60         # NAO manda 1o follow-up se silencio > 60min (evita ping tardio)
 SUPERVISOR_MAX_CLOSE_AGE_S = 24 * 3600
-SUPERVISOR_ACTION_COOLDOWN_S = 2 * 3600        # nao repete mesma acao na mesma conv em 2h
+SUPERVISOR_ACTION_COOLDOWN_S = 2 * 3600         # nao repete mesma acao na mesma conv em 2h
 
 _FOLLOWUP_BODY_MARKERS = (
     'ainda está por aí', 'ainda esta por ai', 'tudo certo por aí', 'tudo certo por ai',
@@ -4008,28 +4011,75 @@ def _sync_conv_state_after_supervisor(cid, phone, followup_stage, waiting=True):
     st['_human_took_over'] = False
 
 
+def _supervisor_fetch_convs():
+    """Junta conversas de todos os SUPERVISOR_STATUSES com dedup por id."""
+    seen = {}
+    for status in SUPERVISOR_STATUSES:
+        try:
+            r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
+                             params={'limit': 250, 'status': status}, timeout=35)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            convs = data.get('data', data) if isinstance(data, dict) else data
+            for c in (convs if isinstance(convs, list) else []):
+                cid = c.get('id') or c.get('_id')
+                if not cid or cid in seen:
+                    continue
+                seen[cid] = c
+        except Exception as e:
+            p(f"  [SUPERVISOR] erro lista status={status}: {e}")
+    return list(seen.values())
+
+
+def _supervisor_has_attendant_fresh(cid):
+    """Re-fetch da conversa pra confirmar que NAO tem atendente.
+    Usado JUSTO antes de enviar, evita race condition (humano assumiu enquanto loop processava).
+    """
+    try:
+        r = requests.get(f'{DCZ_MSG}/messaging/conversations/{cid}',
+                         headers=H, timeout=10)
+        if r.status_code != 200:
+            return True  # seguranca: se falhou consulta, considera com atendente
+        data = r.json() or {}
+        if data.get('attendants') or []:
+            return True
+        if 'finished' in (data.get('statuses', []) or []):
+            return True
+    except Exception:
+        return True
+    return False
+
+
 def process_supervisor_loop():
     """Varredura independente da memoria: garante follow-up e encerramento por inatividade.
 
-    Usa timestamps do DCZ (lastSended/lastReceived) + ultimas mensagens da thread.
-    Sobrevive a restart do agente; dedup em supervisor_actions no Postgres.
+    GARANTIAS:
+    - SO envia texto (FOLLOWUP_1_MSG ou CLOSE_INACTIVITY_MSG). Nunca troca atendente,
+      nunca move pipeline, nunca toca em CRM/lead.
+    - Filtra rigidamente por INSTANCE_ACADEMICO_ID.
+    - Pula qualquer conversa com atendentes (dupla checagem: lista + re-fetch).
+    - Pula se ja teve acao igual nas ultimas 2h (supervisor_actions).
+    - Nao manda follow-up se silencio > 60min (evita ping tardio em conversa antiga).
+    - Pula handoff/template/encerramentos ja enviados.
     """
     fu_done = 0
     close_done = 0
-    try:
-        r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
-                         params={'limit': 250, 'status': 'open'}, timeout=35)
-        if r.status_code != 200:
-            return
-        data = r.json()
-        convs = data.get('data', data) if isinstance(data, dict) else data
-    except Exception as e:
-        p(f"  [SUPERVISOR] erro lista: {e}")
-        return
-    if not isinstance(convs, list):
+    convs = _supervisor_fetch_convs()
+    if not convs:
         return
 
+    # ordenar por silencio crescente: prioriza conversas frescas (10-30min) sobre antigas
+    enriched = []
     for c in convs:
+        sent = c.get('lastSendedMessageDate', '') or ''
+        sil = _iso_age_seconds(sent)
+        if sil is None or sil < FOLLOWUP_1_DELAY:
+            continue
+        enriched.append((sil, c))
+    enriched.sort(key=lambda x: x[0])  # mais novos primeiro
+
+    for silence_s, c in enriched:
         if close_done >= SUPERVISOR_MAX_CLOSE_PER_CYCLE and fu_done >= SUPERVISOR_MAX_FOLLOWUP_PER_CYCLE:
             break
         try:
@@ -4050,10 +4100,6 @@ def process_supervisor_loop():
             if not sent:
                 continue
             if recv and recv > sent:
-                continue
-
-            silence_s = _iso_age_seconds(sent)
-            if silence_s is None:
                 continue
 
             ct = c.get('contact', {}) or {}
@@ -4089,6 +4135,9 @@ def process_supervisor_loop():
                 lb_low = (last_body or '').lower()
                 if any(fp.lower() in lb_low for fp in LAST_MSG_CLOSE_PHRASES):
                     continue
+                if _supervisor_has_attendant_fresh(cid):
+                    p(f"  [SUPERVISOR-CLOSE] skip ...{phone[-4:] if phone else '????'} ganhou atendente entre lista e envio")
+                    continue
                 close_msg = CLOSE_INACTIVITY_MSG.format(name=name_fmt)
                 p(f"  [SUPERVISOR-CLOSE] ...{phone[-4:] if phone else '????'} {int(silence_s)}s pos-follow-up")
                 send_message_crm(cid, close_msg, buttons=CLOSE_INACTIVITY_BUTTONS)
@@ -4106,6 +4155,9 @@ def process_supervisor_loop():
                     and silence_s <= SUPERVISOR_MAX_FOLLOWUP_AGE_S
                     and not _body_has_marker(last_body, _FOLLOWUP_BODY_MARKERS)):
                 if _supervisor_recent_action(cid, 'followup_1'):
+                    continue
+                if _supervisor_has_attendant_fresh(cid):
+                    p(f"  [SUPERVISOR-FU1] skip ...{phone[-4:] if phone else '????'} ganhou atendente entre lista e envio")
                     continue
                 msg1 = FOLLOWUP_1_MSG.format(name=name_fmt)
                 p(f"  [SUPERVISOR-FU1] ...{phone[-4:] if phone else '????'} {int(silence_s)}s sem resposta")

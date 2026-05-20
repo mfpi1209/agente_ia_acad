@@ -7,6 +7,22 @@
 
 ---
 
+### [2026-05-20] - Supervisor loop v2 (estritamente send-only, multi-status, dupla checagem)
+
+**Atualização (v2)**
+- `SUPERVISOR_STATUSES = ('open', 'opened')`: agora varre os dois status do DCZ com
+  dedup por `conv_id`. Cobria só `open`, ficando cego pra metade da fila.
+- `SUPERVISOR_MAX_FOLLOWUP_PER_CYCLE = 25` (era 8) e `MAX_CLOSE = 15` (era 5),
+  pra escoar backlog após restarts.
+- `SUPERVISOR_MAX_FOLLOWUP_AGE_S = 60 min` (era 8h): NÃO manda follow-up tardio em
+  conversas antigas (evita "Ainda está por aí?" depois de horas, que parece estranho).
+- Ordena enriquecidos por silêncio crescente (prioriza 10-30 min antes de 50-60 min).
+- **Re-fetch antes de enviar** (`_supervisor_has_attendant_fresh`): elimina race entre
+  listagem e envio — se humano assumiu nesse meio, o supervisor desiste.
+- **Estritamente send-only**: nunca troca atendente, nunca move pipeline, nunca toca
+  CRM/lead. Pior caso possível = uma mensagem de texto a mais. Não pode reproduzir
+  problemas como o caso da Ana Paula (que era do `process_in_hours_rescue`, distinto).
+
 ### [2026-05-20] - Supervisor loop (follow-up / close independente da memória)
 
 **Decisão**
