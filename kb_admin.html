@@ -2119,30 +2119,56 @@ function renderAuditCounts(counts){
     </div>
   `;
 }
+function auditLinks(it){
+  // botoes para abrir o lead/conversa no DataCrazy.
+  // 1) link direto ao lead (mais util: abre o lead ID exato)
+  // 2) link de busca por phone (fallback se nao tiver lead_id)
+  const d=it.detail||{};
+  const leadId=d.lead_id||d.leadId||'';
+  const phone=it.phone||d.phone||'';
+  const convId=it.conv_id||'';
+  let out='';
+  if(leadId){
+    const u=DCZ_APP+'/leads/'+encodeURIComponent(leadId);
+    out+=`<a href="${u}" target="_blank" rel="noopener" class="btn btn-sm" style="font-size:11px;padding:4px 10px;background:#6366f1;color:#fff;text-decoration:none;border-radius:6px;"><i class="fas fa-external-link-alt mr-1"></i>Abrir lead</a>`;
+  }
+  if(phone){
+    const u=DCZ_APP+'/multiservice?search='+encodeURIComponent(phone);
+    out+=`<a href="${u}" target="_blank" rel="noopener" class="btn btn-sm ml-1" style="font-size:11px;padding:4px 10px;background:#0ea5e9;color:#fff;text-decoration:none;border-radius:6px;"><i class="fas fa-search mr-1"></i>Buscar por telefone</a>`;
+  }
+  if(!leadId && !phone && convId){
+    out+=`<span class="text-xs text-gray-400 ml-1">conv: <span class="font-mono">${convId.substring(0,18)}</span></span>`;
+  }
+  return out;
+}
+
 function renderAuditList(items){
   const el=document.getElementById('audit-list');
   if(!el)return;
   if(!items.length){el.innerHTML='<div class="text-center text-sm text-gray-400 py-6">🎉 Nenhum problema flagrado nesse filtro</div>';return;}
   el.innerHTML=items.map(it=>{
     const sevCls=AUDIT_SEV_BADGE[it.severity]||'b-gray';
+    const sevLabel=({alta:'ALTA',media:'MÉDIA',baixa:'BAIXA'}[it.severity]||(it.severity||'').toUpperCase());
     const typeLabel=AUDIT_TYPE_LABELS[it.problem_type]||it.problem_type||'—';
     const dt=it.created_at?new Date(it.created_at).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
     const resolved=it.resolved_at?`<span class="badge b-green ml-2"><i class="fas fa-check"></i> Resolvido ${it.resolved_by||''}</span>`:'';
     const blocked=it.action_taken==='agent_silenced'?'<span class="badge b-red ml-2"><i class="fas fa-microphone-slash"></i> Agente silenciado</span>':'';
     const trecho=(it.detail&&it.detail.trecho)?`<div class="mt-1.5 text-xs text-gray-500 italic">"${esc(it.detail.trecho).substring(0,180)}"</div>`:'';
     const win=(it.detail&&it.detail.window)?(it.detail.window.map(m=>`<div class="text-xs"><span class="font-mono text-gray-400">[${m.role}]</span> ${esc(m.body)}</div>`).join('')):'';
+    const links=auditLinks(it);
     return `
       <div class="p-3 bg-white border border-gray-200 rounded-xl">
         <div class="flex items-start gap-2 flex-wrap">
-          <span class="badge ${sevCls}">${(it.severity||'').toUpperCase()}</span>
+          <span class="badge ${sevCls}">${sevLabel}</span>
           <span class="badge b-gray">${esc(typeLabel)}</span>
           <span class="text-xs text-gray-400">${dt}</span>
           ${resolved}${blocked}
-          <span class="ml-auto text-xs text-gray-400">conv: <span class="font-mono">${(it.conv_id||'').substring(0,12)}</span> ${it.phone?'· '+esc(it.phone):''}</span>
+          <span class="ml-auto text-xs text-gray-400">${it.phone?'tel: '+esc(it.phone):'conv: <span class="font-mono">'+(it.conv_id||'').substring(0,12)+'</span>'}</span>
         </div>
         <div class="mt-2 text-sm text-gray-800">${esc(it.summary||'')}</div>
         ${trecho}
         ${win?`<details class="mt-2"><summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-700">Ver janela analisada</summary><div class="mt-1.5 p-2 bg-gray-50 rounded-lg space-y-0.5">${win}</div></details>`:''}
+        ${links?`<div class="mt-2 flex flex-wrap items-center gap-1">${links}</div>`:''}
         <div class="mt-2 flex items-center gap-2 text-xs">
           ${!it.resolved_at?`<button class="btn btn-p btn-sm" onclick="resolveAudit(${it.id},false)"><i class="fas fa-check"></i> Resolver</button>`:''}
           ${(!it.resolved_at&&it.action_taken==='agent_silenced')?`<button class="btn btn-w btn-sm" onclick="resolveAudit(${it.id},true)"><i class="fas fa-unlock"></i> Resolver + Liberar agente</button>`:''}

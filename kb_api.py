@@ -2263,14 +2263,28 @@ async def audit_findings_list(
                     r['created_at'] = r['created_at'].isoformat()
                 if r.get('resolved_at'):
                     r['resolved_at'] = r['resolved_at'].isoformat()
-            # contagem global por severidade
+            # contagem global por severidade — normaliza en->pt (high/medium/low -> alta/media/baixa)
+            # pois o supervisor OpenAI grava em pt e a verificacao de distribuicao em en.
             cur.execute(f"""
                 SELECT severity, COUNT(*) as cnt
                 FROM agent_audit_findings
                 WHERE {where}
                 GROUP BY severity
             """, params)
-            counts = {r['severity']: r['cnt'] for r in cur.fetchall()}
+            raw_counts = {r['severity']: r['cnt'] for r in cur.fetchall()}
+            sev_map = {
+                'high': 'alta', 'alta': 'alta',
+                'medium': 'media', 'media': 'media',
+                'low': 'baixa', 'baixa': 'baixa',
+            }
+            counts = {'alta': 0, 'media': 0, 'baixa': 0}
+            for sev, cnt in raw_counts.items():
+                norm = sev_map.get((sev or '').lower(), (sev or '').lower() or 'baixa')
+                counts[norm] = counts.get(norm, 0) + cnt
+            # tambem normaliza nos items para o frontend renderizar badge consistente
+            for r in rows:
+                r['severity'] = sev_map.get((r.get('severity') or '').lower(),
+                                            (r.get('severity') or '').lower() or 'baixa')
             cur.close()
             return {'items': rows, 'counts': counts, 'total': len(rows)}
     except Exception as e:
