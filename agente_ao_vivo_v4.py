@@ -5644,12 +5644,14 @@ def _oneshot_fix_vanessa_barra_funda():
         p(f"  [ONESHOT-VANESSA] erro marcar done: {e}")
 
 
-def _oneshot_fix_vanessa_crm_attendant():
-    """Caso especifico: chat foi para Debora mas lead/business no CRM ficaram
-    com a Joyce. Atualiza attendant do lead+business da Vanessa Carmona para
-    Debora Mani Moreira no CRM.
-    Idempotente via agent_config.oneshot_vanessa_crm_attendant_done.
+def _oneshot_fix_vanessa_crm_attendant_DISABLED():
+    """[DESATIVADO] Era um one-shot para corrigir manualmente o atendente da
+    Vanessa quando o chat foi pra Debora mas o lead/business ficaram com a
+    Joyce. Substituido por _enforce_assignment_consistency() que valida a
+    distribuicao em tempo real para todos os casos.
     """
+    return
+    # _UNREACHABLE_ legacy code abaixo
     KEY = 'oneshot_vanessa_crm_attendant_done'
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -6140,6 +6142,233 @@ def _supabase_increment_fila(consultant_id, current_fila):
         return False
 
 
+def _enforce_assignment_consistency(conv_id, lead_id, phone, expected_name,
+                                    max_retries=2):
+    """Verifica e força que o atendente do lead+business+chat seja realmente
+    `expected_name` (o nome que será mencionado na nota interna e na
+    mensagem ao cliente). Faz até max_retries patches se divergir.
+
+    Se persistir divergência, registra audit finding (high) e nota interna
+    com instrução para correção manual — garantindo que o caso não
+    silenciosamente fique com o atendente errado no CRM.
+
+    Retorna dict:
+      {ok_lead, ok_biz, ok_chat, attempts, biz_id, lead_id,
+       final_lead_att, final_biz_att, final_chat_att, expected_crm_id}
+    """
+    expected_crm_id = _lookup_attendant_id(expected_name, CRM_ATTENDANT_MAP) or ''
+    expected_chat_id = _lookup_attendant_id(expected_name, ATTENDANT_MAP) or ''
+    result = {
+        'ok_lead': False, 'ok_biz': False, 'ok_chat': False,
+        'attempts': 0, 'biz_id': '', 'lead_id': lead_id,
+        'final_lead_att': '', 'final_biz_att': '', 'final_chat_att': '',
+        'expected_crm_id': expected_crm_id,
+        'expected_chat_id': expected_chat_id,
+        'expected_name': expected_name,
+    }
+    if not expected_crm_id:
+        p(f"  [VERIFY] expected_name='{expected_name}' nao mapeado em CRM_ATTENDANT_MAP — skip")
+        return result
+
+    # ---- helpers locais ----
+    def _read_lead_att():
+        if not lead_id:
+            return ''
+        try:
+            r = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
+            if r.status_code != 200:
+                return ''
+            ld = r.json()
+            att = ld.get('attendant') or {}
+            return att.get('id', '') if isinstance(att, dict) else (att or '')
+        except Exception:
+            return ''
+
+    def _find_biz_id():
+        # 1) sub-recurso /leads/{id}/businesses
+        if lead_id:
+            try:
+                r = requests.get(f'{DCZ_CRM}/leads/{lead_id}/businesses',
+                                 headers=H, timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    biz_list = data.get('data', data) if isinstance(data, dict) else data
+                    if isinstance(biz_list, list) and biz_list:
+                        bid = biz_list[0].get('id', '') if isinstance(biz_list[0], dict) else str(biz_list[0])
+                        if bid:
+                            return bid, biz_list[0] if isinstance(biz_list[0], dict) else {}
+            except Exception:
+                pass
+        # 2) busca por phone -> filtra por leadId
+        if phone:
+            clean = phone.replace('+', '').replace(' ', '').replace('-', '')
+            phones_to_try = [clean]
+            if not clean.startswith('55'):
+                phones_to_try.append('55' + clean)
+            elif len(clean) > 4:
+                phones_to_try.append(clean[2:])
+            for try_phone in phones_to_try:
+                try:
+                    r = requests.get(f'{DCZ_CRM}/businesses', headers=H,
+                                     params={'search': try_phone, 'limit': 10},
+                                     timeout=10)
+                    if r.status_code != 200:
+                        continue
+                    data = r.json()
+                    biz_list = data.get('data', data) if isinstance(data, dict) else data
+                    if not isinstance(biz_list, list):
+                        continue
+                    # match exato por leadId primeiro
+                    for b in biz_list:
+                        b_lead = b.get('leadId') or ''
+                        if not b_lead and isinstance(b.get('lead'), dict):
+                            b_lead = b['lead'].get('id', '')
+                        if lead_id and b_lead == lead_id:
+                            return b.get('id', ''), b
+                    # fallback: primeiro
+                    if biz_list:
+                        return biz_list[0].get('id', ''), biz_list[0]
+                except Exception:
+                    continue
+        return '', {}
+
+    def _read_biz_att(biz_obj, biz_id):
+        if biz_obj:
+            att = biz_obj.get('attendant') or {}
+            if isinstance(att, dict) and att.get('id'):
+                return att.get('id', '')
+        if not biz_id:
+            return ''
+        try:
+            r = requests.get(f'{DCZ_CRM}/businesses/{biz_id}', headers=H, timeout=10)
+            if r.status_code != 200:
+                return ''
+            bd = r.json()
+            att = bd.get('attendant') or {}
+            return att.get('id', '') if isinstance(att, dict) else (att or '')
+        except Exception:
+            return ''
+
+    def _read_chat_att():
+        if not conv_id:
+            return ''
+        try:
+            r = requests.get(f'{DCZ_MSG}/messaging/conversations/{conv_id}',
+                             headers=H, timeout=10)
+            if r.status_code != 200:
+                return ''
+            cd = r.json()
+            att = cd.get('attendant') or {}
+            if isinstance(att, dict):
+                return att.get('id', '')
+            return cd.get('attendantId', '') or ''
+        except Exception:
+            return ''
+
+    # ---- ciclo de verificação + retry ----
+    for attempt in range(max_retries + 1):
+        result['attempts'] = attempt + 1
+        biz_id, biz_obj = _find_biz_id()
+        result['biz_id'] = biz_id
+
+        cur_lead_att = _read_lead_att()
+        cur_biz_att = _read_biz_att(biz_obj, biz_id)
+        cur_chat_att = _read_chat_att()
+        result['final_lead_att'] = cur_lead_att
+        result['final_biz_att'] = cur_biz_att
+        result['final_chat_att'] = cur_chat_att
+
+        lead_ok = (cur_lead_att == expected_crm_id) if lead_id else True
+        biz_ok = (cur_biz_att == expected_crm_id) if biz_id else False
+        chat_ok = (cur_chat_att == expected_chat_id) if expected_chat_id else True
+
+        result['ok_lead'] = lead_ok
+        result['ok_biz'] = biz_ok
+        result['ok_chat'] = chat_ok
+
+        if lead_ok and biz_ok and chat_ok:
+            p(f"  [VERIFY] OK attempt={attempt+1} expected={expected_name} lead/biz/chat consistentes")
+            return result
+
+        p(f"  [VERIFY] attempt={attempt+1} divergencia: "
+          f"lead_ok={lead_ok}({cur_lead_att[:8]} vs {expected_crm_id[:8]}) "
+          f"biz_ok={biz_ok}({cur_biz_att[:8]} vs {expected_crm_id[:8]}) "
+          f"chat_ok={chat_ok}({cur_chat_att[:8]} vs {expected_chat_id[:8]})")
+
+        if attempt >= max_retries:
+            break
+
+        # tenta corrigir o que estiver divergente
+        if not lead_ok and lead_id:
+            try:
+                rL = requests.patch(f'{DCZ_CRM}/leads/{lead_id}', headers=H,
+                                    json={'attendant': {'id': expected_crm_id}},
+                                    timeout=10)
+                p(f"  [VERIFY] retry PATCH lead -> {expected_crm_id[:8]} status={rL.status_code}")
+            except Exception as e:
+                p(f"  [VERIFY] retry lead err: {e}")
+        if not biz_ok and biz_id:
+            try:
+                rB = requests.patch(f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+                                    json={'attendant': {'id': expected_crm_id},
+                                          'stageId': STAGE_ATENDIMENTO_ID},
+                                    timeout=10)
+                p(f"  [VERIFY] retry PATCH business -> {expected_crm_id[:8]} status={rB.status_code}")
+            except Exception as e:
+                p(f"  [VERIFY] retry biz err: {e}")
+        if not chat_ok and expected_chat_id and conv_id:
+            try:
+                rC = requests.post(
+                    f'{DCZ_MSG}/messaging/conversations/{conv_id}/change-attendant',
+                    headers=H, json={'attendantId': expected_chat_id}, timeout=15)
+                p(f"  [VERIFY] retry change-attendant -> {expected_chat_id[:8]} status={rC.status_code}")
+            except Exception as e:
+                p(f"  [VERIFY] retry chat err: {e}")
+        time.sleep(1.5)
+
+    # ---- pos-retries: ainda divergente ----
+    p(f"  [VERIFY] FALHA persistente apos {result['attempts']} tentativas — registrando audit")
+    try:
+        details = {
+            'conv_id': conv_id,
+            'lead_id': lead_id,
+            'biz_id': result['biz_id'],
+            'expected_name': expected_name,
+            'expected_crm_id': expected_crm_id,
+            'expected_chat_id': expected_chat_id,
+            'final_lead_att': result['final_lead_att'],
+            'final_biz_att': result['final_biz_att'],
+            'final_chat_att': result['final_chat_att'],
+            'attempts': result['attempts'],
+        }
+        _record_audit_finding(
+            conv_id=conv_id,
+            severity='high',
+            problem_type='assignment_mismatch',
+            summary=(f"Distribuicao informou *{expected_name}* mas CRM/chat ficou "
+                     f"divergente apos {result['attempts']} tentativas. "
+                     f"Lead={result['ok_lead']} Biz={result['ok_biz']} Chat={result['ok_chat']}. "
+                     f"Correcao manual necessaria."),
+            detail=details,
+            action_taken='manual_fix_required',
+            phone=phone or '',
+            model='distribute_to_attendant',
+        )
+    except Exception as e_aud:
+        p(f"  [VERIFY] erro audit_finding: {e_aud}")
+    try:
+        warn = (f"⚠️ *Inconsistência de distribuição* — A IA tentou atribuir este "
+                f"atendimento a *{expected_name}*, mas o CRM não confirmou. "
+                f"Lead OK={result['ok_lead']} | Negócio OK={result['ok_biz']} | "
+                f"Chat OK={result['ok_chat']}. Corrigir manualmente.")
+        requests.post(f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                      headers=H, json={'body': warn, 'isInternal': True},
+                      timeout=10)
+    except Exception:
+        pass
+    return result
+
+
 def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude_attendants=None):
     """Distribui o aluno para um atendente humano real.
     1) Verifica horário  2) Escolhe consultor  3) Transfere lead/negócio/chat
@@ -6269,6 +6498,24 @@ def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude
                 p(f"  [DIST] Change-attendant direto erro: {e_d}")
 
     _supabase_increment_fila(consultant['id'], consultant['fila'])
+
+    # === VERIFICACAO PoS-DISTRIBUICAO ===
+    # Garante que o atendente real (lead+business+chat) bate com `nome`.
+    # Sem isso o cliente recebe "Vou te transferir para X" mas o CRM/chat fica
+    # com outro atendente (bug Vanessa -> chat Debora, lead Joyce).
+    try:
+        verify_result = _enforce_assignment_consistency(
+            conv_id=conv_id, lead_id=lead_id, phone=phone, expected_name=nome,
+            max_retries=2,
+        )
+        # se chat divergiu definitivo, atualiza chat_ok local com a realidade
+        if verify_result.get('ok_chat') is False:
+            chat_ok = False
+        else:
+            chat_ok = True
+    except Exception as e_v:
+        p(f"  [DIST] erro _enforce_assignment_consistency: {e_v}")
+        verify_result = {'ok_lead': lead_ok, 'ok_biz': biz_ok, 'ok_chat': chat_ok}
 
     note = (f"🔔 *Distribuição automática pelo agente IA*\n"
             f"Atendente: *{nome}*\n"
@@ -8471,13 +8718,6 @@ def main():
         _oneshot_fix_vanessa_barra_funda()
     except Exception as e_one:
         p(f"  [ONESHOT-VANESSA] erro: {e_one}")
-
-    # === ONE-SHOT: atendente do lead/business da Vanessa ficou com a Joyce
-    # quando o chat ja estava com a Debora. Sincroniza CRM. ===
-    try:
-        _oneshot_fix_vanessa_crm_attendant()
-    except Exception as e_crm:
-        p(f"  [ONESHOT-VANESSA-CRM] erro: {e_crm}")
 
     while True:
         try:
