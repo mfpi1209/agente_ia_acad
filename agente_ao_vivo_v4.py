@@ -391,10 +391,15 @@ OUTRO_POLO_MSG_2 = (
 )
 
 NOT_IN_BASE_BUTTONS = ['Já sou aluno', 'Quero me matricular']
-COMMERCIAL_REDIRECT_MSG = ("Certo!\n\nEste canal é dedicado ao atendimento dos nossos alunos.\n\n"
-                           "Vamos transferir esta conversa para nosso time comercial e em breve, "
-                           "você receberá uma mensagem de um(a) de nossos consultores(as) que vai "
-                           "te orientar e tirar todas as suas dúvidas. 😉\nAté mais!")
+COMMERCIAL_REDIRECT_MSG = (
+    "Certo!\n\n"
+    "Este canal é dedicado ao *atendimento acadêmico* dos nossos alunos. "
+    "Para *matrículas e informações comerciais*, quem vai te orientar "
+    "direitinho é o nosso time comercial 😊\n\n"
+    "Vou *te transferir agora* para um(a) consultor(a) que vai te passar "
+    "o contato certo e dar todo o suporte que você precisa. "
+    "Em pouquinho alguém te chama por aqui! 💙"
+)
 
 # === MasterClass FAQ ===
 # Resposta canonica definida pelo time. NUNCA deve ser parafraseada pelo LLM.
@@ -6648,16 +6653,10 @@ def _enforce_assignment_consistency(conv_id, lead_id, phone, expected_name,
         )
     except Exception as e_aud:
         p(f"  [VERIFY] erro audit_finding: {e_aud}")
-    try:
-        warn = (f"⚠️ *Inconsistência de distribuição* — A IA tentou atribuir este "
-                f"atendimento a *{expected_name}*, mas o CRM não confirmou. "
-                f"Lead OK={result['ok_lead']} | Negócio OK={result['ok_biz']} | "
-                f"Chat OK={result['ok_chat']}. Corrigir manualmente.")
-        requests.post(f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
-                      headers=H, json={'body': warn, 'isInternal': True},
-                      timeout=10)
-    except Exception:
-        pass
+    # NOTA: nao enviamos mais a "Inconsistencia de distribuicao" como mensagem
+    # interna visivel pros consultores (poluia a conversa sem ajudar). O finding
+    # ja eh registrado em agent_audit_findings e aparece na aba Auditoria IA
+    # do Cockpit, onde o usuario pode clicar "Corrigir agora".
     return result
 
 
@@ -8405,7 +8404,10 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                 student_profile = {'lead_id': new_lead_id, 'name': contact_name, 'first_name': contact_name.split()[0] if contact_name else ''}
                 p(f"  Lead criado para interessado em matrícula: {new_lead_id}")
         if is_within_business_hours():
-            distribute_to_attendant(conv_id, 'Interessado em matrícula - encaminhar para comercial')
+            distribute_to_attendant(
+                conv_id,
+                'Interessado em matrícula — orientar sobre o time comercial'
+            )
         else:
             p(f"  [MATRÍCULA] [MODE] after_hours — sem distribuir, retorno será {next_human_available_label()}")
             send_after_hours_response(conv_id, allow_continue=False,
