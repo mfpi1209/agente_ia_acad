@@ -7,6 +7,91 @@
 
 ---
 
+### [2026-05-20] - Anti-repetição "à prova de tudo" + supervisor OpenAI
+
+**Decisão**
+Três camadas independentes que se reforçam para impedir repetições do agente
+mesmo após restart e cobrir falhas que regex/signature não pegam:
+
+**Camada 1 — Dedup de conteúdo persistente em `send_and_track`**
+- Novo `_normalize_body_for_dedup(text)`: normaliza texto (lowercase, sem
+  acentos, sem pontuação, **nomes próprios viram `<nome>`**, espaços colapsados,
+  280 chars). Permite considerar "Vou te transferir para *Wesley*" e
+  "Vou te transferir para *Marília*" como **mesma mensagem** para fins de dedup.
+- `_body_recently_sent(conv_id, text, window_s=600)` consulta
+  `agent_sent_signatures.body_hash` — **persistente, sobrevive restart**.
+- `send_and_track` ganha:
+  - **Lock por `conv_id`** (`_conv_send_locks` global) — serializa envios
+    concorrentes (era a porta de entrada do bug "LLM responde 2x").
+  - Verificação `_body_recently_sent` **antes** de enviar; se bate, **SUPRIME**
+    e loga em `ia_interaction_log` com `acao='suprimido_dedup'`.
+  - Parâmetro `force=True` para mensagens críticas que devem passar.
+- `_register_body(conv_id, text)` chamado após envio bem-sucedido.
+
+**Camada 2 — Idempotência de `distribute_to_attendant`**
+- No início, checa `_is_handoff_active(conv_id)` com `motivo='dispatch'` →
+  retorna `True` direto sem refazer nota interna nem "Vou te transferir".
+- Fallback in-memory: se `_last_distributed_to` está setado há < 5min, skip.
+- No fim do dispatch com sucesso, chama
+  `_mark_handoff_active(conv_id, 'dispatch', target=nome, ttl_s=4*3600)`.
+- Resolve o bug da Imagem 2 (duplo "Distribuição automática" + duplo
+  "Vou te transferir para Marília").
+
+**Camada 3 — Supervisor OpenAI revisor periódico**
+- Loop independente `process_openai_supervisor_loop()` rodando junto com o
+  supervisor existente (a cada `cycle % 10 == 0`, mas com cooldown próprio
+  de `OPENAI_SUPERVISOR_INTERVAL_S=300s`).
+- Pega conversas com atividade nos últimos `OPENAI_SUPERVISOR_LOOKBACK_MIN=60min`
+  e que tenham ≥2 mensagens do bot.
+- Chama `OPENAI_SUPERVISOR_MODEL=gpt-4o` (configurável via env) com
+  `response_format=json_object` e prompt em PT-BR que classifica em:
+  - `repeticao_resposta`, `contradicao`, `falha_pre_opening`,
+    `sobre_resposta`, `duplicado_distribuicao`, `ok`.
+- Findings gravados em nova tabela `agent_audit_findings` (com `severity`,
+  `problem_type`, `summary`, `detail` JSON, `action_taken`).
+- **Auto-correção**: se `severidade=alta` e tipo em
+  `(repeticao_resposta, sobre_resposta, duplicado_distribuicao)`, marca
+  `handoff_active(motivo='supervisor_block', ttl=6h)` → agente fica em
+  **silêncio absoluto** na conv (sem nudge) até intervenção humana.
+- Cap por ciclo: `OPENAI_SUPERVISOR_MAX_CONVS=15`; mesma conv só re-auditada
+  a cada 15min. Custo controlado.
+
+**Contexto**
+Usuária mandou 2 prints:
+- Imagem 1: Bot mandou 2 respostas quase idênticas para a mesma pergunta sobre
+  nota (LLM chamado 2x em paralelo, com palavras um pouco diferentes).
+- Imagem 2: 2 notas internas "Distribuição automática" + 2 mensagens
+  "Vou te transferir para Marília" (`distribute_to_attendant` chamada 2x).
+- Disse "impeça a qualquer custo o agente responder a mesma coisa mais de uma
+  vez, mesmo após reiniciá-lo" e pediu supervisor OpenAI explicitamente,
+  preferindo o "melhor mesmo que mais caro".
+
+**Alternativas descartadas**
+- Apenas mais signatures `_signature_recently_sent` em cada call site →
+  não pega LLM gerando texto livre com pequenas variações.
+- Hash exato do body sem normalização → não pega "Vou te transferir para X"
+  vs "Vou te transferir para Y" (atendentes diferentes em chamadas duplas).
+- Mutex global no envio → estrangula throughput de convs paralelas; lock
+  por conv é suficiente.
+- `gpt-4o-mini` para o supervisor → mais barato, mas pediram o melhor;
+  `gpt-4o` é exposto via env e pode ser trocado sem deploy.
+- LLM-as-judge em cada envio → custo proibitivo; revisão periódica é
+  suficiente porque dedup hash já cobre os casos óbvios em tempo real.
+
+**Impacto**
+- Bug "Adriano" (Imagem 1): em tempo real, o segundo envio do LLM passa pelo
+  lock, e quando o body normalizado bate é suprimido. Quando palavras divergem
+  o bastante para escapar, o supervisor OpenAI pega em até 5min, registra
+  finding e CALA o agente nessa conv.
+- Bug "Tauana" (Imagem 2): idempotência impede `distribute_to_attendant` de
+  rodar 2x. Mesmo se rodar, o body_hash idêntico de "Vou te transferir" é
+  suprimido.
+- Dashboard ganha endpoint potencial para `agent_audit_findings` (tabela
+  pronta; UI pode listar findings recentes).
+- Custo: ~15 convs × 1 chamada gpt-4o curta (300 tokens) a cada 5min.
+
+---
+
 ### [2026-05-20] - Janela pré-abertura + limite por consultor (anti-sobrecarga)
 
 **Decisão**

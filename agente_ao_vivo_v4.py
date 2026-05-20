@@ -2674,25 +2674,66 @@ def _is_echo_of_sent(text):
         return False
 
 
-def send_and_track(conv_id, text, buttons=None):
-    """Reforça typing antes de enviar + pequeno delay humanizado."""
+SEND_BODY_DEDUP_WINDOW_S = 10 * 60   # 10min - janela onde a mesma resposta NUNCA repete
+
+
+def send_and_track(conv_id, text, buttons=None, force=False):
+    """Reforça typing antes de enviar + pequeno delay humanizado.
+
+    ANTI-REPETICAO PERSISTENTE:
+    - Calcula hash do texto normalizado (sem nome proprio, sem acento, sem
+      pontuacao) e consulta agent_sent_signatures. Se ja enviou hash igual
+      nessa conv nos ultimos SEND_BODY_DEDUP_WINDOW_S, SUPRIME (mesmo apos
+      restart, porque consulta DB).
+    - Lock per-conv serializa envios concorrentes (anti race-condition que
+      dispara 2 chamadas LLM em paralelo).
+    - force=True ignora a dedup (uso em mensagens criticas tipo erro de sistema).
+    """
     global last_response_time
-    meta_typing_on()
-    chars = len(text)
-    if chars < 80:
-        time.sleep(0.5)
-    elif chars < 300:
-        time.sleep(1.0)
-    else:
-        time.sleep(1.5)
-    status, resp = send_message_crm(conv_id, text, buttons)
-    if status in (200, 201) and isinstance(resp, dict):
-        processed_msg_ids.add(resp.get('id', ''))
-    _track_sent_body(text)
-    last_response_time = time.time()
-    if buttons:
-        p(f"    Enviado com {len(buttons)} botoes")
-    return status
+    if not text:
+        return None
+    lock = _get_conv_send_lock(conv_id) if conv_id else None
+    if lock is not None:
+        lock.acquire()
+    try:
+        if not force and conv_id and _body_recently_sent(conv_id, text, SEND_BODY_DEDUP_WINDOW_S):
+            p(f"  [DEDUP-BODY] {conv_id[:12]} SUPRIMIDO - hash de body ja enviado em <{SEND_BODY_DEDUP_WINDOW_S}s")
+            try:
+                conn = get_db()
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO ia_interaction_log "
+                    "(conversation_id, pergunta_recebida, resposta_gerada, confianca, acao) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (conv_id, '(dedup)', text[:2000], 0.0, 'suprimido_dedup')
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
+            except Exception:
+                pass
+            return 'suppressed'
+        meta_typing_on()
+        chars = len(text)
+        if chars < 80:
+            time.sleep(0.5)
+        elif chars < 300:
+            time.sleep(1.0)
+        else:
+            time.sleep(1.5)
+        status, resp = send_message_crm(conv_id, text, buttons)
+        if status in (200, 201) and isinstance(resp, dict):
+            processed_msg_ids.add(resp.get('id', ''))
+        _track_sent_body(text)
+        if conv_id:
+            _register_body(conv_id, text, signature='body_send')
+        last_response_time = time.time()
+        if buttons:
+            p(f"    Enviado com {len(buttons)} botoes")
+        return status
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def log_to_db(conv_id, question, response, confidence, action):
@@ -4232,6 +4273,19 @@ SUPERVISOR_MAX_CLOSE_AGE_S = 24 * 3600
 SUPERVISOR_ACTION_COOLDOWN_S = 2 * 3600         # nao repete mesma acao na mesma conv em 2h
 SUPERVISOR_HUMAN_GRACE_S = 5 * 60               # se humano respondeu nos ultimos 5min, supervisor nao mexe
 
+# === Supervisor OpenAI: revisor periodico ===
+# Roda em loop independente. Pega convs com 2+ mensagens recentes do bot,
+# manda ao OpenAI pedindo classificacao de qualidade (repeticao, contradicao,
+# falha do pre_opening, etc) e grava findings em agent_audit_findings.
+# Custo controlado por intervalo + cap por ciclo.
+OPENAI_SUPERVISOR_ENABLED = os.environ.get('OPENAI_SUPERVISOR_ENABLED', '1') in ('1', 'true', 'True')
+OPENAI_SUPERVISOR_MODEL = os.environ.get('OPENAI_SUPERVISOR_MODEL', 'gpt-4o')
+OPENAI_SUPERVISOR_INTERVAL_S = int(os.environ.get('OPENAI_SUPERVISOR_INTERVAL_S', '300'))   # 5min
+OPENAI_SUPERVISOR_MAX_CONVS = int(os.environ.get('OPENAI_SUPERVISOR_MAX_CONVS', '15'))     # por ciclo
+OPENAI_SUPERVISOR_LOOKBACK_MIN = int(os.environ.get('OPENAI_SUPERVISOR_LOOKBACK_MIN', '60'))  # convs com atividade nos ultimos 60min
+_last_openai_supervisor_ts = 0
+_openai_supervisor_audited = {}  # conv_id -> ts da ultima auditoria nesse processo
+
 _FOLLOWUP_BODY_MARKERS = (
     'ainda está por aí', 'ainda esta por ai', 'tudo certo por aí', 'tudo certo por ai',
     'se tiver mais alguma dúvida', 'se precisar de mais alguma coisa',
@@ -4372,6 +4426,113 @@ def _hash_body(body):
     return hashlib.sha1(body.strip().lower().encode('utf-8', errors='ignore')).hexdigest()[:32]
 
 
+def _normalize_body_for_dedup(text):
+    """Normaliza texto para hash anti-repeticao:
+    - lowercase
+    - sem acentos
+    - sem pontuacao
+    - sem palavras curtas tipicas de nome (capitalizadas no original)
+    - espacos colapsados
+    Mantem o esqueleto semantico estavel mesmo se LLM trocar nome ou virgulas.
+    """
+    if not text:
+        return ''
+    import unicodedata
+    import re
+    raw = text.strip()
+    # tira variantes capitalizadas longas (provaveis nomes proprios) que mudam entre chamadas
+    tokens_no_proper = []
+    for w in raw.split():
+        bare = w.strip('.,;:!?()[]"\'*_~`')
+        if bare and bare[0].isupper() and len(bare) >= 3 and bare.lower() not in (
+            'oi', 'olá', 'ola', 'opa', 'pelo', 'pela', 'voce', 'voc\u00ea', 'voce.', 'sim',
+            'nao', 'não', 'claro', 'sobre', 'aqui', 'agora', 'esse', 'isso', 'pode',
+            'preciso', 'tudo', 'bom', 'boa', 'avaliação', 'avaliacao', 'remuneração',
+            'remuneracao', 'estratégica', 'estrategica', 'regimental',
+        ):
+            # provavel nome proprio - troca por marcador
+            tokens_no_proper.append('<NOME>')
+        else:
+            tokens_no_proper.append(w)
+    cleaned = ' '.join(tokens_no_proper)
+    cleaned = ''.join(c for c in unicodedata.normalize('NFD', cleaned)
+                      if unicodedata.category(c) != 'Mn')
+    cleaned = cleaned.lower()
+    cleaned = re.sub(r'[^a-z0-9<> ]+', ' ', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    # pega so os primeiros 280 chars: o miolo da resposta carrega a semantica
+    return cleaned[:280]
+
+
+def _body_recently_sent(conv_id, text, window_s=10 * 60):
+    """True se body NORMALIZADO ja foi enviado nessa conv dentro da janela.
+    Persiste em agent_sent_signatures (sobrevive a restart)."""
+    if not conv_id or not text:
+        return False
+    _ensure_dedup_tables()
+    if not _DEDUP_TABLES_READY:
+        return False
+    norm = _normalize_body_for_dedup(text)
+    if not norm:
+        return False
+    h = _hash_body(norm)
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT signature, sent_at FROM agent_sent_signatures
+            WHERE conv_id = %s AND body_hash = %s
+              AND sent_at > NOW() - (%s || ' seconds')::interval
+            ORDER BY sent_at DESC
+            LIMIT 1
+        """, (conv_id, h, str(int(window_s))))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _register_body(conv_id, text, signature='body'):
+    """Registra body normalizado em agent_sent_signatures (anti-repeticao persistente)."""
+    if not conv_id or not text:
+        return
+    _ensure_dedup_tables()
+    if not _DEDUP_TABLES_READY:
+        return
+    norm = _normalize_body_for_dedup(text)
+    if not norm:
+        return
+    h = _hash_body(norm)
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO agent_sent_signatures (conv_id, signature, body_hash) VALUES (%s, %s, %s)",
+            (conv_id, signature, h),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
+
+# Lock por conversa para serializar envio (anti-race condition)
+_conv_send_locks = {}
+_conv_send_locks_mutex = __import__('threading').Lock()
+
+
+def _get_conv_send_lock(conv_id):
+    with _conv_send_locks_mutex:
+        lock = _conv_send_locks.get(conv_id)
+        if lock is None:
+            lock = __import__('threading').Lock()
+            _conv_send_locks[conv_id] = lock
+        return lock
+
+
 def _signature_recently_sent(conv_id, signature, window_s=24 * 3600, body_hash=''):
     """True se mesma signature ja foi enviada na conv dentro da janela.
     Se body_hash fornecido, exige tambem match do hash (mesmo motivo + mesmo corpo)."""
@@ -4469,6 +4630,61 @@ def _mark_handoff_active(conv_id, motivo, target='', ttl_s=12 * 3600, body=''):
         p(f"  [HANDOFF-ACTIVE] {conv_id[:12]} motivo={motivo} target={target} ttl={ttl_s}s")
     except Exception as e:
         p(f"  [HANDOFF-ACTIVE] erro marcar: {e}")
+
+
+def _ensure_audit_table():
+    """Cria tabela de findings do supervisor OpenAI."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS agent_audit_findings (
+                id SERIAL PRIMARY KEY,
+                conv_id VARCHAR(64) NOT NULL,
+                phone VARCHAR(32),
+                model VARCHAR(64),
+                severity VARCHAR(16) NOT NULL,
+                problem_type VARCHAR(64),
+                summary TEXT,
+                detail JSONB,
+                action_taken VARCHAR(64),
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_audit_conv_created
+            ON agent_audit_findings (conv_id, created_at DESC)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_audit_severity_created
+            ON agent_audit_findings (severity, created_at DESC)
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        p(f"  [AUDIT] tabela indisponivel: {e}")
+
+
+def _record_audit_finding(conv_id, severity, problem_type, summary, detail=None,
+                          action_taken='', phone='', model=''):
+    _ensure_audit_table()
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO agent_audit_findings
+            (conv_id, phone, model, severity, problem_type, summary, detail, action_taken)
+            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+        """, (conv_id, phone or '', model or '', severity, problem_type or '',
+              (summary or '')[:2000],
+              json.dumps(detail or {}, ensure_ascii=False),
+              action_taken or ''))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        p(f"  [AUDIT] erro registrar: {e}")
 
 
 def _clear_handoff_active(conv_id, reason=''):
@@ -4764,6 +4980,238 @@ def process_supervisor_loop():
 
     if fu_done or close_done:
         p(f"  [SUPERVISOR] follow-up={fu_done} encerramentos={close_done}")
+
+
+# ============== SUPERVISOR OPENAI (revisor de qualidade) ==============
+# Auditoria periodica das conversas. Procura por:
+#   - repeticao_resposta: bot mandou a "mesma" coisa 2x em sequencia
+#   - contradicao: bot se contradiz entre mensagens
+#   - falha_pre_opening: bot mandou after_hours quando deveria ter oferecido fila
+#   - sobre_resposta: bot continuou respondendo apos handoff humanizado
+#   - duplicado_distribuicao: 2 notas de distribuicao na mesma conv
+# Se severidade=alta e tipo=repeticao_resposta ou sobre_resposta:
+#   marca handoff_active(motivo='supervisor_block') -> agente CALA na conv.
+# Findings ficam em agent_audit_findings (visiveis em dashboard).
+
+_OPENAI_SUPERVISOR_PROMPT = """Voce e um auditor que revisa conversas de um agente de IA brasileiro com alunos universitarios.
+
+Sua tarefa: identificar SE o agente cometeu algum dos problemas abaixo na ultima janela da conversa.
+
+PROBLEMAS POSSIVEIS:
+- "repeticao_resposta": bot mandou 2 mensagens com SIGNIFICADO equivalente em sequencia (mesmo que palavras diferentes)
+- "contradicao": bot afirmou X e depois Y inconsistente com X
+- "falha_pre_opening": bot disse que esta "fora do horario" quando deveria ter oferecido fila pre-abertura (acontece quando falta <= 60min para 9h em dia util ou sabado)
+- "sobre_resposta": bot continuou respondendo apos uma mensagem de handoff/transferencia humanizada (tipo "vou te transferir para X" ou "Wesley vai retomar amanha")
+- "duplicado_distribuicao": ha 2 ou mais notas internas de "Distribuicao automatica" para a mesma conv
+- "ok": NENHUM dos problemas acima
+
+SEVERIDADE:
+- "alta": problema grave que prejudica o aluno (repeticao identica, sobre_resposta apos handoff)
+- "media": problema visivel mas com baixo impacto
+- "baixa": suspeita leve
+
+Retorne EXCLUSIVAMENTE JSON valido com os campos:
+{
+  "tem_problema": true/false,
+  "tipo": "<um dos tipos acima ou ok>",
+  "severidade": "alta|media|baixa|nenhuma",
+  "resumo": "<1 frase explicando>",
+  "trecho_problematico": "<texto curto que evidencia o problema>"
+}
+
+NAO inclua nada alem do JSON.
+"""
+
+
+def _openai_supervisor_fetch_convs():
+    """Lista convs ativas (DCZ) com 2+ mensagens do bot nos ultimos OPENAI_SUPERVISOR_LOOKBACK_MIN min."""
+    out = []
+    try:
+        r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
+                         params={'limit': 200, 'status': 'open'}, timeout=20)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        convs = data.get('data', data) if isinstance(data, dict) else data
+        if not isinstance(convs, list):
+            return []
+        cutoff = time.time() - OPENAI_SUPERVISOR_LOOKBACK_MIN * 60
+        # ordenar pelos mais recentes primeiro
+        for c in convs:
+            updated = c.get('updatedAt') or c.get('lastMessageAt') or ''
+            ts = 0
+            try:
+                if isinstance(updated, str) and updated:
+                    from datetime import datetime
+                    ts = datetime.fromisoformat(updated.replace('Z', '+00:00')).timestamp()
+            except Exception:
+                pass
+            if ts < cutoff:
+                continue
+            out.append((ts, c))
+        out.sort(key=lambda x: x[0], reverse=True)
+        return [c for _, c in out][:OPENAI_SUPERVISOR_MAX_CONVS * 3]  # buffer pra filtrar depois
+    except Exception as e:
+        p(f"  [OPENAI-SUP] erro listar convs: {e}")
+        return []
+
+
+def _openai_supervisor_get_window(conv_id, max_msgs=10):
+    """Retorna lista [(role, text, ts, is_internal)] das ultimas mensagens."""
+    try:
+        r = requests.get(f'{DCZ_MSG}/messaging/conversations/{conv_id}/messages',
+                         headers=H, params={'limit': max_msgs * 2}, timeout=15)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        msgs = data.get('data', data) if isinstance(data, dict) else data
+        if not isinstance(msgs, list):
+            return []
+        out = []
+        for m in msgs[:max_msgs]:
+            body = (m.get('body') or m.get('text') or '').strip()
+            if not body:
+                continue
+            from_me = bool(m.get('isFromMe') or m.get('fromMe'))
+            is_internal = bool(m.get('isInternal'))
+            has_attendant = bool(m.get('attendant'))
+            if from_me and has_attendant and not is_internal:
+                role = 'humano'
+            elif from_me and not has_attendant:
+                role = 'bot'
+            elif from_me and is_internal:
+                role = 'nota_interna'
+            else:
+                role = 'aluno'
+            out.append((role, body[:600], m.get('createdAt') or '', is_internal))
+        return list(reversed(out))  # cronologico ascendente
+    except Exception:
+        return []
+
+
+def _openai_supervisor_audit_conv(conv_id, msgs_window):
+    """Chama OpenAI e retorna dict com analise ou None em erro."""
+    if not OPENAI_API_KEY:
+        return None
+    if not msgs_window:
+        return None
+    bot_count = sum(1 for r, _, _, _ in msgs_window if r == 'bot')
+    if bot_count < 2:
+        return None
+    convo_str = []
+    for role, body, _, _ in msgs_window[-10:]:
+        convo_str.append(f"[{role}] {body}")
+    convo_text = "\n".join(convo_str)
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        resp = client.chat.completions.create(
+            model=OPENAI_SUPERVISOR_MODEL,
+            response_format={'type': 'json_object'},
+            messages=[
+                {'role': 'system', 'content': _OPENAI_SUPERVISOR_PROMPT},
+                {'role': 'user', 'content': f"Conversa (cronologica):\n{convo_text}\n\nAnalise."}
+            ],
+            temperature=0.0,
+            max_tokens=300,
+            timeout=30,
+        )
+        content = resp.choices[0].message.content or '{}'
+        parsed = json.loads(content)
+        return parsed
+    except Exception as e:
+        p(f"  [OPENAI-SUP] erro chamada OpenAI conv={conv_id[:12]}: {e}")
+        return None
+
+
+def process_openai_supervisor_loop():
+    """Roda no minimo a cada OPENAI_SUPERVISOR_INTERVAL_S. Audita convs ativas
+    com OpenAI, grava findings e bloqueia agente em casos graves."""
+    global _last_openai_supervisor_ts
+    if not OPENAI_SUPERVISOR_ENABLED:
+        return
+    if not OPENAI_API_KEY:
+        return
+    now_ts = time.time()
+    if now_ts - _last_openai_supervisor_ts < OPENAI_SUPERVISOR_INTERVAL_S:
+        return
+    _last_openai_supervisor_ts = now_ts
+
+    _ensure_audit_table()
+
+    convs = _openai_supervisor_fetch_convs()
+    if not convs:
+        return
+
+    audited = 0
+    flagged_high = 0
+    flagged_med = 0
+    for c in convs:
+        if audited >= OPENAI_SUPERVISOR_MAX_CONVS:
+            break
+        cid = c.get('id') or ''
+        if not cid:
+            continue
+        last_audit_ts = _openai_supervisor_audited.get(cid, 0)
+        # nao re-auditar mesma conv mais que 1x a cada 15min
+        if now_ts - last_audit_ts < 15 * 60:
+            continue
+        # ignorar convs ja com handoff supervisor_block ativo
+        try:
+            ho_motivo, _ = _is_handoff_active(cid)
+            if ho_motivo == 'supervisor_block':
+                continue
+        except Exception:
+            pass
+        window = _openai_supervisor_get_window(cid, max_msgs=10)
+        result = _openai_supervisor_audit_conv(cid, window)
+        if result is None:
+            continue
+        audited += 1
+        _openai_supervisor_audited[cid] = now_ts
+        if not result.get('tem_problema'):
+            continue
+        sev = (result.get('severidade') or 'baixa').lower()
+        ptype = (result.get('tipo') or '').lower()
+        resumo = result.get('resumo') or ''
+        trecho = result.get('trecho_problematico') or ''
+        # extrai phone se possivel
+        phone = ''
+        try:
+            for k in ('contactPhoneNumber', 'phone', 'contactPhone'):
+                v = c.get(k)
+                if v:
+                    phone = str(v)
+                    break
+        except Exception:
+            pass
+
+        action = ''
+        if sev == 'alta' and ptype in ('repeticao_resposta', 'sobre_resposta', 'duplicado_distribuicao'):
+            # CALA o agente nessa conv ate intervencao humana
+            try:
+                _mark_handoff_active(cid, 'supervisor_block',
+                                     target='', ttl_s=6 * 3600,
+                                     body=f"supervisor_block: {ptype}")
+                action = 'agent_silenced'
+                flagged_high += 1
+                p(f"  [OPENAI-SUP] {cid[:12]} ALTA/{ptype} - agente bloqueado por 6h | {resumo}")
+            except Exception:
+                action = 'audit_only'
+        else:
+            if sev == 'media':
+                flagged_med += 1
+            action = 'audit_only'
+            p(f"  [OPENAI-SUP] {cid[:12]} {sev}/{ptype} | {resumo}")
+
+        _record_audit_finding(
+            cid, severity=sev, problem_type=ptype, summary=resumo,
+            detail={'trecho': trecho, 'window': [{'role': r, 'body': b[:200]}
+                                                  for r, b, _, _ in window[-6:]]},
+            action_taken=action, phone=phone, model=OPENAI_SUPERVISOR_MODEL,
+        )
+
+    if audited:
+        p(f"  [OPENAI-SUP] auditadas={audited} alta={flagged_high} media={flagged_med}")
 
 
 def _after_hours_escalation_tier(conv_id):
@@ -5123,6 +5571,27 @@ def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude
         p(f"  [DIST] [MODE] after_hours — distribuição abortada (motivo='{reason}')")
         return False
 
+    # === IDEMPOTENCIA: nao distribui 2x na mesma conv ===
+    # Se ja tem handoff_active motivo='dispatch' nao expirado, ja foi distribuido.
+    # Resolve o bug do "Distribuicao automatica" + "Vou te transferir" aparecerem 2x.
+    try:
+        ho_motivo, ho_target = _is_handoff_active(conv_id)
+        if ho_motivo == 'dispatch':
+            p(f"  [DIST] {conv_id[:12]} ja distribuido para {ho_target} (handoff_active) - skip idempotente")
+            return True
+    except Exception:
+        pass
+    # Fallback: estado em memoria
+    try:
+        st_idem = _conv_states.get(conv_id, {}) or {}
+        last_dist = st_idem.get('_last_distributed_to')
+        last_ts = st_idem.get('_last_responded_ts') or 0
+        if last_dist and (time.time() - last_ts) < 5 * 60:
+            p(f"  [DIST] {conv_id[:12]} distribuido para {last_dist} ha <5min (mem) - skip idempotente")
+            return True
+    except Exception:
+        pass
+
     consultant = get_available_consultant(exclude_attendants=exclude_attendants)
     if not consultant:
         p(f"  [DIST] [MODE] human_unavailable — fallback nota interna (motivo='{reason}')")
@@ -5243,6 +5712,10 @@ def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude
     _conv_states[conv_id]['inactivity_start'] = 0
     _conv_states[conv_id]['followup_stage'] = 0
     _conv_states[conv_id]['_last_responded_ts'] = time.time()
+    try:
+        _mark_handoff_active(conv_id, 'dispatch', target=nome, ttl_s=4 * 3600, body=client_msg)
+    except Exception:
+        pass
     update_pending_escalation_status(
         conv_id, 'in_progress',
         note='🔔 Distribuição humana concluída — fila Cockpit atualizada para *Em atendimento*.',
@@ -6294,6 +6767,11 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     # por inatividade.
     ho_motivo, ho_target = _is_handoff_active(conv_id)
     if ho_motivo:
+        # supervisor_block: silencio absoluto (sem nudge). So humano libera.
+        if ho_motivo == 'supervisor_block':
+            p(f"  [SUPERVISOR-BLOCK] {conv_id[:12]} agente silenciado pelo auditor OpenAI - SEM resposta")
+            conversation_messages.append({'role': 'user', 'text': question})
+            return
         nudge_sig = f'handoff_nudge:{ho_motivo}'
         if not _signature_recently_sent(conv_id, nudge_sig, window_s=4 * 3600):
             target_label = f"*{ho_target}*" if ho_target else "um consultor"
@@ -7419,6 +7897,10 @@ def main():
                     process_supervisor_loop()
                 except Exception as e_sup:
                     p(f"  [SUPERVISOR] Erro: {e_sup}")
+                try:
+                    process_openai_supervisor_loop()
+                except Exception as e_osup:
+                    p(f"  [OPENAI-SUP] Erro: {e_osup}")
 
             if cycle % 2 == 0:
                 active_count = sum(1 for s in _conv_states.values() if s.get('waiting_for_client'))
