@@ -4926,6 +4926,68 @@ def _mark_handoff_active(conv_id, motivo, target='', ttl_s=12 * 3600, body=''):
         p(f"  [HANDOFF-ACTIVE] erro marcar: {e}")
 
 
+def _try_acquire_dispatch_lock(conv_id, target, ttl_s=4 * 3600):
+    """Tenta adquirir lock atomico de dispatch para conv_id no Postgres.
+
+    Retorna True se ESTE chamador adquiriu o lock (deve prosseguir com a
+    distribuicao). Retorna False se ja havia um dispatch ATIVO para esta
+    conv (outro chamador concorrente venceu — deve fazer skip silencioso).
+
+    Implementacao: INSERT ... ON CONFLICT DO UPDATE com WHERE filtrando
+    dispatch ativo. Se ja existe dispatch ativo (motivo='dispatch' e nao
+    expirado), o UPDATE nao roda e nada eh retornado.
+    """
+    _ensure_dedup_tables()
+    if not _DEDUP_TABLES_READY:
+        # Fallback: sem tabela, deixa passar (modo legado)
+        return True
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO handoff_active (conv_id, motivo, target_attendant, body_hash, expires_at)
+            VALUES (%s, 'dispatch', %s, %s, NOW() + (%s || ' seconds')::interval)
+            ON CONFLICT (conv_id) DO UPDATE SET
+                motivo = 'dispatch',
+                target_attendant = EXCLUDED.target_attendant,
+                body_hash = EXCLUDED.body_hash,
+                created_at = NOW(),
+                expires_at = EXCLUDED.expires_at
+            WHERE handoff_active.motivo <> 'dispatch'
+               OR handoff_active.expires_at <= NOW()
+            RETURNING conv_id
+        """, (conv_id, target or '', _hash_body('dispatch_lock'), str(int(ttl_s))))
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        if row:
+            p(f"  [DISPATCH-LOCK] {conv_id[:12]} ADQUIRIDO target={target}")
+            return True
+        p(f"  [DISPATCH-LOCK] {conv_id[:12]} PERDIDO (ja havia dispatch ativo) target={target}")
+        return False
+    except Exception as e:
+        p(f"  [DISPATCH-LOCK] erro: {e}")
+        # Em caso de erro, prefere nao duplicar — bloqueia
+        return False
+
+
+_dispatch_inproc_locks = {}
+_dispatch_inproc_mutex = __import__('threading').Lock()
+
+
+def _get_dispatch_inproc_lock(conv_id):
+    """Lock thread-local para serializar distribute_to_attendant no MESMO
+    processo. Combinado com _try_acquire_dispatch_lock (Postgres) garante
+    serializacao tanto entre threads quanto entre processos."""
+    with _dispatch_inproc_mutex:
+        lock = _dispatch_inproc_locks.get(conv_id)
+        if lock is None:
+            lock = __import__('threading').Lock()
+            _dispatch_inproc_locks[conv_id] = lock
+        return lock
+
+
 def _ensure_audit_table():
     """Cria tabela de findings do supervisor OpenAI."""
     try:
@@ -6386,8 +6448,8 @@ def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude
         return False
 
     # === IDEMPOTENCIA: nao distribui 2x na mesma conv ===
-    # Se ja tem handoff_active motivo='dispatch' nao expirado, ja foi distribuido.
-    # Resolve o bug do "Distribuicao automatica" + "Vou te transferir" aparecerem 2x.
+    # Camada 1 (rapida): check de leitura — evita custo de escolher consultor
+    # se ja distribuido.
     try:
         ho_motivo, ho_target = _is_handoff_active(conv_id)
         if ho_motivo == 'dispatch':
@@ -6406,6 +6468,40 @@ def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude
     except Exception:
         pass
 
+    # Camada 2: serializa chamadas concorrentes no mesmo processo.
+    # Sem isso, 2 threads passariam pelo check acima ao mesmo tempo e
+    # adquiririam o lock Postgres em sequencia. Com o lock in-process,
+    # apenas uma thread chega ao Postgres por vez.
+    inproc_lock = _get_dispatch_inproc_lock(conv_id)
+    if not inproc_lock.acquire(timeout=30):
+        p(f"  [DIST] {conv_id[:12]} nao conseguiu lock in-proc (timeout 30s) - skip")
+        return False
+    try:
+        # Re-check apos pegar lock: outra thread no mesmo processo pode ter
+        # acabado de distribuir.
+        try:
+            ho_motivo2, ho_target2 = _is_handoff_active(conv_id)
+            if ho_motivo2 == 'dispatch':
+                p(f"  [DIST] {conv_id[:12]} re-check pos-lock: ja distribuido para {ho_target2} - skip")
+                return True
+        except Exception:
+            pass
+
+        return _distribute_to_attendant_locked(
+            conv_id, reason=reason,
+            silent_after_hours=silent_after_hours,
+            exclude_attendants=exclude_attendants,
+        )
+    finally:
+        try:
+            inproc_lock.release()
+        except Exception:
+            pass
+
+
+def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
+                                    exclude_attendants=None):
+    """Corpo real de distribute_to_attendant, executado sob lock in-process."""
     consultant = get_available_consultant(exclude_attendants=exclude_attendants)
     if not consultant:
         p(f"  [DIST] [MODE] human_unavailable — fallback nota interna (motivo='{reason}')")
@@ -6440,6 +6536,13 @@ def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude
 
     nome = consultant['nome']
     p(f"  [DIST] Distribuindo para {nome}...")
+
+    # Camada 3 (atomica entre processos): adquire lock Postgres ANTES de
+    # qualquer transfer/envio. Se outro processo ja esta distribuindo esta
+    # conv, fazemos skip silencioso e retornamos True (idempotente).
+    if not _try_acquire_dispatch_lock(conv_id, target=nome, ttl_s=4 * 3600):
+        p(f"  [DIST] {conv_id[:12]} dispatch lock perdido para concorrente — skip silencioso")
+        return True
 
     lead_id = student_profile.get('lead_id', '') if student_profile else ''
     phone = _current_phone or PHONE_TO_MONITOR
@@ -6522,20 +6625,37 @@ def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude
             f"Motivo: {reason}" if reason else
             f"🔔 *Distribuição automática pelo agente IA*\n"
             f"Atendente: *{nome}*")
-    try:
-        requests.post(
-            f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
-            headers=H, json={'body': note, 'isInternal': True}, timeout=10
-        )
-    except Exception:
-        pass
+
+    # Dedup da NOTA interna: nao passa por send_and_track entao precisa de
+    # check explicito. Bloqueia segunda nota identica dentro de 4h.
+    note_sig = f'dist_note:{nome.lower()}'
+    if _signature_recently_sent(conv_id, note_sig, window_s=4 * 3600):
+        p(f"  [DIST] dedup: nota interna p/ {nome} ja enviada nas ultimas 4h - suprimindo")
+    else:
+        try:
+            r_note = requests.post(
+                f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                headers=H, json={'body': note, 'isInternal': True}, timeout=10
+            )
+            if r_note.status_code in (200, 201, 204):
+                _register_signature(conv_id, note_sig, note)
+        except Exception:
+            pass
 
     client_msg = (
         f"Vou te transferir para *{nome}*, que vai dar continuidade ao seu atendimento. "
         f"Um momento, por favor! 😊"
     )
-    meta_typing_on()
-    send_and_track(conv_id, client_msg)
+    # Dedup explicito tambem na mensagem ao cliente (alem do dedup por
+    # conteudo do send_and_track), por seguranca extra.
+    client_sig = f'dist_client:{nome.lower()}'
+    if _signature_recently_sent(conv_id, client_sig, window_s=4 * 3600):
+        p(f"  [DIST] dedup: mensagem cliente p/ {nome} ja enviada nas ultimas 4h - suprimindo")
+    else:
+        meta_typing_on()
+        sent_ok = send_and_track(conv_id, client_msg)
+        if sent_ok:
+            _register_signature(conv_id, client_sig, client_msg)
 
     p(f"  [DIST] ✅ Distribuição concluída para {nome} (lead={lead_ok} biz={biz_ok} chat={chat_ok})")
     _conv_states.setdefault(conv_id, _default_conv_state())['_last_distributed_to'] = nome
