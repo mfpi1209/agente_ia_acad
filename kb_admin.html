@@ -259,7 +259,7 @@ body.dark-mode .wa-bubble.wa-bot .wa-meta{color:#6b7085;}
   <div class="tab" data-tab="agentia" onclick="sw('agentia')"><i class="fas fa-robot mr-1.5"></i>Agente IA</div>
   <div class="tab" data-tab="playground" onclick="sw('playground')"><i class="fas fa-flask mr-1.5"></i>Playground</div>
   <div class="tab" data-tab="prompts" onclick="sw('prompts')"><i class="fas fa-wand-magic-sparkles mr-1.5"></i>Prompts</div>
-  <div class="tab" data-tab="enrich" onclick="sw('enrich')"><i class="fas fa-seedling mr-1.5"></i>Enriquecer</div>
+  <div class="tab" data-tab="audit" onclick="sw('audit')"><i class="fas fa-shield-halved mr-1.5"></i>Auditoria IA</div>
   <div class="tab" data-tab="afterhours" onclick="sw('afterhours')"><i class="fas fa-moon mr-1.5"></i>Fora do Horário</div>
   <div class="tab" data-tab="caa" onclick="sw('caa')"><i class="fas fa-folder-open mr-1.5"></i>Solicitações CAA</div>
   <div class="tab" data-tab="team" onclick="sw('team')"><i class="fas fa-users-gear mr-1.5"></i>Equipe</div>
@@ -615,6 +615,40 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
       <button onclick="promptTestInPG()" class="btn btn-g flex-1"><i class="fas fa-flask"></i> Testar no Playground</button>
     </div>
   </div>
+</div>
+</div>
+
+<!-- ===== AUDITORIA IA (supervisor OpenAI) ===== -->
+<div id="tab-audit" class="tc hidden fade">
+<div class="card p-5 mt-5 border-l-4 border-purple-400">
+  <div class="flex items-center justify-between flex-wrap gap-3">
+    <div>
+      <h3 class="text-lg font-bold text-gray-800"><i class="fas fa-shield-halved mr-1.5 text-purple-500"></i>Auditoria IA — Supervisor OpenAI</h3>
+      <p class="text-xs text-gray-500 mt-1">Findings detectados automaticamente pelo modelo revisor (gpt-4o). Atualiza a cada 30s.</p>
+    </div>
+    <div class="flex items-center gap-2 flex-wrap">
+      <select id="audit-status" class="input text-sm" onchange="loadAuditFindings()">
+        <option value="open" selected>Em aberto</option>
+        <option value="resolved">Resolvidos</option>
+        <option value="all">Todos</option>
+      </select>
+      <select id="audit-sev" class="input text-sm" onchange="loadAuditFindings()">
+        <option value="">Todas severidades</option>
+        <option value="alta">Alta</option>
+        <option value="media">Média</option>
+        <option value="baixa">Baixa</option>
+      </select>
+      <select id="audit-hours" class="input text-sm" onchange="loadAuditFindings()">
+        <option value="24">Últimas 24h</option>
+        <option value="72" selected>Últimas 72h</option>
+        <option value="168">Últimos 7 dias</option>
+        <option value="720">Últimos 30 dias</option>
+      </select>
+      <button class="btn btn-w btn-sm" onclick="loadAuditFindings()"><i class="fas fa-arrows-rotate"></i></button>
+    </div>
+  </div>
+  <div id="audit-counts" class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4"></div>
+  <div id="audit-list" class="space-y-2 mt-4"><div class="text-sm text-gray-400 text-center py-6"><span class="ld"></span> Carregando...</div></div>
 </div>
 </div>
 
@@ -1568,7 +1602,6 @@ function dczBtn(item){
   return `<a href="${url}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="btn btn-sm btn-p" style="font-size:11px;padding:4px 10px;text-decoration:none;"><i class="fas fa-external-link-alt mr-1"></i>Ver no DataCrazy</a>`;
 }
 let qaPg=1,logsPg=1,stuPg=1,_dt={},charts={};
-let _csvFile=null;
 let _selectedQA=new Set();
 let chatH=[],chatR={},chatN=0;
 let waSectionCount=1;
@@ -1721,7 +1754,7 @@ async function aiaCorrSave(){
 
 // ==== TABS ====
 function sw(t){document.querySelectorAll('.tc').forEach(e=>e.classList.add('hidden'));document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));document.getElementById('tab-'+t).classList.remove('hidden');document.querySelector(`.tab[data-tab="${t}"]`).classList.add('active');
-if(t==='dashboard')loadDash();if(t==='qa')loadQA();if(t==='logs')loadLogs();if(t==='prompts')loadPrompts();if(t==='playground')initPG();if(t==='agentia')initAgentIA();if(t==='afterhours')initAfterHours();if(t==='team')loadTeam();if(t==='students')loadStudents();if(t==='alerts')loadAlerts();if(t==='menus')loadMenus();if(t==='agentcfg')loadAgentConfig();if(t==='conversations')loadConversations();if(t==='caa')initCaa();}
+if(t==='dashboard')loadDash();if(t==='qa')loadQA();if(t==='logs')loadLogs();if(t==='prompts')loadPrompts();if(t==='playground')initPG();if(t==='agentia')initAgentIA();if(t==='audit')initAudit();if(t==='afterhours')initAfterHours();if(t==='team')loadTeam();if(t==='students')loadStudents();if(t==='alerts')loadAlerts();if(t==='menus')loadMenus();if(t==='agentcfg')loadAgentConfig();if(t==='conversations')loadConversations();if(t==='caa')initCaa();}
 
 // ==== DASHBOARD ====
 async function loadDash(){
@@ -2030,51 +2063,98 @@ async function promptActivate(id){await fetch(A+'/api/prompts/'+id+'/activate',{
 async function promptDup(id){await fetch(A+'/api/prompts/'+id+'/duplicate',{method:'POST'});toast('Duplicado!');loadPrompts();}
 async function promptDel(id){if(!confirm('Deletar este prompt?'))return;const r=await fetch(A+'/api/prompts/'+id,{method:'DELETE'});if(r.ok){toast('Deletado');loadPrompts();}else{const e=await r.json();toast(e.detail||'Erro','error');}}
 
-// ==== ENRICH ====
-async function previewCSV(file){
-  if(!file)return;_csvFile=file;
-  const fd=new FormData();fd.append('file',file);
+// ==== AUDITORIA IA (supervisor OpenAI findings) ====
+let _auditTimer=null;
+const AUDIT_TYPE_LABELS={
+  repeticao_resposta:'Repetição de resposta',
+  contradicao:'Contradição',
+  falha_pre_opening:'Falha pré-abertura',
+  sobre_resposta:'Continuou após handoff',
+  duplicado_distribuicao:'Distribuição duplicada',
+  ok:'Sem problema',
+};
+const AUDIT_SEV_BADGE={
+  alta:'b-red',
+  media:'b-yellow',
+  baixa:'b-gray',
+  nenhuma:'b-gray',
+};
+function initAudit(){
+  loadAuditFindings();
+  if(_auditTimer)clearInterval(_auditTimer);
+  _auditTimer=setInterval(loadAuditFindings,30000);
+}
+async function loadAuditFindings(){
   try{
-    const r=await fetch(A+'/api/import/csv/preview',{method:'POST',body:fd});const d=await r.json();
-    if(!d.preview||!d.preview.length){toast('CSV vazio ou inválido','error');return;}
-    const cols=d.columns||Object.keys(d.preview[0]);
-    let h='<thead class="bg-gray-100"><tr>'+cols.map(c=>`<th class="px-2 py-1 text-left text-xs font-semibold text-gray-600">${esc(c)}</th>`).join('')+'</tr></thead><tbody>';
-    d.preview.forEach(row=>{h+='<tr class="border-t">'+cols.map(c=>`<td class="px-2 py-1 text-xs text-gray-700">${esc(row[c]||'')}</td>`).join('')+'</tr>';});
-    h+='</tbody>';
-    document.getElementById('csv-preview-table').innerHTML=h;
-    document.getElementById('csv-preview-info').textContent=`~${d.total_estimated} linhas estimadas`;
-    document.getElementById('csv-preview').classList.remove('hidden');
-    document.getElementById('csv-result').innerHTML='';
-  }catch(e){toast('Erro ao ler CSV','error');}
+    const sev=document.getElementById('audit-sev')?.value||'';
+    const status=document.getElementById('audit-status')?.value||'open';
+    const hours=document.getElementById('audit-hours')?.value||'72';
+    const qs=new URLSearchParams({status,hours,limit:'100'});
+    if(sev)qs.set('severity',sev);
+    const r=await fetch(A+'/api/audit/findings?'+qs.toString());
+    const d=await r.json();
+    renderAuditCounts(d.counts||{});
+    renderAuditList(d.items||[]);
+  }catch(e){
+    console.error('audit error',e);
+    document.getElementById('audit-list').innerHTML='<div class="text-sm text-red-600">Erro ao carregar</div>';
+  }
 }
-function cancelCSVPreview(){document.getElementById('csv-preview').classList.add('hidden');_csvFile=null;}
-async function confirmCSVImport(){
-  if(!_csvFile){toast('Nenhum arquivo','error');return;}
-  document.getElementById('csv-result').innerHTML='<div class="flex items-center gap-2"><span class="ld"></span> Importando e gerando embeddings...</div>';
-  document.getElementById('csv-preview').classList.add('hidden');
-  const fd=new FormData();fd.append('file',_csvFile);
-  const r=await fetch(A+'/api/import/csv',{method:'POST',body:fd});const d=await r.json();
-  document.getElementById('csv-result').innerHTML=r.ok?`<div class="flex items-center gap-2 text-green-700"><i class="fas fa-check-circle"></i> Importados: <strong>${d.imported}</strong> | Erros: ${d.errors} | Total: ${d.total_rows}</div>`:`<div class="text-red-600"><i class="fas fa-exclamation-circle mr-1"></i>${d.detail||'Erro'}</div>`;
-  _csvFile=null;
+function renderAuditCounts(counts){
+  const alta=counts.alta||0,media=counts.media||0,baixa=counts.baixa||0;
+  const el=document.getElementById('audit-counts');
+  if(!el)return;
+  el.innerHTML=`
+    <div class="bg-red-50 border border-red-200 rounded-xl p-3 flex items-center gap-3">
+      <i class="fas fa-circle-exclamation text-red-500 text-xl"></i>
+      <div><div class="text-xs text-red-700">Alta severidade</div><div class="text-xl font-bold text-red-700">${alta}</div></div>
+    </div>
+    <div class="bg-yellow-50 border border-yellow-200 rounded-xl p-3 flex items-center gap-3">
+      <i class="fas fa-triangle-exclamation text-yellow-500 text-xl"></i>
+      <div><div class="text-xs text-yellow-700">Média</div><div class="text-xl font-bold text-yellow-700">${media}</div></div>
+    </div>
+    <div class="bg-gray-50 border border-gray-200 rounded-xl p-3 flex items-center gap-3">
+      <i class="fas fa-info-circle text-gray-500 text-xl"></i>
+      <div><div class="text-xs text-gray-700">Baixa</div><div class="text-xl font-bold text-gray-700">${baixa}</div></div>
+    </div>
+  `;
 }
-async function handleCSV(file){previewCSV(file);}
-async function loadTemplates(){const btn=document.getElementById('btn-tpl');btn.innerHTML='<span class="ld"></span> Buscando...';
-const d=await(await fetch(A+'/api/import/templates',{method:'POST'})).json();btn.innerHTML='<i class="fas fa-download"></i> Buscar Templates';
-document.getElementById('tpl-list').innerHTML=d.templates.map(t=>`<label class="flex items-start gap-2 p-2 hover:bg-gray-50 rounded-lg cursor-pointer text-sm"><input type="checkbox" value="${t.id}" class="tpl-cb mt-0.5" checked><span class="flex-1"><span class="font-medium">${esc(t.name)}</span>${t.attachments_count?` <span class="badge b-yellow">${t.attachments_count} anexos</span>`:''}<div class="text-xs text-gray-400 mt-0.5 trunc2">${esc(t.body)}</div></span></label>`).join('');
-document.getElementById('btn-tpl-import').classList.remove('hidden');}
-async function importSelectedTemplates(){const ids=[...document.querySelectorAll('.tpl-cb:checked')].map(c=>c.value);if(!ids.length){toast('Selecione ao menos 1','error');return;}
-const btn=document.getElementById('btn-tpl-import');btn.innerHTML='<span class="ld"></span>';
-const d=await(await fetch(A+'/api/import/templates/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ids)})).json();
-btn.innerHTML='<i class="fas fa-check"></i> Importar Selecionados';document.getElementById('tpl-result').innerHTML=`<div class="text-green-700"><i class="fas fa-check-circle mr-1"></i>Importados: ${d.imported} | Erros: ${d.errors}</div>`;}
-async function loadGaps(){document.getElementById('gaps-list').innerHTML='<div class="flex items-center gap-2 text-sm text-gray-500"><span class="ld"></span> Buscando...</div>';
-const d=await(await fetch(A+'/api/gaps')).json();
-document.getElementById('gaps-list').innerHTML=d.length?d.map(g=>`<div class="flex items-center gap-2 p-3 bg-gray-50 rounded-lg border"><span class="badge b-red font-mono">${(g.confianca).toFixed(2)}</span><span class="flex-1 text-sm trunc2">${esc(g.pergunta)}</span><button onclick="openModal('add');setTimeout(()=>document.getElementById('f-q').value=decodeURIComponent('${encodeURIComponent(g.pergunta)}'),100)" class="btn btn-p btn-sm"><i class="fas fa-plus"></i></button></div>`).join(''):'<div class="text-sm text-gray-400 text-center py-4">Nenhuma lacuna encontrada</div>';}
-async function loadDups(){document.getElementById('dups-list').innerHTML='<div class="flex items-center gap-2 text-sm text-gray-500"><span class="ld"></span> Buscando...</div>';
-const d=await(await fetch(A+'/api/duplicates')).json();
-document.getElementById('dups-list').innerHTML=d.length?d.map(dp=>`<div class="p-3 bg-gray-50 rounded-lg border"><div class="flex items-center gap-2"><span class="badge b-yellow font-mono">${dp.similarity}</span><span class="flex-1 text-sm trunc">#${dp.id_a}: ${esc(dp.pergunta_a)}</span></div><div class="flex items-center gap-2 mt-1.5 ml-12"><span class="flex-1 text-xs text-gray-500 trunc">#${dp.id_b}: ${esc(dp.pergunta_b)}</span><button onclick="mergeQA(${dp.id_a},${dp.id_b})" class="btn btn-w btn-sm" title="Mesclar mantendo #${dp.id_a}"><i class="fas fa-code-merge"></i> Mesclar</button><button onclick="delQA(${dp.id_b})" class="btn btn-d btn-sm"><i class="fas fa-trash-can"></i></button></div></div>`).join(''):'<div class="text-sm text-gray-400 text-center py-4">Nenhuma duplicata (>0.95)</div>';}
-async function mergeQA(keepId,delId){if(!confirm(`Mesclar #${delId} em #${keepId}? O #${delId} será removido.`))return;
-const r=await fetch(A+'/api/qa/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep_id:keepId,delete_id:delId})});
-const d=await r.json();toast(d.message||'Mesclado');loadDups();}
+function renderAuditList(items){
+  const el=document.getElementById('audit-list');
+  if(!el)return;
+  if(!items.length){el.innerHTML='<div class="text-center text-sm text-gray-400 py-6">🎉 Nenhum problema flagrado nesse filtro</div>';return;}
+  el.innerHTML=items.map(it=>{
+    const sevCls=AUDIT_SEV_BADGE[it.severity]||'b-gray';
+    const typeLabel=AUDIT_TYPE_LABELS[it.problem_type]||it.problem_type||'—';
+    const dt=it.created_at?new Date(it.created_at).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
+    const resolved=it.resolved_at?`<span class="badge b-green ml-2"><i class="fas fa-check"></i> Resolvido ${it.resolved_by||''}</span>`:'';
+    const blocked=it.action_taken==='agent_silenced'?'<span class="badge b-red ml-2"><i class="fas fa-microphone-slash"></i> Agente silenciado</span>':'';
+    const trecho=(it.detail&&it.detail.trecho)?`<div class="mt-1.5 text-xs text-gray-500 italic">"${esc(it.detail.trecho).substring(0,180)}"</div>`:'';
+    const win=(it.detail&&it.detail.window)?(it.detail.window.map(m=>`<div class="text-xs"><span class="font-mono text-gray-400">[${m.role}]</span> ${esc(m.body)}</div>`).join('')):'';
+    return `
+      <div class="p-3 bg-white border border-gray-200 rounded-xl">
+        <div class="flex items-start gap-2 flex-wrap">
+          <span class="badge ${sevCls}">${(it.severity||'').toUpperCase()}</span>
+          <span class="badge b-gray">${esc(typeLabel)}</span>
+          <span class="text-xs text-gray-400">${dt}</span>
+          ${resolved}${blocked}
+          <span class="ml-auto text-xs text-gray-400">conv: <span class="font-mono">${(it.conv_id||'').substring(0,12)}</span> ${it.phone?'· '+esc(it.phone):''}</span>
+        </div>
+        <div class="mt-2 text-sm text-gray-800">${esc(it.summary||'')}</div>
+        ${trecho}
+        ${win?`<details class="mt-2"><summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-700">Ver janela analisada</summary><div class="mt-1.5 p-2 bg-gray-50 rounded-lg space-y-0.5">${win}</div></details>`:''}
+        <div class="mt-2 flex items-center gap-2 text-xs">
+          ${!it.resolved_at?`<button class="btn btn-p btn-sm" onclick="resolveAudit(${it.id},false)"><i class="fas fa-check"></i> Resolver</button>`:''}
+          ${(!it.resolved_at&&it.action_taken==='agent_silenced')?`<button class="btn btn-w btn-sm" onclick="resolveAudit(${it.id},true)"><i class="fas fa-unlock"></i> Resolver + Liberar agente</button>`:''}
+          <span class="text-gray-400 ml-auto">modelo: ${esc(it.model||'')}</span>
+        </div>
+      </div>`;
+  }).join('');
+}
+async function resolveAudit(id,unblock){
+  const r=await fetch(A+'/api/audit/findings/'+id+'/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({unblock})});
+  if(r.ok){toast(unblock?'Resolvido + agente liberado':'Resolvido');loadAuditFindings();}else{toast('Erro','error');}
+}
 
 // ==== FORA DO HORÁRIO ====
 let aohClockInt=null;

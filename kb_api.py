@@ -2175,6 +2175,177 @@ async def after_hours_pending_update(item_id: int, request: Request):
         return {'ok': True, 'id': item_id, 'status': new_status}
 
 
+# ===================== AUDITORIA IA (supervisor OpenAI) =====================
+
+def _ensure_audit_table_api():
+    """Garante que agent_audit_findings existe (caso o agente nunca tenha
+    criado ainda - acontece em ambiente novo)."""
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS agent_audit_findings (
+                    id SERIAL PRIMARY KEY,
+                    conv_id VARCHAR(64) NOT NULL,
+                    phone VARCHAR(32),
+                    model VARCHAR(64),
+                    severity VARCHAR(16) NOT NULL,
+                    problem_type VARCHAR(64),
+                    summary TEXT,
+                    detail JSONB,
+                    action_taken VARCHAR(64),
+                    resolved_at TIMESTAMP NULL,
+                    resolved_by VARCHAR(64) NULL,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            # Garantir colunas novas mesmo se a tabela ja existir
+            cur.execute("""
+                ALTER TABLE agent_audit_findings
+                ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP NULL
+            """)
+            cur.execute("""
+                ALTER TABLE agent_audit_findings
+                ADD COLUMN IF NOT EXISTS resolved_by VARCHAR(64) NULL
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_audit_conv_created
+                ON agent_audit_findings (conv_id, created_at DESC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_audit_severity_created
+                ON agent_audit_findings (severity, created_at DESC)
+            """)
+            conn.commit()
+            cur.close()
+    except Exception as e:
+        print(f"[API] _ensure_audit_table_api: {e}", flush=True)
+
+
+@app.get("/api/audit/findings")
+async def audit_findings_list(
+    limit: int = Query(50, ge=1, le=500),
+    severity: Optional[str] = None,
+    problem_type: Optional[str] = None,
+    status: str = Query('all', pattern='^(all|open|resolved)$'),
+    hours: int = Query(72, ge=1, le=720),
+):
+    """Lista findings do supervisor OpenAI nas ultimas N horas."""
+    _ensure_audit_table_api()
+    try:
+        conds = ["created_at > NOW() - (%s || ' hours')::interval"]
+        params = [str(hours)]
+        if severity:
+            conds.append("severity = %s")
+            params.append(severity)
+        if problem_type:
+            conds.append("problem_type = %s")
+            params.append(problem_type)
+        if status == 'open':
+            conds.append("resolved_at IS NULL")
+        elif status == 'resolved':
+            conds.append("resolved_at IS NOT NULL")
+        where = " AND ".join(conds)
+        with get_db() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(f"""
+                SELECT id, conv_id, phone, model, severity, problem_type,
+                       summary, detail, action_taken, resolved_at, resolved_by,
+                       created_at
+                FROM agent_audit_findings
+                WHERE {where}
+                ORDER BY created_at DESC
+                LIMIT %s
+            """, params + [limit])
+            rows = cur.fetchall()
+            for r in rows:
+                if r.get('created_at'):
+                    r['created_at'] = r['created_at'].isoformat()
+                if r.get('resolved_at'):
+                    r['resolved_at'] = r['resolved_at'].isoformat()
+            # contagem global por severidade
+            cur.execute(f"""
+                SELECT severity, COUNT(*) as cnt
+                FROM agent_audit_findings
+                WHERE {where}
+                GROUP BY severity
+            """, params)
+            counts = {r['severity']: r['cnt'] for r in cur.fetchall()}
+            cur.close()
+            return {'items': rows, 'counts': counts, 'total': len(rows)}
+    except Exception as e:
+        print(f"[API] /api/audit/findings ERRO: {e}", flush=True)
+        return {'items': [], 'counts': {}, 'total': 0, 'error': str(e)}
+
+
+@app.post("/api/audit/findings/{finding_id}/resolve")
+async def audit_findings_resolve(finding_id: int, request: Request):
+    """Marca finding como resolvido. Opcionalmente libera o handoff_active
+    supervisor_block da conv (se body.unblock=true)."""
+    _ensure_audit_table_api()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    unblock = bool(body.get('unblock'))
+    resolved_by = (body.get('resolved_by') or 'cockpit').strip()[:64]
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE agent_audit_findings
+            SET resolved_at = NOW(), resolved_by = %s
+            WHERE id = %s
+            RETURNING conv_id
+        """, (resolved_by, finding_id))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, 'finding não encontrado')
+        conv_id = row[0]
+        if unblock and conv_id:
+            try:
+                cur.execute(
+                    "DELETE FROM handoff_active WHERE conv_id = %s AND motivo = 'supervisor_block'",
+                    (conv_id,),
+                )
+            except Exception:
+                pass
+        conn.commit()
+        cur.close()
+    return {'ok': True, 'id': finding_id, 'conv_id': conv_id, 'unblocked': unblock}
+
+
+@app.post("/api/audit/findings/bulk-resolve")
+async def audit_findings_bulk_resolve(request: Request):
+    """Marca multiplos findings como resolvidos."""
+    _ensure_audit_table_api()
+    body = await request.json()
+    ids = body.get('ids') or []
+    unblock = bool(body.get('unblock'))
+    resolved_by = (body.get('resolved_by') or 'cockpit').strip()[:64]
+    if not ids:
+        return {'ok': True, 'count': 0}
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE agent_audit_findings
+            SET resolved_at = NOW(), resolved_by = %s
+            WHERE id = ANY(%s)
+            RETURNING conv_id
+        """, (resolved_by, ids))
+        conv_ids = [r[0] for r in cur.fetchall() if r[0]]
+        if unblock and conv_ids:
+            try:
+                cur.execute(
+                    "DELETE FROM handoff_active WHERE conv_id = ANY(%s) AND motivo = 'supervisor_block'",
+                    (conv_ids,),
+                )
+            except Exception:
+                pass
+        conn.commit()
+        cur.close()
+    return {'ok': True, 'count': len(conv_ids), 'unblocked': unblock}
+
+
 # ===================== CAA SOLICITAÇÕES =====================
 
 def _clean_cpf(value) -> str:
