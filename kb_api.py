@@ -2576,6 +2576,37 @@ async def audit_findings_resolve(finding_id: int, request: Request):
     return {'ok': True, 'id': finding_id, 'conv_id': conv_id, 'unblocked': unblock}
 
 
+@app.get("/api/audit/supervisor-health")
+async def audit_supervisor_health():
+    """Retorna estado do supervisor OpenAI (modelo, ultimo ciclo, ultimo erro)."""
+    health = {}
+    last_err = ''
+    last_err_at = None
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT value, updated_at FROM agent_config WHERE key = 'supervisor_health'")
+            row = cur.fetchone()
+            if row:
+                try:
+                    health = json.loads(row[0]) if row[0] else {}
+                except Exception:
+                    health = {}
+                if row[1]:
+                    health['updated_at'] = row[1].isoformat() + 'Z' if row[1].tzinfo is None else row[1].isoformat()
+            cur.execute("SELECT value, updated_at FROM agent_config WHERE key = 'supervisor_last_error'")
+            row = cur.fetchone()
+            if row:
+                last_err = row[0] or ''
+                if row[1]:
+                    last_err_at = (row[1].isoformat() + 'Z' if row[1].tzinfo is None else row[1].isoformat())
+            cur.close()
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+    return {'ok': True, 'health': health, 'last_error': last_err,
+            'last_error_at': last_err_at}
+
+
 @app.get("/api/audit/findings/{finding_id}/conversation")
 async def audit_finding_conversation(finding_id: int, limit: int = Query(30, ge=5, le=100)):
     """Retorna o trecho da conversa associada a um finding, lendo de

@@ -624,7 +624,8 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
   <div class="flex items-center justify-between flex-wrap gap-3">
     <div>
       <h3 class="text-lg font-bold text-gray-800"><i class="fas fa-shield-halved mr-1.5 text-purple-500"></i>Auditoria IA — Supervisor OpenAI</h3>
-      <p class="text-xs text-gray-500 mt-1">Findings detectados automaticamente pelo modelo revisor (gpt-4o). Atualiza a cada 30s.</p>
+      <p class="text-xs text-gray-500 mt-1">Findings detectados automaticamente pelo modelo revisor. Atualiza a cada 30s.</p>
+      <div id="audit-supervisor-health" class="text-xs mt-1.5"></div>
     </div>
     <div class="flex items-center gap-2 flex-wrap">
       <select id="audit-status" class="input text-sm" onchange="loadAuditFindings()">
@@ -2103,14 +2104,42 @@ async function loadAuditFindings(){
     const hours=document.getElementById('audit-hours')?.value||'72';
     const qs=new URLSearchParams({status,hours,limit:'100'});
     if(sev)qs.set('severity',sev);
-    const r=await fetch(A+'/api/audit/findings?'+qs.toString());
+    const [r,rh]=await Promise.all([
+      fetch(A+'/api/audit/findings?'+qs.toString()),
+      fetch(A+'/api/audit/supervisor-health'),
+    ]);
     const d=await r.json();
+    const dh=await rh.json();
     renderAuditCounts(d.counts||{});
+    renderSupervisorHealth(dh);
     renderAuditList(d.items||[]);
   }catch(e){
     console.error('audit error',e);
     document.getElementById('audit-list').innerHTML='<div class="text-sm text-red-600">Erro ao carregar</div>';
   }
+}
+
+function renderSupervisorHealth(d){
+  const el=document.getElementById('audit-supervisor-health');
+  if(!el) return;
+  if(!d||!d.ok){el.innerHTML='';return;}
+  const h=d.health||{};
+  const errStr=d.last_error||'';
+  const errAt=d.last_error_at?new Date(d.last_error_at).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
+  let lastRun='nunca';
+  if(h.updated_at){
+    const dt=new Date(h.updated_at);
+    const ago=Math.round((Date.now()-dt.getTime())/60000);
+    lastRun=ago+'min atrás';
+  }
+  const model=h.model||'?';
+  const flagged=(h.flagged_high||0)+(h.flagged_med||0);
+  let color='#16a34a',label='OK';
+  if(errStr){color='#dc2626';label='com erro';}
+  else if(!h.updated_at){color='#6b7280';label='sem dados';}
+  else if(h.convs_audited===0 && (h.convs_total||0)>0){color='#d97706';label='nada auditado';}
+  el.innerHTML=`<span style="color:${color};font-weight:600;">● Supervisor ${label}</span> · modelo: <span class="font-mono">${esc(model)}</span> · último ciclo: ${lastRun} · convs ${h.convs_audited||0}/${h.convs_total||0} · findings ${flagged}`+
+    (errStr?`<div class="mt-1 px-2 py-1 rounded" style="background:#fef2f2;border:1px solid #fecaca;color:#991b1b;"><strong>Último erro</strong> (${errAt}): <span class="font-mono">${esc(errStr.substring(0,200))}</span></div>`:'');
 }
 function renderAuditCounts(counts){
   const alta=counts.alta||0,media=counts.media||0,baixa=counts.baixa||0;
@@ -2213,10 +2242,15 @@ async function loadAuditConv(id, summaryEl){
       const ts=m.created_at?new Date(m.created_at).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
       const isAluno=m.role==='aluno';
       const align=isAluno?'justify-start':'justify-end';
-      const bg=isAluno?'bg-white border border-gray-200':'bg-blue-50 border border-blue-200';
+      // Cores explicitas via inline style — funcionam em light E dark mode
+      // (sem depender de classes Tailwind que podem ter contraste invertido).
+      const bubble=isAluno
+        ? 'background:#f3f4f6;border:1px solid #d1d5db;color:#111827;'
+        : 'background:#dbeafe;border:1px solid #93c5fd;color:#1e3a8a;';
       const lbl=isAluno?'Aluno':'Agente';
-      const act=m.action?`<span class="ml-2 text-gray-400 text-[10px]">[${esc(m.action)}]</span>`:'';
-      return `<div class="flex ${align}"><div class="${bg} rounded-lg p-2 max-w-[85%]"><div class="text-[10px] text-gray-400 mb-0.5">${lbl} · ${ts}${act}</div><div class="whitespace-pre-wrap break-words">${esc(m.body||'')}</div></div></div>`;
+      const lblColor=isAluno?'#6b7280':'#1e40af';
+      const act=m.action?`<span style="margin-left:6px;color:#9ca3af;font-size:10px;">[${esc(m.action)}]</span>`:'';
+      return `<div class="flex ${align}"><div class="rounded-lg p-2 max-w-[85%]" style="${bubble}"><div style="font-size:10px;color:${lblColor};margin-bottom:2px;font-weight:600;">${lbl} · ${ts}${act}</div><div class="whitespace-pre-wrap break-words" style="font-size:12px;line-height:1.45;">${esc(m.body||'')}</div></div></div>`;
     }).join('');
     box.innerHTML=html;
     box.dataset.loaded='1';

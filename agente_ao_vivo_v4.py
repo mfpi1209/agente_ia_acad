@@ -5738,7 +5738,22 @@ def _openai_supervisor_audit_conv(conv_id, msgs_window):
         parsed = json.loads(content)
         return parsed
     except Exception as e:
-        p(f"  [OPENAI-SUP] erro chamada OpenAI conv={conv_id[:12]}: {e}")
+        err_str = f"{type(e).__name__}: {e}"
+        p(f"  [OPENAI-SUP] erro chamada OpenAI conv={conv_id[:12]}: {err_str}")
+        # Salva ultimo erro em agent_config p/ aparecer no Cockpit
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO agent_config (key, value, updated_at)
+                VALUES ('supervisor_last_error', %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            """, (err_str[:500],))
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
         return None
 
 
@@ -5831,6 +5846,31 @@ def process_openai_supervisor_loop():
 
     if audited:
         p(f"  [OPENAI-SUP] auditadas={audited} alta={flagged_high} media={flagged_med}")
+
+    # Grava saude do supervisor para o Cockpit consultar
+    try:
+        stats = {
+            'last_run_ts': int(time.time()),
+            'convs_total': len(convs),
+            'convs_audited': audited,
+            'flagged_high': flagged_high,
+            'flagged_med': flagged_med,
+            'model': OPENAI_SUPERVISOR_MODEL,
+            'interval_s': OPENAI_SUPERVISOR_INTERVAL_S,
+            'lookback_min': OPENAI_SUPERVISOR_LOOKBACK_MIN,
+        }
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO agent_config (key, value, updated_at)
+            VALUES ('supervisor_health', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """, (json.dumps(stats),))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        p(f"  [OPENAI-SUP] erro salvar stats: {e}")
 
 
 def _oneshot_fix_vanessa_barra_funda():
