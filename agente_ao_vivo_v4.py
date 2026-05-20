@@ -5775,6 +5775,126 @@ def _openai_supervisor_audit_conv(conv_id, msgs_window):
         return None
 
 
+def _audit_recheck_assignment_findings(max_age_minutes=240):
+    """Re-le o estado atual do CRM/chat para findings recentes de
+    assignment_mismatch e os marca como resolvidos automaticamente quando
+    o lead/business/chat estao consistentes com expected_name.
+
+    Motivacao: o change-attendant do DCZ tem propagacao assincrona — alguns
+    findings sao gravados durante o periodo de inconsistencia temporaria
+    e ficam abertos eternamente mesmo quando o atendimento esta certo.
+
+    Roda dentro do supervisor loop OpenAI (a cada ciclo), so para findings
+    abertos das ultimas 4h, evitando consumir API alem do necessario.
+    """
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, conv_id, phone, detail
+              FROM agent_audit_findings
+             WHERE problem_type = 'assignment_mismatch'
+               AND resolved_at IS NULL
+               AND created_at > NOW() - %s::interval
+             ORDER BY created_at DESC
+             LIMIT 50
+        """, (f'{int(max_age_minutes)} minutes',))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        p(f"  [AUDIT-RECHECK] erro listar findings: {e}")
+        return
+
+    if not rows:
+        return
+
+    resolved = 0
+    for fid, conv_id, phone, detail in rows:
+        try:
+            if isinstance(detail, str):
+                d = json.loads(detail or '{}')
+            else:
+                d = detail or {}
+            expected_name = d.get('expected_name') or ''
+            expected_crm_id = d.get('expected_crm_id') or ''
+            expected_chat_id = d.get('expected_chat_id') or ''
+            lead_id = d.get('lead_id') or ''
+            biz_id = d.get('biz_id') or ''
+
+            if not expected_crm_id and not expected_chat_id:
+                continue
+
+            # le estado atual
+            cur_lead_att = ''
+            if lead_id:
+                try:
+                    r = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
+                    if r.status_code == 200:
+                        ld = r.json()
+                        att = ld.get('attendant') or {}
+                        cur_lead_att = att.get('id', '') if isinstance(att, dict) else (att or '')
+                except Exception:
+                    pass
+
+            cur_biz_att = ''
+            if biz_id:
+                try:
+                    r = requests.get(f'{DCZ_CRM}/businesses/{biz_id}', headers=H, timeout=10)
+                    if r.status_code == 200:
+                        bd = r.json()
+                        att = bd.get('attendant') or {}
+                        cur_biz_att = att.get('id', '') if isinstance(att, dict) else (att or '')
+                except Exception:
+                    pass
+
+            cur_chat_att = ''
+            if conv_id:
+                try:
+                    r = requests.get(f'{DCZ_MSG}/messaging/conversations/{conv_id}',
+                                     headers=H, timeout=10)
+                    if r.status_code == 200:
+                        cd = r.json()
+                        att = cd.get('attendant') or {}
+                        if isinstance(att, dict):
+                            cur_chat_att = att.get('id', '')
+                        else:
+                            cur_chat_att = cd.get('attendantId', '') or ''
+                except Exception:
+                    pass
+
+            lead_ok = (cur_lead_att == expected_crm_id) if (lead_id and expected_crm_id) else True
+            biz_ok = (cur_biz_att == expected_crm_id) if (biz_id and expected_crm_id) else True
+            chat_ok = (cur_chat_att == expected_chat_id) if expected_chat_id else True
+
+            if not (lead_ok and biz_ok and chat_ok):
+                continue
+
+            # tudo consistente agora — auto-resolver
+            try:
+                conn = get_db()
+                cur2 = conn.cursor()
+                cur2.execute("""
+                    UPDATE agent_audit_findings
+                       SET resolved_at = NOW(),
+                           resolved_by = 'auto_recheck_consistent'
+                     WHERE id = %s AND resolved_at IS NULL
+                """, (fid,))
+                conn.commit()
+                cur2.close()
+                conn.close()
+                resolved += 1
+                p(f"  [AUDIT-RECHECK] finding {fid} auto-resolvido — estado consistente com {expected_name}")
+            except Exception as e_up:
+                p(f"  [AUDIT-RECHECK] erro update finding {fid}: {e_up}")
+        except Exception as e_row:
+            p(f"  [AUDIT-RECHECK] erro processar finding {fid}: {e_row}")
+            continue
+
+    if resolved:
+        p(f"  [AUDIT-RECHECK] {resolved} findings auto-resolvidos (estado ja consistente)")
+
+
 def process_openai_supervisor_loop():
     """Roda no minimo a cada OPENAI_SUPERVISOR_INTERVAL_S. Audita convs ativas
     com OpenAI, grava findings e bloqueia agente em casos graves."""
@@ -5789,6 +5909,14 @@ def process_openai_supervisor_loop():
     _last_openai_supervisor_ts = now_ts
 
     _ensure_audit_table()
+
+    # Antes de auditar novas convs, re-verifica findings recentes de
+    # assignment_mismatch — se o estado do DCZ ja propagou e ficou
+    # consistente, auto-resolve (evita falsos positivos eternos).
+    try:
+        _audit_recheck_assignment_findings()
+    except Exception as e_rc:
+        p(f"  [OPENAI-SUP] erro recheck: {e_rc}")
 
     _openai_sup_stats['cycles'] = _openai_sup_stats.get('cycles', 0) + 1
     _openai_sup_stats['last_cycle_at'] = now_ts
@@ -6711,7 +6839,11 @@ def _enforce_assignment_consistency(conv_id, lead_id, phone, expected_name,
                 p(f"  [VERIFY] retry change-attendant -> {expected_chat_id[:8]} status={rC.status_code}")
             except Exception as e:
                 p(f"  [VERIFY] retry chat err: {e}")
-        time.sleep(1.5)
+        # change-attendant no DCZ tem propagacao assincrona (eventual consistency).
+        # Sleeps crescentes: 3s, 6s, 9s. Dao tempo do DCZ refletir antes de
+        # marcar como divergente — evita falsos positivos do tipo "Chat=False"
+        # quando o atendimento foi de fato iniciado segundos depois.
+        time.sleep(min(3 * (attempt + 1), 10))
 
     # ---- pos-retries: ainda divergente ----
     p(f"  [VERIFY] FALHA persistente apos {result['attempts']} tentativas — registrando audit")
