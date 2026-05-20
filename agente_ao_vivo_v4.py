@@ -5644,6 +5644,161 @@ def _oneshot_fix_vanessa_barra_funda():
         p(f"  [ONESHOT-VANESSA] erro marcar done: {e}")
 
 
+def _oneshot_fix_vanessa_crm_attendant():
+    """Caso especifico: chat foi para Debora mas lead/business no CRM ficaram
+    com a Joyce. Atualiza attendant do lead+business da Vanessa Carmona para
+    Debora Mani Moreira no CRM.
+    Idempotente via agent_config.oneshot_vanessa_crm_attendant_done.
+    """
+    KEY = 'oneshot_vanessa_crm_attendant_done'
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM agent_config WHERE key = %s", (KEY,))
+        row = cur.fetchone()
+        already = bool(row and (row[0] or '').strip())
+        cur.close()
+        conn.close()
+        if already:
+            return
+    except Exception:
+        pass
+
+    p("  [ONESHOT-VANESSA-CRM] iniciando correcao atendente CRM...")
+
+    # 1) achar a conv ativa da Vanessa para pegar phone
+    target = None
+    try:
+        r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
+                         params={'limit': 300, 'status': 'open'}, timeout=20)
+        if r.status_code != 200:
+            p(f"  [ONESHOT-VANESSA-CRM] DCZ list status={r.status_code}")
+            return
+        data = r.json()
+        convs = data.get('data', data) if isinstance(data, dict) else data
+        for c in convs:
+            ct = c.get('contact') or {}
+            name = (ct.get('name') or c.get('contactName') or '').strip().lower()
+            if 'vanessa' in name and 'carmona' in name:
+                target = c
+                break
+        if not target:
+            p("  [ONESHOT-VANESSA-CRM] conv da Vanessa nao encontrada")
+            # marca como done para nao tentar a cada restart
+            try:
+                conn = psycopg2.connect(**DB_CONFIG)
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO agent_config (key, value, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                """, (KEY, 'not_found'))
+                conn.commit()
+                cur.close()
+                conn.close()
+            except Exception:
+                pass
+            return
+    except Exception as e:
+        p(f"  [ONESHOT-VANESSA-CRM] erro listar convs: {e}")
+        return
+
+    ct = target.get('contact') or {}
+    phone = ct.get('phone', '') or ct.get('number', '') or ''
+    conv_id = target.get('id') or ''
+    if not phone:
+        p("  [ONESHOT-VANESSA-CRM] phone nao encontrado")
+        return
+    p(f"  [ONESHOT-VANESSA-CRM] phone={phone} conv={conv_id[:12]}")
+
+    debora_id = CRM_ATTENDANT_MAP.get('debora')
+    if not debora_id:
+        p("  [ONESHOT-VANESSA-CRM] ID da Debora nao mapeado em CRM_ATTENDANT_MAP")
+        return
+
+    # 2) buscar business pelo phone e atualizar attendant + stage
+    business_updated = 0
+    lead_updated = 0
+    try:
+        search_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
+        phones_to_try = [search_phone]
+        if not search_phone.startswith('55'):
+            phones_to_try.append('55' + search_phone)
+        seen_biz = set()
+        seen_leads = set()
+        for try_phone in phones_to_try:
+            rb = requests.get(f'{DCZ_CRM}/businesses', headers=H,
+                              params={'search': try_phone, 'limit': 10}, timeout=15)
+            if rb.status_code != 200:
+                continue
+            data = rb.json()
+            biz_list = data.get('data', data) if isinstance(data, dict) else data
+            for biz in (biz_list if isinstance(biz_list, list) else []):
+                biz_id = biz.get('id')
+                if not biz_id or biz_id in seen_biz:
+                    continue
+                seen_biz.add(biz_id)
+                # patch attendant + stage Atendimento
+                try:
+                    rp = requests.patch(
+                        f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+                        json={'attendant': {'id': debora_id},
+                              'stageId': STAGE_ATENDIMENTO_ID},
+                        timeout=15,
+                    )
+                    if rp.status_code in (200, 204):
+                        business_updated += 1
+                        p(f"  [ONESHOT-VANESSA-CRM] business {str(biz_id)[:12]} -> Debora + Atendimento")
+                except Exception as e:
+                    p(f"  [ONESHOT-VANESSA-CRM] erro patch business: {e}")
+                # patch lead vinculado
+                lead_obj = biz.get('lead') or {}
+                lead_id = lead_obj.get('id') if isinstance(lead_obj, dict) else lead_obj
+                if lead_id and lead_id not in seen_leads:
+                    seen_leads.add(lead_id)
+                    try:
+                        rl = requests.patch(
+                            f'{DCZ_CRM}/leads/{lead_id}', headers=H,
+                            json={'attendant': {'id': debora_id}},
+                            timeout=15,
+                        )
+                        if rl.status_code in (200, 204):
+                            lead_updated += 1
+                            p(f"  [ONESHOT-VANESSA-CRM] lead {str(lead_id)[:12]} -> Debora")
+                    except Exception as e:
+                        p(f"  [ONESHOT-VANESSA-CRM] erro patch lead: {e}")
+    except Exception as e:
+        p(f"  [ONESHOT-VANESSA-CRM] erro geral: {e}")
+
+    # 3) nota interna explicando
+    if (business_updated or lead_updated) and conv_id:
+        try:
+            nota = ("🔧 *Ajuste automático* — Atendente do negócio/lead corrigido para *Debora Mani Moreira* "
+                    f"(o chat já estava com ela; CRM estava desatualizado). "
+                    f"business_updated={business_updated} lead_updated={lead_updated}.")
+            requests.post(f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                          headers=H, json={'body': nota, 'isInternal': True}, timeout=10)
+        except Exception:
+            pass
+
+    # 4) marcar done
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        result = f'biz={business_updated} lead={lead_updated}'
+        cur.execute("""
+            INSERT INTO agent_config (key, value, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """, (KEY, result))
+        conn.commit()
+        cur.close()
+        conn.close()
+        p(f"  [ONESHOT-VANESSA-CRM] marcado done ({result})")
+    except Exception:
+        pass
+
+
 def _after_hours_escalation_tier(conv_id):
     """Retorna 'first' ou 'insist' baseado em quantos pedidos de atendente
     o aluno fez dentro da janela AFTER_HOURS_INSIST_WINDOW_MIN.
@@ -8316,6 +8471,13 @@ def main():
         _oneshot_fix_vanessa_barra_funda()
     except Exception as e_one:
         p(f"  [ONESHOT-VANESSA] erro: {e_one}")
+
+    # === ONE-SHOT: atendente do lead/business da Vanessa ficou com a Joyce
+    # quando o chat ja estava com a Debora. Sincroniza CRM. ===
+    try:
+        _oneshot_fix_vanessa_crm_attendant()
+    except Exception as e_crm:
+        p(f"  [ONESHOT-VANESSA-CRM] erro: {e_crm}")
 
     while True:
         try:
