@@ -145,6 +145,34 @@ CRM_ATTENDANT_MAP = {
     'beatriz': 'ab65b480-1761-42d8-815f-c7e3c8a7b6b4',
 }
 
+
+def _normalize_attendant_name(name):
+    """Normaliza nome p/ lookup nos maps: lowercase, sem acento, trim."""
+    if not name:
+        return ''
+    import unicodedata
+    n = name.strip().lower()
+    n = ''.join(c for c in unicodedata.normalize('NFD', n) if unicodedata.category(c) != 'Mn')
+    return n
+
+
+def _lookup_attendant_id(name, table):
+    """Resolve attendant_id em ATTENDANT_MAP ou CRM_ATTENDANT_MAP.
+    Tenta: nome completo normalizado -> primeiro nome -> qualquer chave que seja prefixo do nome.
+    """
+    norm = _normalize_attendant_name(name)
+    if not norm:
+        return None
+    if norm in table:
+        return table[norm]
+    first = norm.split()[0] if norm.split() else ''
+    if first and first in table:
+        return table[first]
+    for key in table:
+        if norm.startswith(key):
+            return table[key]
+    return None
+
 # Apelidos/aliases que o aluno pode usar para pedir um consultor especifico.
 # Chave = forma normalizada do nome completo aceito como preferred_attendant.
 ATTENDANT_ALIASES = {
@@ -172,6 +200,14 @@ BUSINESS_HOURS_WEEKDAY_START = 9   # Seg-Sex início
 BUSINESS_HOURS_WEEKDAY_END = 20    # Seg-Sex fim (exclusivo)
 BUSINESS_HOURS_SATURDAY_START = 9
 BUSINESS_HOURS_SATURDAY_END = 13   # Sábado fim (exclusivo)
+
+# Janela "quase abrindo": faltam <= PRE_OPENING_MARGIN_MIN para o expediente comecar
+# Quando True, agente NAO manda mensagem padrao after_hours - oferece entrar na fila
+# antecipada. Resolve casos onde aluno escreve 8h45 e recebe "fora do horario".
+PRE_OPENING_MARGIN_MIN = 60        # 1h antes do inicio
+# Limite de quantos alunos pre-fila um consultor pode receber no morning burst
+# antes do dispatch ir pro proximo consultor. Evita sobrecarga matinal.
+PRE_OPENING_BURST_MAX_PER_ATTENDANT = 5
 
 # Janela em minutos para considerar pedidos repetidos de "falar com atendente"
 AFTER_HOURS_INSIST_WINDOW_MIN = 30
@@ -213,6 +249,29 @@ RETENTION_AFTER_HOURS_MSG = (
 HUMAN_BUSY_MSG = (
     "Nossos atendentes estão todos em atendimento agora, mas fica tranquilo{name}! "
     "Em pouquinho alguém vai te chamar aqui 😊"
+)
+
+# Mensagens da janela "quase abrindo" — quando faltam minutos para o expediente
+PRE_OPENING_MSG = (
+    "Oii{name}! Nosso expediente abre {start_label} (em cerca de {mins_left} min). "
+    "Quer que eu já te coloque na fila pra ser um dos primeiros a ser atendido(a) "
+    "assim que abrir? 😊"
+)
+PRE_OPENING_BUTTONS = [
+    {"id": "pre_opening_yes", "title": "Sim, entrar na fila"},
+    {"id": "pre_opening_no",  "title": "Não, obrigado(a)"},
+]
+
+PRE_OPENING_ACCEPTED_MSG = (
+    "Beleza{name}! Te coloquei aqui na fila ✅\n\n"
+    "Assim que abrirmos {start_label}, um(a) consultor(a) vai te chamar por aqui mesmo. "
+    "Enquanto isso, se tiver uma dúvida rápida (acesso, boleto, aulas etc), pode me mandar "
+    "que eu já vou tentando resolver com você 😊"
+)
+
+PRE_OPENING_DECLINED_MSG = (
+    "Sem problema{name}! Pode me mandar sua dúvida que eu já vou tentando te ajudar por aqui. "
+    "Se preferir falar com um(a) consultor(a), é só me dizer 😊"
 )
 
 # Mantido por compatibilidade — usado apenas em logs/fallback genérico
@@ -2898,6 +2957,55 @@ def is_within_business_hours(ref_now=None):
     return False
 
 
+def _minutes_until_business_hours_start(ref_now=None):
+    """Retorna minutos ate o proximo inicio do expediente.
+    - Se ja esta dentro do expediente: 0
+    - Senao: minutos ate o proximo inicio (pode ser dezenas, centenas, milhares)
+    """
+    now = ref_now or _now_sp()
+    if is_within_business_hours(now):
+        return 0
+    dow = now.weekday()
+    hour = now.hour
+    minute = now.minute
+
+    # antes do inicio no mesmo dia (seg-sex)
+    if dow <= 4 and hour < BUSINESS_HOURS_WEEKDAY_START:
+        target_min = BUSINESS_HOURS_WEEKDAY_START * 60
+        cur_min = hour * 60 + minute
+        return max(0, target_min - cur_min)
+    # antes do inicio no sabado
+    if dow == 5 and hour < BUSINESS_HOURS_SATURDAY_START:
+        target_min = BUSINESS_HOURS_SATURDAY_START * 60
+        cur_min = hour * 60 + minute
+        return max(0, target_min - cur_min)
+    # apos expediente seg-qui -> amanha (mesmo horario weekday)
+    if dow <= 3 and hour >= BUSINESS_HOURS_WEEKDAY_END:
+        end_of_day = 24 * 60 - (hour * 60 + minute)
+        return end_of_day + BUSINESS_HOURS_WEEKDAY_START * 60
+    # sexta apos expediente -> sabado
+    if dow == 4 and hour >= BUSINESS_HOURS_WEEKDAY_END:
+        end_of_day = 24 * 60 - (hour * 60 + minute)
+        return end_of_day + BUSINESS_HOURS_SATURDAY_START * 60
+    # sabado apos expediente -> segunda
+    if dow == 5 and hour >= BUSINESS_HOURS_SATURDAY_END:
+        end_of_day = 24 * 60 - (hour * 60 + minute)
+        return end_of_day + 24 * 60 + BUSINESS_HOURS_WEEKDAY_START * 60
+    # domingo -> segunda
+    if dow == 6:
+        end_of_day = 24 * 60 - (hour * 60 + minute)
+        return end_of_day + BUSINESS_HOURS_WEEKDAY_START * 60
+    # fallback
+    return 9999
+
+
+def _in_pre_opening_window(ref_now=None):
+    """True se faltam <= PRE_OPENING_MARGIN_MIN para o expediente abrir."""
+    if is_within_business_hours(ref_now):
+        return False
+    return _minutes_until_business_hours_start(ref_now) <= PRE_OPENING_MARGIN_MIN
+
+
 def next_human_available_label(ref_now=None):
     """Retorna texto humanizado do próximo horário em que o time humano está disponível.
     Dentro do horário comercial retorna 'em breve' (humano já disponível).
@@ -2976,6 +3084,132 @@ def _student_first_name_prefix(conv_id):
         return ''
 
 
+def send_pre_opening_offer(conv_id, *, reason='pre_opening_offer', question=''):
+    """Envia oferta de entrar na fila quando faltam minutos para abrir o expediente.
+    NAO inscreve na fila ainda - so apos aluno aceitar (botao ou texto 'sim').
+    """
+    name_prefix = _student_first_name_prefix(conv_id)
+    mins_left = _minutes_until_business_hours_start()
+    start_label = next_human_available_label()
+    msg = PRE_OPENING_MSG.format(name=name_prefix, start_label=start_label, mins_left=mins_left)
+    sig = 'pre_opening_offer'
+    if _signature_recently_sent(conv_id, sig, window_s=2 * 3600):
+        p(f"  [PRE-OPENING] dedup: oferta ja feita nas ultimas 2h - suprimindo")
+        return
+    meta_typing_on()
+    try:
+        send_message_crm(conv_id, msg, buttons=PRE_OPENING_BUTTONS)
+    except Exception:
+        send_and_track(conv_id, msg)
+    log_to_db(conv_id, question or '', msg, 1.0, sig)
+    _register_signature(conv_id, sig, msg)
+    st = _conv_states.setdefault(conv_id, _default_conv_state())
+    st['_pre_opening_offer_ts'] = time.time()
+    st['_pre_opening_pending'] = True
+    st['_pre_opening_reason'] = reason
+    st['_pre_opening_question'] = (question or '')[:500]
+    st['_pre_opening_target'] = detect_preferred_attendant(question or '') or ''
+    st['waiting_for_client'] = True
+    st['inactivity_start'] = time.time()
+    st['_last_responded_ts'] = time.time()
+
+
+def accept_pre_opening(conv_id, question=''):
+    """Aluno aceitou entrar na fila pre-abertura: registra e confirma."""
+    name_prefix = _student_first_name_prefix(conv_id)
+    start_label = next_human_available_label()
+    msg = PRE_OPENING_ACCEPTED_MSG.format(name=name_prefix, start_label=start_label)
+    sig = 'pre_opening_accepted'
+    meta_typing_on()
+    if not _signature_recently_sent(conv_id, sig, window_s=4 * 3600):
+        send_and_track(conv_id, msg)
+        log_to_db(conv_id, question or '', msg, 1.0, sig)
+        _register_signature(conv_id, sig, msg)
+    st = _conv_states.setdefault(conv_id, _default_conv_state())
+    preferred = st.get('_pre_opening_target') or detect_preferred_attendant(st.get('_pre_opening_question', '') or '')
+    orig_reason = st.get('_pre_opening_reason') or 'pre_opening_queue'
+    orig_question = st.get('_pre_opening_question') or question or ''
+    record_pending_escalation(
+        conv_id, reason=orig_reason, tier='pre_opening',
+        retorno_label=start_label, question=orig_question,
+        preferred_attendant=preferred,
+    )
+    try:
+        requests.post(
+            f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+            headers=H,
+            json={'body': f'⏰ *Fila pré-abertura* — aluno aceitou entrar na fila antes do expediente abrir ({start_label}). Será distribuído automaticamente assim que abrir.',
+                  'isInternal': True},
+            timeout=10,
+        )
+    except Exception:
+        pass
+    _mark_handoff_active(conv_id, 'pre_opening_queue',
+                         target=preferred or '', ttl_s=12 * 3600, body=msg)
+    st['_pre_opening_pending'] = False
+    st['waiting_for_client'] = True
+    st['inactivity_start'] = time.time()
+    st['_last_responded_ts'] = time.time()
+    p(f"  [PRE-OPENING] {conv_id[:12]} aluno aceitou - registrado em fila ({orig_reason}) preferred={preferred or '-'}")
+
+
+def decline_pre_opening(conv_id, question=''):
+    """Aluno declinou entrar na fila pre-abertura - segue conversando."""
+    name_prefix = _student_first_name_prefix(conv_id)
+    msg = PRE_OPENING_DECLINED_MSG.format(name=name_prefix)
+    sig = 'pre_opening_declined'
+    if not _signature_recently_sent(conv_id, sig, window_s=4 * 3600):
+        meta_typing_on()
+        send_and_track(conv_id, msg)
+        log_to_db(conv_id, question or '', msg, 1.0, sig)
+        _register_signature(conv_id, sig, msg)
+    st = _conv_states.setdefault(conv_id, _default_conv_state())
+    st['_pre_opening_pending'] = False
+    st['waiting_for_client'] = False
+    p(f"  [PRE-OPENING] {conv_id[:12]} aluno declinou - segue conversando com agente")
+
+
+_PRE_OPENING_YES_KEYWORDS = (
+    'sim', 'ss', 'pode', 'quero', 'aceito', 'beleza', 'blz',
+    'aguardo', 'aguardar', 'fila', 'ok', 'okay', 'positivo', 'aham', 'isso', 'claro',
+    'vamos', 'sim por favor', 'sim quero', 'pode sim', 'entrar', 'entra',
+)
+_PRE_OPENING_NO_KEYWORDS = (
+    'nao', 'não', 'nope', 'agora nao', 'agora não', 'depois', 'mais tarde',
+    'nao obrigado', 'não obrigado', 'nao obrigada', 'não obrigada', 'nao preciso',
+    'não preciso', 'prefiro nao', 'prefiro não',
+)
+
+
+def detect_pre_opening_intent(text, button_id=''):
+    """Retorna 'yes', 'no' ou '' baseado no texto/botao do aluno."""
+    if button_id == 'pre_opening_yes':
+        return 'yes'
+    if button_id == 'pre_opening_no':
+        return 'no'
+    if not text:
+        return ''
+    import unicodedata, re
+    t = text.strip().lower()
+    t = ''.join(c for c in unicodedata.normalize('NFD', t) if unicodedata.category(c) != 'Mn')
+    # normaliza pontuacao: tira virgulas, exclamacoes, pontos
+    t_clean = re.sub(r'[,!?.;:]', ' ', t).strip()
+    tokens = set(t_clean.split())
+    # exact match curto
+    if t_clean in _PRE_OPENING_NO_KEYWORDS:
+        return 'no'
+    if t_clean in _PRE_OPENING_YES_KEYWORDS:
+        return 'yes'
+    # heuristica: NAO prevalece sobre SIM se ambos aparecerem
+    for kw in _PRE_OPENING_NO_KEYWORDS:
+        if kw in tokens or kw in t_clean:
+            return 'no'
+    for kw in _PRE_OPENING_YES_KEYWORDS:
+        if kw in tokens:
+            return 'yes'
+    return ''
+
+
 def send_after_hours_response(conv_id, *, allow_continue=False, reason='escalate_after_hours', question=''):
     """Envia AFTER_HOURS_FIRST_MSG ou AFTER_HOURS_INSIST_MSG conforme tier.
     Retorna 'first' ou 'insist'.
@@ -2984,7 +3218,15 @@ def send_after_hours_response(conv_id, *, allow_continue=False, reason='escalate
 
     Se o aluno citar um consultor pelo nome ('queria falar com a Mariana'),
     o nome é gravado em preferred_attendant para honrar quando voltar ao horário.
+
+    Se estamos na janela pre-abertura (faltam <= PRE_OPENING_MARGIN_MIN para abrir),
+    OFERECE entrar na fila ao inves de mandar mensagem padrao after_hours.
     """
+    # Janela pre-abertura: oferece fila antecipada
+    if _in_pre_opening_window():
+        send_pre_opening_offer(conv_id, reason=reason, question=question)
+        return 'pre_opening'
+
     tier = _after_hours_escalation_tier(conv_id)
     name_prefix = _student_first_name_prefix(conv_id)
     meta_typing_on()
@@ -2994,10 +3236,15 @@ def send_after_hours_response(conv_id, *, allow_continue=False, reason='escalate
         p(f"  [AFTER-HOURS] Aluno citou consultor: {preferred} -> registrar preferred_attendant")
     if tier == 'first':
         msg = AFTER_HOURS_FIRST_MSG.format(name=name_prefix)
-        send_and_track(conv_id, msg)
-        log_to_db(conv_id, question or '', msg, 1.0, 'after_hours_first')
-        record_pending_escalation(conv_id, reason, tier='first', retorno_label=retorno,
-                                  question=question, preferred_attendant=preferred)
+        sig = 'after_hours_first'
+        if _signature_recently_sent(conv_id, sig, window_s=8 * 3600):
+            p(f"  [AFTER-HOURS] dedup: {sig} ja enviado nas ultimas 8h - suprimindo")
+        else:
+            send_and_track(conv_id, msg)
+            log_to_db(conv_id, question or '', msg, 1.0, sig)
+            _register_signature(conv_id, sig, msg)
+            record_pending_escalation(conv_id, reason, tier='first', retorno_label=retorno,
+                                      question=question, preferred_attendant=preferred)
         if not allow_continue:
             st = _conv_states.setdefault(conv_id, _default_conv_state())
             st['waiting_for_client'] = True
@@ -3005,10 +3252,17 @@ def send_after_hours_response(conv_id, *, allow_continue=False, reason='escalate
             st['_last_responded_ts'] = time.time()
     else:
         msg = AFTER_HOURS_INSIST_MSG.format(name=name_prefix, retorno_label=retorno)
-        send_and_track(conv_id, msg)
-        log_to_db(conv_id, question or '', msg, 1.0, 'after_hours_insist')
-        record_pending_escalation(conv_id, reason, tier='insist', retorno_label=retorno,
-                                  question=question, preferred_attendant=preferred)
+        sig = 'after_hours_insist'
+        if _signature_recently_sent(conv_id, sig, window_s=8 * 3600):
+            p(f"  [AFTER-HOURS] dedup: {sig} ja enviado nas ultimas 8h - suprimindo")
+        else:
+            send_and_track(conv_id, msg)
+            log_to_db(conv_id, question or '', msg, 1.0, sig)
+            _register_signature(conv_id, sig, msg)
+            _mark_handoff_active(conv_id, 'after_hours_insist',
+                                 target=preferred or '', ttl_s=14 * 3600, body=msg)
+            record_pending_escalation(conv_id, reason, tier='insist', retorno_label=retorno,
+                                      question=question, preferred_attendant=preferred)
         st = _conv_states.setdefault(conv_id, _default_conv_state())
         st['waiting_for_client'] = True
         st['inactivity_start'] = time.time()
@@ -3167,7 +3421,12 @@ def _fetch_pending_for_auto_dispatch(limit=25):
             SELECT id, conv_id, phone, student_name, reason, tier, retorno_label, pergunta, status, created_at
             FROM pending_escalation
             WHERE status = 'pending'
-            ORDER BY CASE tier WHEN 'insist' THEN 0 WHEN 'first' THEN 1 ELSE 2 END, created_at ASC
+            ORDER BY CASE tier
+                       WHEN 'pre_opening' THEN 0  -- alunos que pediram entrar antes - prioridade
+                       WHEN 'insist' THEN 1
+                       WHEN 'first' THEN 2
+                       ELSE 3
+                     END, created_at ASC
             LIMIT %s
         """, (limit,))
         rows = [dict(r) for r in cur.fetchall()]
@@ -3242,8 +3501,19 @@ def process_pending_escalation_auto_dispatch():
         _last_pending_dispatch_ts = time.time()
         return
 
+    # === LIMITE POR CONSULTOR (anti-sobrecarga matinal) ===
+    # Conta quantos cada consultor recebeu nesta rodada de dispatch. Quando algum
+    # consultor atinge PRE_OPENING_BURST_MAX_PER_ATTENDANT, ele e excluido das
+    # proximas atribuicoes da rodada (vai aguardar proxima janela do retry).
+    assigned_count = {}
+    burst_max = PRE_OPENING_BURST_MAX_PER_ATTENDANT
+    if not is_morning_burst:
+        # No retry normal, limite mais frouxo (consultores ja escoaram a fila inicial)
+        burst_max = max(2, PRE_OPENING_BURST_MAX_PER_ATTENDANT)
+
     dispatched = 0
     failed = 0
+    deferred = 0
     for row in rows:
         conv_id = row.get('conv_id') or ''
         if not conv_id:
@@ -3258,20 +3528,38 @@ def process_pending_escalation_auto_dispatch():
             'phone': phone,
         }
         pergunta = (row.get('pergunta') or '')[:200]
-        reason = (f"Retorno automático fila noturna — {row.get('reason', '')}"
+        tier_row = row.get('tier') or ''
+        reason_tag = 'Fila pré-abertura' if tier_row == 'pre_opening' else 'Retorno automático fila noturna'
+        reason = (f"{reason_tag} — {row.get('reason', '')}"
                   + (f' | {pergunta}' if pergunta else ''))
-        p(f"  [FILA] Auto-distribuir conv={conv_id[:12]} tier={row.get('tier')} ({label})")
-        ok = distribute_to_attendant(conv_id, reason=reason)
+        overloaded = {n for n, c in assigned_count.items() if c >= burst_max}
+        p(f"  [FILA] Auto-distribuir conv={conv_id[:12]} tier={tier_row} ({label}) overload={len(overloaded)}")
+        ok = distribute_to_attendant(conv_id, reason=reason, exclude_attendants=overloaded)
         if ok:
+            # ler quem foi escolhido pra contar
+            try:
+                chosen = (_conv_states.get(conv_id, {}) or {}).get('_last_distributed_to', '') or ''
+                key = chosen.strip().lower()
+                if key:
+                    assigned_count[key] = assigned_count.get(key, 0) + 1
+                    if assigned_count[key] >= burst_max:
+                        p(f"  [FILA] {chosen} atingiu limite burst ({burst_max}) - excluido das proximas")
+            except Exception:
+                pass
             update_pending_escalation_status(
                 conv_id, 'in_progress',
                 note=f'☀️ *Fila noturna* — distribuído automaticamente às {now.strftime("%H:%M")}.',
             )
             dispatched += 1
         else:
+            # Se todos atingiram limite, fica pendente pra proxima janela
             update_pending_escalation_status(conv_id, 'pending')
             failed += 1
-            p(f"  [FILA] Mantido pendente (sem consultor ou falha na distribuição)")
+            if overloaded:
+                deferred += 1
+            p(f"  [FILA] Mantido pendente (sem consultor / limite / falha)")
+    if deferred:
+        p(f"  [FILA] {deferred} conv(s) adiadas por limite de burst - vao na proxima janela")
 
     p(f"  [FILA] Lote {label}: distribuídos={dispatched} ainda_pendentes={failed}")
     if is_morning_burst:
@@ -3398,6 +3686,31 @@ IN_HOURS_RESCUE_MAX_AGE_MIN = 6 * 60  # ignora alem disso (provavelmente foi res
 IN_HOURS_RESCUE_COOLDOWN_S = 30 * 60  # nao re-resgata mesma conv em 30min
 
 
+def _ensure_lead_for_rescue(phone, name=''):
+    """Garante lead + business no CRM antes de atribuir consultor durante resgate.
+    Retorna (lead_id, business_id, created_now).
+    Se nao conseguir criar lead, retorna ('', '', False) e o caller deve abortar
+    a atribuicao para evitar conversa orfa no CRM.
+    """
+    lead_id = ''
+    business_id = ''
+    if phone:
+        try:
+            prof = identify_student(phone)
+            if prof and prof.get('lead_id'):
+                return prof['lead_id'], prof.get('business_id') or '', False
+        except Exception as e:
+            p(f"    [RESCUE-LEAD] identify_student erro: {e}")
+    try:
+        new_lead_id, new_biz_id = create_lead_and_business(phone, name or '')
+        if new_lead_id:
+            p(f"    [RESCUE-LEAD] criado lead={new_lead_id} business={new_biz_id or '-'}")
+            return new_lead_id, new_biz_id or '', True
+    except Exception as e:
+        p(f"    [RESCUE-LEAD] create_lead_and_business erro: {e}")
+    return '', '', False
+
+
 def process_in_hours_rescue():
     """Dentro do horario, resgata conversas orfas:
     - cliente mandou msg sem resposta ha >= IN_HOURS_RESCUE_AGE_MIN min
@@ -3496,18 +3809,26 @@ def process_in_hours_rescue():
             except Exception as e_msg:
                 p(f"  [IN-HOURS-RESCUE] falha apology: {e_msg}")
 
+            lead_id, business_id, created_now = _ensure_lead_for_rescue(phone, name)
+            if not lead_id:
+                p(f"  [IN-HOURS-RESCUE] sem lead p/ ...{phone[-4:]} - aborta atribuicao (evita orfa CRM)")
+                _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                continue
             try:
-                lead_id = ''
-                if name and phone:
-                    prof = identify_student(phone)
-                    if prof and prof.get('lead_id'):
-                        lead_id = prof['lead_id']
-                        if prof.get('business_id'):
-                            _dcz_transfer_business(prof['business_id'], consultant_name)
-                if lead_id:
-                    _dcz_transfer_lead(lead_id, consultant_name)
+                _dcz_transfer_business(phone, consultant_name, lead_id=lead_id)
+                _dcz_transfer_lead(lead_id, consultant_name)
                 _dcz_transfer_chat(cid, consultant_name)
                 _supabase_increment_fila(consultant.get('id', ''), int(consultant.get('fila', 0)))
+                if created_now:
+                    try:
+                        requests.post(
+                            f'{DCZ_API}/api/v1/conversations/{cid}/messages',
+                            headers=H,
+                            json={'body': "ℹ️ Lead criado automaticamente pelo resgate (não existia no CRM antes).", 'isInternal': True},
+                            timeout=10,
+                        )
+                    except Exception:
+                        pass
             except Exception as e_t:
                 p(f"  [IN-HOURS-RESCUE] erro transferencia: {e_t}")
 
@@ -3782,15 +4103,22 @@ def process_post_close_rescue():
                 except Exception:
                     pass
 
+                lead_id, biz_id, created_now = _ensure_lead_for_rescue(phone, name)
                 try:
-                    prof = identify_student(phone) if phone else None
-                    lead_id = (prof or {}).get('lead_id', '')
-                    biz_id = (prof or {}).get('business_id', '')
                     if lead_id:
+                        _dcz_transfer_business(phone, target, lead_id=lead_id)
                         _dcz_transfer_lead(lead_id, target)
-                    if biz_id:
-                        _dcz_transfer_business(biz_id, target)
                     _dcz_transfer_chat(cid, target)
+                    if created_now:
+                        try:
+                            requests.post(
+                                f'{DCZ_API}/api/v1/conversations/{cid}/messages',
+                                headers=H,
+                                json={'body': "ℹ️ Lead criado automaticamente pelo resgate (não existia no CRM antes).", 'isInternal': True},
+                                timeout=10,
+                            )
+                        except Exception:
+                            pass
                 except Exception as e_t:
                     p(f"  [POST-CLOSE-RESCUE] erro transfer sticky: {e_t}")
 
@@ -3839,16 +4167,23 @@ def process_post_close_rescue():
                 except Exception:
                     pass
 
+                lead_id, biz_id, created_now = _ensure_lead_for_rescue(phone, name)
                 try:
-                    prof = identify_student(phone) if phone else None
-                    lead_id = (prof or {}).get('lead_id', '')
-                    biz_id = (prof or {}).get('business_id', '')
                     if lead_id:
+                        _dcz_transfer_business(phone, consultant_name, lead_id=lead_id)
                         _dcz_transfer_lead(lead_id, consultant_name)
-                    if biz_id:
-                        _dcz_transfer_business(biz_id, consultant_name)
                     _dcz_transfer_chat(cid, consultant_name)
                     _supabase_increment_fila(consultant.get('id', ''), int(consultant.get('fila', 0)))
+                    if created_now:
+                        try:
+                            requests.post(
+                                f'{DCZ_API}/api/v1/conversations/{cid}/messages',
+                                headers=H,
+                                json={'body': "ℹ️ Lead criado automaticamente pelo resgate (não existia no CRM antes).", 'isInternal': True},
+                                timeout=10,
+                            )
+                        except Exception:
+                            pass
                 except Exception as e_t:
                     p(f"  [POST-CLOSE-RESCUE] erro transferencia: {e_t}")
 
@@ -3892,9 +4227,10 @@ _SUPERVISOR_TABLE_READY = False
 SUPERVISOR_STATUSES = ('open', 'opened')        # scan ambos status do DCZ
 SUPERVISOR_MAX_FOLLOWUP_PER_CYCLE = 25          # era 8 - aumentado pra cobrir backlog
 SUPERVISOR_MAX_CLOSE_PER_CYCLE = 15             # era 5
-SUPERVISOR_MAX_FOLLOWUP_AGE_S = 60 * 60         # NAO manda 1o follow-up se silencio > 60min (evita ping tardio)
+SUPERVISOR_MAX_FOLLOWUP_AGE_S = 4 * 3600        # NAO manda 1o follow-up se silencio > 4h (era 60min - cobre backlog matinal)
 SUPERVISOR_MAX_CLOSE_AGE_S = 24 * 3600
 SUPERVISOR_ACTION_COOLDOWN_S = 2 * 3600         # nao repete mesma acao na mesma conv em 2h
+SUPERVISOR_HUMAN_GRACE_S = 5 * 60               # se humano respondeu nos ultimos 5min, supervisor nao mexe
 
 _FOLLOWUP_BODY_MARKERS = (
     'ainda está por aí', 'ainda esta por ai', 'tudo certo por aí', 'tudo certo por ai',
@@ -3982,6 +4318,176 @@ def _iso_age_seconds(iso_ts):
         return None
 
 
+# ============== DEDUP PERSISTENTE E HANDOFF ATIVO ==============
+# Sobrevive a restart do agente. Centraliza:
+#   - signatures: assinaturas de mensagens enviadas (motivo+conv) p/ evitar duplicar
+#   - handoff_active: marca conversas onde houve handoff humanizado (Wesley, transfer,
+#     fora-do-horario) p/ o agente principal NAO continuar respondendo at[e humano
+#     assumir ou TTL expirar.
+_DEDUP_TABLES_READY = False
+
+
+def _ensure_dedup_tables():
+    global _DEDUP_TABLES_READY
+    if _DEDUP_TABLES_READY:
+        return
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS agent_sent_signatures (
+                id SERIAL PRIMARY KEY,
+                conv_id VARCHAR(64) NOT NULL,
+                signature VARCHAR(128) NOT NULL,
+                body_hash VARCHAR(64),
+                sent_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sig_conv_sig_sent
+            ON agent_sent_signatures (conv_id, signature, sent_at DESC)
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS handoff_active (
+                conv_id VARCHAR(64) PRIMARY KEY,
+                motivo VARCHAR(64) NOT NULL,
+                target_attendant VARCHAR(64),
+                body_hash VARCHAR(64),
+                created_at TIMESTAMP DEFAULT NOW(),
+                expires_at TIMESTAMP NOT NULL
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        _DEDUP_TABLES_READY = True
+    except Exception as e:
+        p(f"  [DEDUP] tabelas indisponiveis: {e}")
+
+
+def _hash_body(body):
+    if not body:
+        return ''
+    import hashlib
+    return hashlib.sha1(body.strip().lower().encode('utf-8', errors='ignore')).hexdigest()[:32]
+
+
+def _signature_recently_sent(conv_id, signature, window_s=24 * 3600, body_hash=''):
+    """True se mesma signature ja foi enviada na conv dentro da janela.
+    Se body_hash fornecido, exige tambem match do hash (mesmo motivo + mesmo corpo)."""
+    _ensure_dedup_tables()
+    if not _DEDUP_TABLES_READY:
+        return False
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        if body_hash:
+            cur.execute("""
+                SELECT 1 FROM agent_sent_signatures
+                WHERE conv_id = %s AND signature = %s AND body_hash = %s
+                  AND sent_at > NOW() - (%s || ' seconds')::interval
+                LIMIT 1
+            """, (conv_id, signature, body_hash, str(int(window_s))))
+        else:
+            cur.execute("""
+                SELECT 1 FROM agent_sent_signatures
+                WHERE conv_id = %s AND signature = %s
+                  AND sent_at > NOW() - (%s || ' seconds')::interval
+                LIMIT 1
+            """, (conv_id, signature, str(int(window_s))))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _register_signature(conv_id, signature, body=''):
+    _ensure_dedup_tables()
+    if not _DEDUP_TABLES_READY:
+        return
+    try:
+        h = _hash_body(body)
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO agent_sent_signatures (conv_id, signature, body_hash) VALUES (%s, %s, %s)",
+            (conv_id, signature, h),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _is_handoff_active(conv_id):
+    """Retorna (motivo, target) se ha handoff ativo nao expirado, senao (None, None)."""
+    _ensure_dedup_tables()
+    if not _DEDUP_TABLES_READY:
+        return None, None
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT motivo, target_attendant FROM handoff_active
+            WHERE conv_id = %s AND expires_at > NOW()
+            LIMIT 1
+        """, (conv_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row:
+            return row[0], row[1] or ''
+    except Exception:
+        pass
+    return None, None
+
+
+def _mark_handoff_active(conv_id, motivo, target='', ttl_s=12 * 3600, body=''):
+    _ensure_dedup_tables()
+    if not _DEDUP_TABLES_READY:
+        return
+    try:
+        h = _hash_body(body)
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO handoff_active (conv_id, motivo, target_attendant, body_hash, expires_at)
+            VALUES (%s, %s, %s, %s, NOW() + (%s || ' seconds')::interval)
+            ON CONFLICT (conv_id) DO UPDATE SET
+                motivo = EXCLUDED.motivo,
+                target_attendant = EXCLUDED.target_attendant,
+                body_hash = EXCLUDED.body_hash,
+                created_at = NOW(),
+                expires_at = EXCLUDED.expires_at
+        """, (conv_id, motivo, target or '', h, str(int(ttl_s))))
+        conn.commit()
+        cur.close()
+        conn.close()
+        p(f"  [HANDOFF-ACTIVE] {conv_id[:12]} motivo={motivo} target={target} ttl={ttl_s}s")
+    except Exception as e:
+        p(f"  [HANDOFF-ACTIVE] erro marcar: {e}")
+
+
+def _clear_handoff_active(conv_id, reason=''):
+    _ensure_dedup_tables()
+    if not _DEDUP_TABLES_READY:
+        return
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM handoff_active WHERE conv_id = %s", (conv_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        if reason:
+            p(f"  [HANDOFF-ACTIVE] {conv_id[:12]} limpo ({reason})")
+    except Exception:
+        pass
+
+
 def _body_has_marker(body, markers):
     b = (body or '').lower()
     return any(m in b for m in markers)
@@ -4000,6 +4506,41 @@ def _last_outbound_from_msgs(msgs):
         if body or _message_has_thread_payload(m):
             return m
     return None
+
+
+def _msg_is_from_human(m):
+    """True se a mensagem foi enviada por um atendente humano (nao bot/automacao).
+    Na API DCZ, msg do humano tem attendant={id,name,...}; msg do bot tem attendant=None.
+    """
+    if not isinstance(m, dict):
+        return False
+    att = m.get('attendant')
+    if isinstance(att, dict) and (att.get('id') or att.get('userId')):
+        return True
+    return False
+
+
+def _last_human_outbound(msgs):
+    """Pega a ultima outbound que foi enviada por um humano (nao bot)."""
+    if not isinstance(msgs, list):
+        return None
+    for m in msgs:
+        if m.get('isInternal') or m.get('received', False):
+            continue
+        if _msg_is_from_human(m):
+            return m
+    return None
+
+
+def _human_recently_active(msgs, grace_s):
+    """True se algum atendente humano enviou mensagem nos ultimos grace_s segundos."""
+    human_msg = _last_human_outbound(msgs)
+    if not human_msg:
+        return False
+    age = _iso_age_seconds(human_msg.get('createdAt') or human_msg.get('updatedAt') or '')
+    if age is None:
+        return False
+    return age <= grace_s
 
 
 def _sync_conv_state_after_supervisor(cid, phone, followup_stage, waiting=True):
@@ -4033,8 +4574,9 @@ def _supervisor_fetch_convs():
 
 
 def _supervisor_has_attendant_fresh(cid):
-    """Re-fetch da conversa pra confirmar que NAO tem atendente.
-    Usado JUSTO antes de enviar, evita race condition (humano assumiu enquanto loop processava).
+    """Re-fetch da conversa pra confirmar que humano nao assumiu.
+    Retorna True (= bloqueia envio) se humano respondeu nos ultimos SUPERVISOR_HUMAN_GRACE_S
+    ou a conv foi finalizada. Conv com humano atribuido mas inativo NAO bloqueia.
     """
     try:
         r = requests.get(f'{DCZ_MSG}/messaging/conversations/{cid}',
@@ -4042,9 +4584,15 @@ def _supervisor_has_attendant_fresh(cid):
         if r.status_code != 200:
             return True  # seguranca: se falhou consulta, considera com atendente
         data = r.json() or {}
-        if data.get('attendants') or []:
-            return True
         if 'finished' in (data.get('statuses', []) or []):
+            return True
+        if not (data.get('attendants') or []):
+            return False
+        try:
+            msgs = get_conversation_messages_api(cid, limit=8)
+        except Exception:
+            return True
+        if _human_recently_active(msgs, SUPERVISOR_HUMAN_GRACE_S):
             return True
     except Exception:
         return True
@@ -4092,8 +4640,6 @@ def process_supervisor_loop():
                 continue
             if 'finished' in (c.get('statuses', []) or []):
                 continue
-            if c.get('attendants', []):
-                continue
 
             recv = c.get('lastReceivedMessageDate', '') or ''
             sent = c.get('lastSendedMessageDate', '') or ''
@@ -4117,44 +4663,90 @@ def process_supervisor_loop():
             last_out = _last_outbound_from_msgs(msgs)
             last_body = (last_out.get('body') or last_out.get('text') or '') if last_out else ''
 
+            # REGRA: se conv tem atendente atribuido E ultima outbound foi do humano,
+            # supervisor NAO interfere (humano esta cuidando). Mas se a ultima outbound
+            # foi do bot/automacao, a conv esta efetivamente parada: liberar supervisor.
+            has_human_attendant = bool(c.get('attendants', []))
+            last_was_human = _msg_is_from_human(last_out) if last_out else False
+            if has_human_attendant:
+                if last_was_human:
+                    # humano respondeu por ultimo: nao mexer
+                    continue
+                # humano atribuido mas ultima outbound foi do bot - so age se humano
+                # esta inativo ha pelo menos SUPERVISOR_HUMAN_GRACE_S
+                if _human_recently_active(msgs, SUPERVISOR_HUMAN_GRACE_S):
+                    continue
+
             _tlm = c.get('lastMessage') or {}
             if isinstance(_tlm, dict) and _is_template_message(_tlm):
                 continue
             if last_out and _is_template_message(last_out):
                 continue
-            if _body_has_marker(last_body, _HANDOFF_BODY_MARKERS):
-                continue
 
-            # --- Estagio 2: encerrar apos follow-up sem resposta ---
-            if (close_done < SUPERVISOR_MAX_CLOSE_PER_CYCLE
-                    and silence_s >= CLOSE_DELAY
-                    and silence_s <= SUPERVISOR_MAX_CLOSE_AGE_S
-                    and _body_has_marker(last_body, _FOLLOWUP_BODY_MARKERS)):
+            is_handoff_msg = _body_has_marker(last_body, _HANDOFF_BODY_MARKERS)
+            had_followup = _body_has_marker(last_body, _FOLLOWUP_BODY_MARKERS)
+
+            # --- Estagio 2a: encerrar apos follow-up sem resposta ---
+            close_after_followup = (
+                silence_s >= CLOSE_DELAY
+                and silence_s <= SUPERVISOR_MAX_CLOSE_AGE_S
+                and had_followup
+            )
+            # --- Estagio 2b: encerrar conv orfa (handoff/tutorial sem nenhuma resposta)
+            #     mesmo sem follow-up - apos 2x CLOSE_DELAY (30min) - evita ficar parada
+            close_orphan = (
+                silence_s >= CLOSE_DELAY * 2
+                and silence_s <= SUPERVISOR_MAX_CLOSE_AGE_S
+                and not had_followup
+                and (is_handoff_msg or has_human_attendant)
+            )
+            if close_done < SUPERVISOR_MAX_CLOSE_PER_CYCLE and (close_after_followup or close_orphan):
                 if _supervisor_recent_action(cid, 'auto_close'):
                     continue
                 lb_low = (last_body or '').lower()
                 if any(fp.lower() in lb_low for fp in LAST_MSG_CLOSE_PHRASES):
                     continue
                 if _supervisor_has_attendant_fresh(cid):
-                    p(f"  [SUPERVISOR-CLOSE] skip ...{phone[-4:] if phone else '????'} ganhou atendente entre lista e envio")
+                    p(f"  [SUPERVISOR-CLOSE] skip ...{phone[-4:] if phone else '????'} humano ativo / finalizada")
                     continue
                 close_msg = CLOSE_INACTIVITY_MSG.format(name=name_fmt)
-                p(f"  [SUPERVISOR-CLOSE] ...{phone[-4:] if phone else '????'} {int(silence_s)}s pos-follow-up")
+                tag = 'pos-follow-up' if close_after_followup else 'orfa-handoff'
+                # DEDUP: nao reenvia close se ja registrado pelo supervisor (mesmo apos restart)
+                if _signature_recently_sent(cid, 'auto_close', window_s=24 * 3600):
+                    p(f"  [SUPERVISOR-CLOSE] dedup ja registrado - skip")
+                    continue
+                p(f"  [SUPERVISOR-CLOSE] ...{phone[-4:] if phone else '????'} {int(silence_s)}s {tag}")
                 send_message_crm(cid, close_msg, buttons=CLOSE_INACTIVITY_BUTTONS)
                 log_to_db(cid, '(supervisor)', close_msg, 1.0, 'auto_close')
+                _register_signature(cid, 'auto_close', close_msg)
                 close_conversation_crm(cid, phone=phone)
                 _supervisor_record_action(cid, 'auto_close')
                 _sync_conv_state_after_supervisor(cid, phone, followup_stage=0, waiting=False)
+                _clear_handoff_active(cid, reason='auto_close')
                 conversation_greeted.discard(cid)
                 close_done += 1
+                continue
+
+            # Apos handoff, NAO mandamos follow-up de cortesia "tudo certo por ai" (parece estranho).
+            # O close_orphan acima cuida do caso parado.
+            if is_handoff_msg:
                 continue
 
             # --- Estagio 1: primeiro follow-up ---
             if (fu_done < SUPERVISOR_MAX_FOLLOWUP_PER_CYCLE
                     and silence_s >= FOLLOWUP_1_DELAY
                     and silence_s <= SUPERVISOR_MAX_FOLLOWUP_AGE_S
-                    and not _body_has_marker(last_body, _FOLLOWUP_BODY_MARKERS)):
+                    and not had_followup):
+                # NAO manda follow-up se handoff vigente (Wesley/transferencia/etc)
+                ho_motivo_fu, _ = _is_handoff_active(cid)
+                if ho_motivo_fu:
+                    p(f"  [SUPERVISOR-FU1] skip ...{phone[-4:] if phone else '????'} handoff_active={ho_motivo_fu}")
+                    continue
                 if _supervisor_recent_action(cid, 'followup_1'):
+                    continue
+                # DEDUP persistente: nao reenvia follow-up igual mesmo apos restart
+                if _signature_recently_sent(cid, 'followup_1', window_s=24 * 3600):
+                    p(f"  [SUPERVISOR-FU1] dedup ja registrado - skip")
                     continue
                 if _supervisor_has_attendant_fresh(cid):
                     p(f"  [SUPERVISOR-FU1] skip ...{phone[-4:] if phone else '????'} ganhou atendente entre lista e envio")
@@ -4163,6 +4755,7 @@ def process_supervisor_loop():
                 p(f"  [SUPERVISOR-FU1] ...{phone[-4:] if phone else '????'} {int(silence_s)}s sem resposta")
                 send_message_crm(cid, msg1, buttons=FOLLOWUP_1_BUTTONS)
                 log_to_db(cid, '(supervisor)', msg1, 1.0, 'followup_1')
+                _register_signature(cid, 'followup_1', msg1)
                 _supervisor_record_action(cid, 'followup_1')
                 _sync_conv_state_after_supervisor(cid, phone, followup_stage=1, waiting=True)
                 fu_done += 1
@@ -4210,10 +4803,16 @@ def _em_intervalo(hora_str, ante_min, duracao_min, ref_now):
     return ini <= ref_now <= fim
 
 
-def get_available_consultant():
+def get_available_consultant(exclude_attendants=None):
     """Consulta Supabase e retorna o consultor mais adequado ou None.
     Aplica as mesmas regras do workflow n8n de distribuição.
+
+    exclude_attendants: set/list de nomes (lowercase) a ignorar nesta chamada
+                        (usado pelo morning burst para limitar quantos cada um recebe).
     """
+    exclude_set = set()
+    if exclude_attendants:
+        exclude_set = {str(n).strip().lower() for n in exclude_attendants if n}
     try:
         url = (f'{SUPABASE_URL}/rest/v1/{DISTRIBUICAO_TABLE}'
                f'?ativo_inativo=eq.Ativo&tipo_atendimento=eq.Atendimento'
@@ -4244,6 +4843,9 @@ def get_available_consultant():
         almoco_hora = row.get('almoco_real') or row.get('almoco')
         saida_hora = row.get('final_expediente')
 
+        if exclude_set and str(nome).strip().lower() in exclude_set:
+            p(f"  [DIST] {nome}: SKIP (excluido por limite burst)")
+            continue
         if status_almoco != 'Ativo':
             p(f"  [DIST] {nome}: SKIP (status_almoco={status_almoco})")
             continue
@@ -4297,11 +4899,9 @@ def get_available_consultant():
 
 def _dcz_transfer_lead(lead_id, attendant_name):
     """Atribui o lead ao responsável no DataCrazy CRM via campo attendant."""
-    nome_norm = attendant_name.strip().lower()
-    nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm) if __import__('unicodedata').category(c) != 'Mn')
-    crm_id = CRM_ATTENDANT_MAP.get(nome_norm)
+    crm_id = _lookup_attendant_id(attendant_name, CRM_ATTENDANT_MAP)
     if not crm_id:
-        p(f"  [DIST] CRM attendantId não encontrado para '{attendant_name}' (norm='{nome_norm}')")
+        p(f"  [DIST] CRM attendantId não encontrado para '{attendant_name}'")
         return False
     if not lead_id:
         p(f"  [DIST] lead_id vazio, skip lead transfer")
@@ -4320,9 +4920,7 @@ def _dcz_transfer_lead(lead_id, attendant_name):
 
 def _dcz_transfer_business(phone, attendant_name, lead_id=''):
     """Encontra o negócio correto do lead e atribui ao attendant + move para Atendimento."""
-    nome_norm = attendant_name.strip().lower()
-    nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm) if __import__('unicodedata').category(c) != 'Mn')
-    crm_id = CRM_ATTENDANT_MAP.get(nome_norm)
+    crm_id = _lookup_attendant_id(attendant_name, CRM_ATTENDANT_MAP)
     if not crm_id:
         p(f"  [DIST-BIZ] CRM attendantId não encontrado para '{attendant_name}'")
         return False
@@ -4469,11 +5067,9 @@ def _dcz_transfer_business(phone, attendant_name, lead_id=''):
 
 def _dcz_transfer_chat(conv_id, attendant_name):
     """Transfere a conversa para o attendant via change-attendant (fluxo padrão)."""
-    nome_norm = attendant_name.strip().lower()
-    nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm) if __import__('unicodedata').category(c) != 'Mn')
-    att_id = ATTENDANT_MAP.get(nome_norm)
+    att_id = _lookup_attendant_id(attendant_name, ATTENDANT_MAP)
     if not att_id:
-        p(f"  [DIST-CHAT] attendantId não encontrado para '{attendant_name}' (norm='{nome_norm}')")
+        p(f"  [DIST-CHAT] attendantId não encontrado para '{attendant_name}'")
         return False
     try:
         r = requests.post(
@@ -4511,7 +5107,7 @@ def _supabase_increment_fila(consultant_id, current_fila):
         return False
 
 
-def distribute_to_attendant(conv_id, reason='', silent_after_hours=True):
+def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude_attendants=None):
     """Distribui o aluno para um atendente humano real.
     1) Verifica horário  2) Escolhe consultor  3) Transfere lead/negócio/chat
     4) Atualiza fila no Supabase  5) Envia mensagem ao aluno.
@@ -4519,12 +5115,15 @@ def distribute_to_attendant(conv_id, reason='', silent_after_hours=True):
     Retorna True se distribuiu de fato; False caso contrário.
     Fora do horário NÃO envia mensagem nem marca _human_took_over —
     o caller é responsável por exibir AFTER_HOURS_FIRST_MSG / AFTER_HOURS_INSIST_MSG.
+
+    exclude_attendants: nomes (lowercase) a ignorar nesta chamada (usado pelo
+                        morning burst pra limitar quantos cada um recebe).
     """
     if not is_within_business_hours():
         p(f"  [DIST] [MODE] after_hours — distribuição abortada (motivo='{reason}')")
         return False
 
-    consultant = get_available_consultant()
+    consultant = get_available_consultant(exclude_attendants=exclude_attendants)
     if not consultant:
         p(f"  [DIST] [MODE] human_unavailable — fallback nota interna (motivo='{reason}')")
         first_name = ''
@@ -4534,8 +5133,15 @@ def distribute_to_attendant(conv_id, reason='', silent_after_hours=True):
                 first_name = ' ' + st_first['student_profile']['name'].split()[0]
         except Exception:
             pass
-        meta_typing_on()
-        send_and_track(conv_id, HUMAN_BUSY_MSG.format(name=first_name))
+        busy_msg = HUMAN_BUSY_MSG.format(name=first_name)
+        if _signature_recently_sent(conv_id, 'human_busy', window_s=4 * 3600):
+            p(f"  [DIST] dedup: human_busy ja enviado nas ultimas 4h - suprimindo")
+        else:
+            meta_typing_on()
+            send_and_track(conv_id, busy_msg)
+            _register_signature(conv_id, 'human_busy', busy_msg)
+            _mark_handoff_active(conv_id, 'human_unavailable', target='',
+                                 ttl_s=6 * 3600, body=busy_msg)
         transfer_to_human(conv_id, reason)
         try:
             record_pending_escalation(
@@ -4927,6 +5533,7 @@ def honor_preferred_attendant_promise(conv_id, promise):
         st['_human_took_over'] = True
         st['waiting_for_client'] = False
         st['_last_responded_ts'] = time.time()
+        _clear_handoff_active(conv_id, reason='promise_honored')
         p(f"  [PROMISE] Honrada -> {first_name} (conv={conv_id[:12]})")
         return True
 
@@ -5657,6 +6264,59 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         handle_debug_command(conv_id, cmd)
         return
 
+    # === RESPOSTA AO OFERECIMENTO PRE-ABERTURA ===
+    # Se ha _pre_opening_pending no estado, interpreta resposta como sim/nao.
+    st_pre = _conv_states.get(conv_id, {}) or {}
+    if st_pre.get('_pre_opening_pending'):
+        button_id = ''
+        if is_button_click:
+            button_id = (msg_body or '').strip()
+        intent = detect_pre_opening_intent(question, button_id=button_id)
+        if intent == 'yes':
+            accept_pre_opening(conv_id, question=question)
+            conversation_messages.append({'role': 'user', 'text': question})
+            return
+        elif intent == 'no':
+            decline_pre_opening(conv_id, question=question)
+            conversation_messages.append({'role': 'user', 'text': question})
+            return
+        # Sem intent claro: trata como continuacao da conversa (segue fluxo normal)
+        # mas limpa flag para nao re-perguntar
+        st_pre['_pre_opening_pending'] = False
+
+    # === HANDOFF ATIVO: agente nao responde mais ate humano assumir / TTL expirar ===
+    # Evita sequencias repetitivas tipo:
+    #   1) Mensagem humanizada de retencao (Wesley vai retomar 9h)
+    #   2) Eu entendo que ta complicado... (LLM continua)
+    #   3) Ainda esta por ai? (follow-up)
+    #   4) Vou encerrar... (close)
+    # Quando ha handoff vigente, o agente principal CALA. Supervisor cuida do close
+    # por inatividade.
+    ho_motivo, ho_target = _is_handoff_active(conv_id)
+    if ho_motivo:
+        nudge_sig = f'handoff_nudge:{ho_motivo}'
+        if not _signature_recently_sent(conv_id, nudge_sig, window_s=4 * 3600):
+            target_label = f"*{ho_target}*" if ho_target else "um consultor"
+            try:
+                _fname = ''
+                st_for_name = _conv_states.get(conv_id, {})
+                if st_for_name.get('student_profile') and st_for_name['student_profile'].get('first_name'):
+                    _fname = st_for_name['student_profile']['first_name']
+                nudge = (
+                    f"Oii{', ' + _fname if _fname else ''}! Já registrei aqui e "
+                    f"{target_label} vai dar continuidade ao seu atendimento, tá? "
+                    f"Pode aguardar que em pouquinho a gente retorna. 😊"
+                )
+                send_and_track(conv_id, nudge)
+                _register_signature(conv_id, nudge_sig, nudge)
+                p(f"  [HANDOFF-ACTIVE] {conv_id[:12]} aluno persistiu - nudge unico enviado (motivo={ho_motivo})")
+            except Exception as e_n:
+                p(f"  [HANDOFF-ACTIVE] erro nudge: {e_n}")
+        else:
+            p(f"  [HANDOFF-ACTIVE] {conv_id[:12]} aluno persistiu - SUPRIMINDO resposta (motivo={ho_motivo}, target={ho_target})")
+        conversation_messages.append({'role': 'user', 'text': question})
+        return
+
     elapsed = time.time() - last_response_time
     if elapsed < RESPONSE_COOLDOWN:
         wait = RESPONSE_COOLDOWN - elapsed
@@ -5942,20 +6602,27 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             retorno = next_human_available_label()
             name_prefix = _student_first_name_prefix(conv_id)
             msg_after = RETENTION_AFTER_HOURS_MSG.format(name=name_prefix, retorno_label=retorno)
-            meta_typing_on()
-            send_and_track(conv_id, msg_after)
-            conversation_messages.append({'role': 'bot', 'text': msg_after})
-            log_to_db(conv_id, question, msg_after, 1.0, 'retention_after_hours')
-            try:
-                requests.post(
-                    f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
-                    headers=H,
-                    json={'body': f'🤝 *Retenção fora do horário* — IA orientou aluno; Wesley deve retomar {retorno}.',
-                          'isInternal': True},
-                    timeout=10,
-                )
-            except Exception:
-                pass
+            # DEDUP: nao reenvia mesma mensagem de retencao-fora-do-horario na conv (24h)
+            if _signature_recently_sent(conv_id, 'retention_after_hours', window_s=24 * 3600):
+                p(f"  [RETENÇÃO] dedup: ja enviado retention_after_hours nas ultimas 24h - suprimindo reenvio")
+            else:
+                meta_typing_on()
+                send_and_track(conv_id, msg_after)
+                conversation_messages.append({'role': 'bot', 'text': msg_after})
+                log_to_db(conv_id, question, msg_after, 1.0, 'retention_after_hours')
+                _register_signature(conv_id, 'retention_after_hours', msg_after)
+                _mark_handoff_active(conv_id, 'retention_after_hours', target='Wesley',
+                                     ttl_s=14 * 3600, body=msg_after)
+                try:
+                    requests.post(
+                        f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                        headers=H,
+                        json={'body': f'🤝 *Retenção fora do horário* — IA orientou aluno; Wesley deve retomar {retorno}.',
+                              'isInternal': True},
+                        timeout=10,
+                    )
+                except Exception:
+                    pass
             try:
                 summary = generate_conversation_summary(conversation_messages)
                 save_memory(cur_phone, student_profile, 'retencao_after_hours', summary, sentiment)
@@ -5968,21 +6635,28 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             waiting_for_client = True; inactivity_start = time.time()
             return
 
-        meta_typing_on()
-        send_and_track(conv_id, RETENTION_MSG)
-        conversation_messages.append({'role': 'bot', 'text': RETENTION_MSG})
-        log_to_db(conv_id, question, RETENTION_MSG, 1.0, 'retention')
+        if _signature_recently_sent(conv_id, 'retention', window_s=24 * 3600):
+            p(f"  [RETENÇÃO] dedup: retention ja enviada nas ultimas 24h - suprimindo reenvio")
+        else:
+            meta_typing_on()
+            send_and_track(conv_id, RETENTION_MSG)
+            conversation_messages.append({'role': 'bot', 'text': RETENTION_MSG})
+            log_to_db(conv_id, question, RETENTION_MSG, 1.0, 'retention')
+            _register_signature(conv_id, 'retention', RETENTION_MSG)
+            _mark_handoff_active(conv_id, 'retention', target='Wesley',
+                                 ttl_s=8 * 3600, body=RETENTION_MSG)
 
-        lead_id = student_profile.get('lead_id') if student_profile else None
-        trigger_retention(conv_id, lead_id, question)
+            lead_id = student_profile.get('lead_id') if student_profile else None
+            trigger_retention(conv_id, lead_id, question)
 
-        # Apresentação do Wesley enviada pelo agente
-        _fname = (student_profile.get('first_name') or '').strip() if student_profile else ''
-        _wesley_intro = (f"Olá{', *' + _fname + '*' if _fname else ''}! "
-                         f"Sou o Wesley e irei seguir com o seu atendimento 😊")
-        time.sleep(1)
-        send_and_track(conv_id, _wesley_intro)
-        p(f"  [RETENÇÃO] Apresentação do Wesley enviada pelo agente")
+            # Apresentação do Wesley enviada pelo agente
+            _fname = (student_profile.get('first_name') or '').strip() if student_profile else ''
+            _wesley_intro = (f"Olá{', *' + _fname + '*' if _fname else ''}! "
+                             f"Sou o Wesley e irei seguir com o seu atendimento 😊")
+            time.sleep(1)
+            send_and_track(conv_id, _wesley_intro)
+            _register_signature(conv_id, 'retention_intro', _wesley_intro)
+            p(f"  [RETENÇÃO] Apresentação do Wesley enviada pelo agente")
 
         try:
             summary = generate_conversation_summary(conversation_messages)

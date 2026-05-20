@@ -7,6 +7,144 @@
 
 ---
 
+### [2026-05-20] - Janela pré-abertura + limite por consultor (anti-sobrecarga)
+
+**Decisão**
+Adicionar nova janela "quase abrindo" (`PRE_OPENING_MARGIN_MIN = 60`) e mensagem
+específica antes do expediente. Quando faltam <= 60min para abrir:
+1. Agente NÃO envia AFTER_HOURS_FIRST_MSG / AFTER_HOURS_INSIST_MSG.
+2. Em vez disso, manda `PRE_OPENING_MSG` com botões "Sim, entrar na fila" / "Não, obrigado(a)".
+3. Aluno aceita (botão ou texto "sim", "ok", "aguardo", etc) → registra em
+   `pending_escalation` com `tier='pre_opening'`, marca `handoff_active` e calado
+   até abrir. Bandeira priorizada na fila do morning dispatch.
+4. Aluno recusa → `decline_pre_opening` libera o fluxo IA normal.
+
+**Limite por consultor no morning burst**
+- Novo `PRE_OPENING_BURST_MAX_PER_ATTENDANT = 5`.
+- `get_available_consultant(exclude_attendants=...)` aceita exclusão por nome.
+- `distribute_to_attendant(..., exclude_attendants=...)` propaga.
+- `process_pending_escalation_auto_dispatch` mantém `assigned_count` por rodada
+  e exclui consultor que já recebeu 5; os excedentes ficam `pending` e entram
+  na próxima janela de retry. Tier `pre_opening` tem prioridade máxima na ordem
+  de despacho.
+
+**Contexto**
+Usuária reportou:
+- Aluno escreveu às 08h45 e recebeu mensagem de "fora do horário" — gerava
+  sensação ruim e não oferecia alternativa.
+- Aluno escreveu às 9h00 em ponto e ainda recebeu "fora" — latência/diferença
+  de minuto entre o instante do envio e o processamento; com a janela de 60min
+  esse caso passa automaticamente para o fluxo pre_opening.
+- Quando muitos alunos entravam na fila noturna, o 1º consultor do dia recebia
+  todos os leads de uma vez → sobrecarga.
+
+**Alternativas descartadas**
+- Margem só de 15min → ainda gera "fora" pra aluno que escreve às 8h45.
+- Sem botões (só texto sim/não) → mais ambíguo. Adotamos botões + fallback texto.
+- Distribuir tudo igualmente → não respeita `volume_distribuicao` do Supabase;
+  o limite burst é estritamente adicional, não substitui.
+- Aumentar `volume_distribuicao` no Supabase → afeta todo o resto do dia.
+
+**Impacto**
+- Janela pre-opening cobre o ponto cego "8h45-9h00" e elimina o bug do "9h em ponto".
+- Aluno tem opção explícita de entrar na fila vs continuar com a IA.
+- Morning burst nunca dá mais que 5 leads de uma vez ao mesmo consultor.
+- Tier `pre_opening` é prioridade 0 (na frente de insist=1 e first=2).
+
+---
+
+### [2026-05-20] - Dedup persistente e handoff_active (anti-repetição)
+
+**Decisão**
+Adicionar duas tabelas persistentes para eliminar mensagens repetitivas/duplicadas:
+
+1. **`agent_sent_signatures(conv_id, signature, body_hash, sent_at)`**
+   - Toda mensagem importante registra uma "assinatura" do motivo
+     (`retention_after_hours`, `retention`, `after_hours_first`, `after_hours_insist`,
+     `human_busy`, `followup_1`, `auto_close`, `handoff_nudge:<motivo>`).
+   - `_signature_recently_sent(conv_id, sig, window_s)` checa antes de enviar.
+   - Sobrevive a restart do agente — não depende de `_conv_states` em memória.
+
+2. **`handoff_active(conv_id, motivo, target_attendant, expires_at)`**
+   - Quando o agente faz handoff humanizado (retenção Wesley, after-hours insist,
+     human_unavailable), grava `handoff_active` com TTL (8-14h).
+   - `handle_message`: se `_is_handoff_active(cid)`, **agente principal NÃO chama LLM,
+     NÃO responde**. Manda só um `nudge` único ("o *Wesley* vai dar continuidade,
+     pode aguardar") deduplicado por 4h, e CALA.
+   - `process_supervisor_loop`: se handoff_active, **NÃO manda follow-up** (mas
+     ainda pode executar close_orphan após 30min de silêncio).
+   - Limpo automaticamente em: promessa honrada (humano assume), close por
+     inatividade, ou TTL expira.
+
+**Contexto**
+Caso "Isabel" reportado pela usuária mostrou sequência repetitiva:
+  1. Mensagem humanizada Wesley fora-do-horário
+  2. LLM gerou "Eu entendo que tá complicado..." (cortesia)
+  3. Follow-up "Ainda está por aí?"
+  4. Close
+
+Mesmo com supervisor v3 evitando follow-up após handoff via marker no body, o LLM do
+agente principal continuava respondendo qualquer mensagem subsequente do aluno. Após
+restart, o agente também perdia memória dos timers e podia reenviar mesma resposta.
+
+**Alternativas descartadas**
+- Detectar repetição só por hash da mensagem → não pega variações do LLM (mesmo
+  motivo, texto diferente).
+- Marcar `_human_took_over=True` no estado em memória → não sobrevive a restart.
+- Bloquear LLM apenas se última msg do bot tinha marker handoff → frágil; LLM
+  podia mandar uma cortesia entre handoff e nova msg do aluno.
+
+**Impacto**
+- Mensagens repetidas após restart: eliminadas (signature em DB).
+- Sequência "humanizada → eu entendo → follow-up → close": elimina passos 2 e 3.
+- Aluno pode mandar várias mensagens insistindo após handoff: recebe 1 nudge
+  ("Wesley vai assumir, aguarde"), depois silêncio até humano assumir ou close.
+- Risco residual: se TTL handoff_active expira sem humano assumir e sem close, agente
+  volta a responder — mitigado por close_orphan do supervisor (30min).
+
+---
+
+### [2026-05-20] - Resgate cria lead + Supervisor loop v3 (humano-inativo + close órfão)
+
+**Decisão**
+1. Rescues (`process_in_hours_rescue`, `process_post_close_rescue`) agora **criam lead+business
+   no CRM antes de atribuir consultor** via novo helper `_ensure_lead_for_rescue(phone, name)`.
+   Se falha em criar, aborta a atribuição (não deixa conv órfã com atendente sem lead).
+2. Chamadas a `_dcz_transfer_business` corrigidas: passam `phone` como 1º arg e `lead_id` como
+   3º (estava passando business_id em phone, que só funcionava por sorte via lookup interno).
+3. Helper `_lookup_attendant_id(name, table)` aceita nome completo (`Wesley Guerreiro`) e cai
+   para primeiro nome (`wesley`) automaticamente — antes o map só batia com primeiro nome.
+4. **Supervisor v3**: substitui o check binário `c.attendants != []` por:
+   - Se humano respondeu por último → não mexer.
+   - Se humano atribuído mas última outbound foi do bot e humano inativo há > 5min → liberar.
+   - Novo `_msg_is_from_human(m)` distingue por `m.attendant != None`.
+   - `_supervisor_has_attendant_fresh` agora também aceita conv com humano-inativo.
+5. **Close órfão**: além do close pós-follow-up, supervisor encerra conv parada após
+   2x CLOSE_DELAY (30min) quando a última msg do bot foi handoff/tutorial e nenhum humano atuou.
+6. `SUPERVISOR_MAX_FOLLOWUP_AGE_S` 60min → 4h (cobre backlog matinal sem mandar ping tardio absurdo).
+
+**Contexto**
+Usuária reportou repetidamente conversas paradas: bot envia tutorial, atendente é
+atribuído (resgate/distribuição), mas humano não atua. Sem o fix, supervisor pulava
+todas as conversas com `attendants != []` e nenhum follow-up/close acontecia. Também
+houve casos de resgate atribuindo conv ao consultor sem criar lead no CRM (Ana Paula,
+Fabiane, Neythan), deixando "Lead não encontrado" no painel e fora do pipeline.
+
+**Alternativas descartadas**
+- Forçar bot a sempre responder mesmo com atendente humano ativo → atropelaria humano.
+- Removendo a verificação de atendente totalmente → bot manda follow-up por cima
+  de humano atuando.
+- Notificar dashboard externo em vez de close orfão → exige nova UI e ação manual,
+  contraria pedido explícito ("não precisar ficar pedindo").
+
+**Impacto**
+- Cobertura de follow-up sobe muito (cobre convs com atendente atribuído mas inativo).
+- Encerramento garantido em até ~30min após handoff sem resposta.
+- Risco de bot responder em cima de humano: mitigado pelos 5min de grace + re-fetch.
+- Resgates passam a sempre criar lead/business + mover stage corretamente.
+
+---
+
 ### [2026-05-20] - Supervisor loop v2 (estritamente send-only, multi-status, dupla checagem)
 
 **Atualização (v2)**
