@@ -5680,7 +5680,12 @@ def _openai_supervisor_get_window(conv_id, max_msgs=10):
         if r.status_code != 200:
             return []
         data = r.json()
-        msgs = data.get('data', data) if isinstance(data, dict) else data
+        # DataCrazy retorna {"messages": [...]} para messaging API.
+        # Algumas rotas usam {"data": [...]}. Tentamos ambos.
+        if isinstance(data, dict):
+            msgs = data.get('messages') or data.get('data') or []
+        else:
+            msgs = data
         if not isinstance(msgs, list):
             return []
         out = []
