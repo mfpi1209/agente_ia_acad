@@ -55,6 +55,299 @@ POLOS_NOSSOS_NORMALIZED = [
     'taboao da serra', 'ouro verde', 'indianopolis',
 ]
 
+# ===================== ENDERECOS OFICIAIS DOS POLOS =====================
+# FONTE UNICA DA VERDADE. O LLM NUNCA deve inventar endereco; ele consulta
+# essa estrutura via prompt injection quando o aluno pergunta endereco/polo.
+# Atualizar AQUI (e somente aqui) quando algo mudar.
+POLOS_OFICIAIS = [
+    {
+        'key': 'barra_funda',
+        'nome': 'Polo Barra Funda',
+        'endereco': 'Rua do Bosque, 1621, Loja 12 - Térreo',
+        'referencia': '10 minutos do Metrô - Estação Palmeiras Barra Funda - Linha 3 - Vermelha',
+    },
+    {
+        'key': 'vila_prudente_2',
+        'nome': 'Polo Vila Prudente 2',
+        'endereco': 'Rua Ibitirama, 404',
+        'referencia': '5 minutos do terminal de ônibus - Estação Vila Prudente - Linha 2 - Verde',
+    },
+    {
+        'key': 'morumbi',
+        'nome': 'Polo Morumbi',
+        'endereco': 'Rua Amélia Corrêa Fontes Guimarães, 34',
+        'referencia': '10 minutos do Metrô São Paulo - Morumbi - Linha Amarela. Seguir na Av. Francisco Morato e virar na Rua Três Irmãos do Hospital Lefort',
+    },
+    {
+        'key': 'taboao_centro',
+        'nome': 'Polo Taboão da Serra Centro',
+        'endereco': 'Av. Jovina de Carvalho Dau, 216 - Parque Santos Dumont',
+        'referencia': 'Centro de Taboão da Serra - Em frente à Delegacia',
+    },
+    {
+        'key': 'taboao_mituizi',
+        'nome': 'Polo Taboão da Serra Jardim Mituizi',
+        'endereco': 'Rua Osmar Antônio Silva, 128',
+        'referencia': 'Altura do número 2800 da Av. Kizaemon Takeuti, em frente ao colégio Dom Pedro',
+    },
+    {
+        'key': 'sapopemba',
+        'nome': 'Polo Sapopemba',
+        'endereco': 'Av. Vila Ema, 6121 - Sapopemba',
+        'referencia': 'Travessa da Av. Sapopemba - Altura do número 7737',
+    },
+    {
+        'key': 'freguesia_o',
+        'nome': 'Polo Freguesia do Ó',
+        'endereco': 'Rua Manuel Madruga, 82 - Freguesia do Ó',
+        'referencia': 'Travessa da Av. Itaberaba - Altura do número 591',
+    },
+    {
+        'key': 'ibirapuera',
+        'nome': 'Polo Ibirapuera',
+        'endereco': 'Av. Iraí, 79, 21B - Moema',
+        'referencia': 'Próximo à estação Eucaliptos',
+    },
+    {
+        'key': 'campinas',
+        'nome': 'Polo Campinas',
+        'endereco': 'R. Armando Frederico Renganeschi, 276 - Ouro Verde (Jardim Cristina), Campinas - SP, 13054-000',
+        'referencia': '',
+    },
+    {
+        'key': 'capivari',
+        'nome': 'Polo Capivari',
+        'endereco': 'Rua Padre Haroldo, 746 - Centro, Capivari - SP, 13360-000',
+        'referencia': '',
+    },
+    {
+        'key': 'itapira',
+        'nome': 'Polo Itapira',
+        'endereco': 'R. 15 de Novembro, 366 - Centro, Itapira - SP, 13970-270',
+        'referencia': '',
+    },
+]
+
+
+def _format_polo(p):
+    """Formata 1 polo para WhatsApp."""
+    txt = f"*{p['nome']}*\n📍 {p['endereco']}"
+    if p.get('referencia'):
+        txt += f"\n_{p['referencia']}_"
+    return txt
+
+
+def _format_polos_oficiais_para_prompt():
+    """Bloco fixo a injetar no SYSTEM_PROMPT sempre que aluno menciona polo/endereco.
+    Usa formatacao WhatsApp.
+    """
+    linhas = []
+    for p in POLOS_OFICIAIS:
+        ref = f" — {p['referencia']}" if p.get('referencia') else ''
+        linhas.append(f"- {p['nome']}: {p['endereco']}{ref}")
+    return "\n".join(linhas)
+
+
+def _normalize_polo_match(text):
+    """Devolve a entrada de POLOS_OFICIAIS que melhor casa com o texto, ou None."""
+    if not text:
+        return None
+    import unicodedata
+    norm = ''.join(c for c in unicodedata.normalize('NFD', text.lower())
+                   if unicodedata.category(c) != 'Mn')
+    # tabela palavras-chave -> key
+    aliases = {
+        'barra funda': 'barra_funda',
+        'barra-funda': 'barra_funda',
+        'vila prudente 2': 'vila_prudente_2',
+        'vila prudente2': 'vila_prudente_2',
+        'prudente 2': 'vila_prudente_2',
+        'vila prudente': 'vila_prudente_2',
+        'morumbi': 'morumbi',
+        'taboao centro': 'taboao_centro',
+        'taboao da serra centro': 'taboao_centro',
+        'taboao da serra': 'taboao_centro',
+        'mituizi': 'taboao_mituizi',
+        'mituzi': 'taboao_mituizi',
+        'mituzzi': 'taboao_mituizi',
+        'jardim mituizi': 'taboao_mituizi',
+        'jardim mituzi': 'taboao_mituizi',
+        'sapopemba': 'sapopemba',
+        'vila ema': 'sapopemba',
+        'freguesia do o': 'freguesia_o',
+        'freguesia': 'freguesia_o',
+        'ibirapuera': 'ibirapuera',
+        'moema': 'ibirapuera',
+        'campinas': 'campinas',
+        'ouro verde': 'campinas',
+        'capivari': 'capivari',
+        'itapira': 'itapira',
+    }
+    for k, key in sorted(aliases.items(), key=lambda x: -len(x[0])):
+        if k in norm:
+            return next((p for p in POLOS_OFICIAIS if p['key'] == key), None)
+    return None
+
+
+# Frases que disparam intencao de "visita / preciso ir presencialmente / dificuldade comunicacao"
+_PRESENCIAL_TRIGGERS = [
+    'pessoalmente', 'pessoa mesmo', 'ir ao polo', 'ir no polo', 'ir aí no polo',
+    'ir aí', 'visitar o polo', 'visitar a unidade', 'comparecer',
+    'ir presencial', 'ir presencialmente', 'atendimento presencial',
+    'conversar pessoalmente', 'falar pessoalmente', 'ir na unidade',
+    'aparecer no polo', 'passar no polo', 'passar aí',
+    'onde posso conversar pessoalmente', 'onde fica o polo', 'onde e o polo',
+    'onde é o polo', 'qual endereço do polo', 'qual o endereço do polo',
+    'qual endereco do polo', 'endereço do polo',
+    'dificil pelo whatsapp', 'difícil pelo whatsapp',
+    'dificil a distancia', 'difícil a distância', 'dificil a distância',
+    'difícil a comunicacao', 'difícil a comunicação', 'dificil comunicacao',
+    'dificil comunicar', 'difícil comunicar',
+    'nao to entendendo', 'não tô entendendo', 'nao to conseguindo',
+    'não consigo por aqui', 'nao consigo por aqui',
+    'prefiro ir', 'prefiro pessoalmente',
+]
+
+# Apenas palavras tipo "endereço/polo/local" puras (sem intencao de visita) -
+# nesses casos so respondemos com o endereco oficial, sem transferir
+_ENDERECO_ONLY = [
+    'qual endereço', 'qual endereco', 'qual o endereço', 'qual o endereco',
+    'endereço completo', 'endereco completo', 'me passa o endereço',
+    'me manda o endereço', 'me manda o endereco', 'me passa o endereco',
+    'cep do polo', 'me informa o endereço', 'me informa o endereco',
+    'qual cep',
+]
+
+
+def detect_polo_intent(text):
+    """Retorna dict com:
+      - intent: 'visit' (quer ir / dificuldade), 'address_only' (so endereco), 'none'
+      - polo_mencionado: entry de POLOS_OFICIAIS ou None
+    """
+    if not text:
+        return {'intent': 'none', 'polo_mencionado': None}
+    import unicodedata
+    norm = ''.join(c for c in unicodedata.normalize('NFD', text.lower())
+                   if unicodedata.category(c) != 'Mn')
+    norm = ' '.join(norm.split())
+    polo = _normalize_polo_match(text)
+
+    # 1) trigger explicito de visita / dificuldade
+    for kw in _PRESENCIAL_TRIGGERS:
+        kw_n = ''.join(c for c in unicodedata.normalize('NFD', kw.lower())
+                       if unicodedata.category(c) != 'Mn')
+        if kw_n in norm:
+            return {'intent': 'visit', 'polo_mencionado': polo}
+
+    # 2) so endereco / cep / local sem intencao de ir
+    for kw in _ENDERECO_ONLY:
+        kw_n = ''.join(c for c in unicodedata.normalize('NFD', kw.lower())
+                       if unicodedata.category(c) != 'Mn')
+        if kw_n in norm:
+            return {'intent': 'address_only', 'polo_mencionado': polo}
+
+    # 3) menciona polo + verbo de ir/visitar generico
+    if polo and any(w in norm for w in (' ir ', ' vou ', ' chegar ', ' fica ', ' onde ')):
+        return {'intent': 'visit', 'polo_mencionado': polo}
+
+    return {'intent': 'none', 'polo_mencionado': polo}
+
+
+def handle_polo_visit_intent(conv_id, polo_entry, question=''):
+    """Aluno disse que quer ir pessoalmente / esta com dificuldade.
+    1) Envia mensagem humanizada com:
+       - acolhida
+       - endereco oficial se polo conhecido (do contexto ou questao)
+       - aviso que vai transferir
+    2) Transfere para consultor humano (distribuicao normal).
+    """
+    name_prefix = _student_first_name_prefix(conv_id)
+    profile_polo = None
+    try:
+        st = _conv_states.get(conv_id, {}) or {}
+        sp = st.get('student_profile') or {}
+        if sp.get('polo'):
+            profile_polo = _normalize_polo_match(sp.get('polo') or '')
+    except Exception:
+        pass
+    polo = polo_entry or profile_polo
+    if polo:
+        msg = (
+            f"Imagino que esteja sendo difícil resolver tudo por aqui mesmo{name_prefix}, "
+            f"e isso é totalmente compreensível 💙\n\n"
+            f"O endereço do *{polo['nome']}* é:\n\n"
+            f"📍 *{polo['endereco']}*"
+        )
+        if polo.get('referencia'):
+            msg += f"\n_{polo['referencia']}_"
+        msg += (
+            "\n\nMas antes de você se deslocar até lá, vou *te transferir agora* para um(a) consultor(a) "
+            "que pode te orientar direitinho sobre o melhor caminho — pessoal ou aqui mesmo. "
+            "Em pouquinho alguém te chama por aqui, tá? 😊"
+        )
+    else:
+        msg = (
+            f"Imagino que esteja sendo difícil resolver tudo por aqui mesmo{name_prefix}, "
+            f"e isso é totalmente compreensível 💙\n\n"
+            f"Vou *te transferir agora* para um(a) consultor(a) que vai conseguir te orientar melhor — "
+            f"incluindo o endereço do polo certo e a melhor forma de te ajudar. "
+            f"Em pouquinho alguém te chama por aqui! 😊"
+        )
+
+    meta_typing_on()
+    send_and_track(conv_id, msg)
+    log_to_db(conv_id, question or '[polo_visit_intent]', msg, 1.0, 'polo_visit_intent')
+    try:
+        _register_signature(conv_id, 'polo_visit_intent', msg)
+    except Exception:
+        pass
+
+    # Transferir agora se estiver no horario; senao, registrar fila
+    if is_within_business_hours():
+        try:
+            distribute_to_attendant(
+                conv_id,
+                reason=f'Aluno pediu atendimento presencial / dificuldade comunicação online: "{(question or "")[:140]}"',
+            )
+        except Exception as e:
+            p(f"  [POLO-VISIT] erro distribuir: {e}")
+    else:
+        try:
+            record_pending_escalation(
+                conv_id, reason='polo_visit_after_hours', tier='insist',
+                retorno_label=next_human_available_label(),
+                question=(question or '')[:500],
+            )
+            _mark_handoff_active(conv_id, 'polo_visit',
+                                 target='', ttl_s=12 * 3600, body=msg)
+        except Exception:
+            pass
+    return True
+
+
+def handle_polo_address_only(conv_id, polo_entry, question=''):
+    """Aluno pediu so o endereco de um polo — responde com endereco oficial.
+    Se polo nao foi identificado, pergunta qual polo."""
+    name_prefix = _student_first_name_prefix(conv_id)
+    if polo_entry:
+        msg = (
+            f"Claro{name_prefix}! O endereço do *{polo_entry['nome']}* é:\n\n"
+            f"📍 *{polo_entry['endereco']}*"
+        )
+        if polo_entry.get('referencia'):
+            msg += f"\n_{polo_entry['referencia']}_"
+        msg += "\n\nSe precisar de mais alguma coisa, é só me chamar! 😊"
+    else:
+        polos_curtos = "\n".join(f"- {p['nome']}" for p in POLOS_OFICIAIS)
+        msg = (
+            f"Claro{name_prefix}! Me conta qual polo você quer saber o endereço, "
+            f"que eu te passo certinho 😊\n\n*Polos atendidos:*\n{polos_curtos}"
+        )
+    meta_typing_on()
+    send_and_track(conv_id, msg)
+    log_to_db(conv_id, question or '[polo_address_only]', msg, 1.0, 'polo_address_only')
+    return True
+
 OUTRO_POLO_MSG_1 = (
     "Identifiquei que você não está vinculado(a) a um dos polos que atendemos "
     "e, por motivos de segurança e ética, não tenho acesso às suas informações "
@@ -491,6 +784,7 @@ Sua personalidade: simpática, paciente, fala de um jeito leve e natural. Você 
 8. Se a referência tiver links ou vídeos, **INCLUA**.
 9. **IGNORE** cumprimentos genéricos de atendentes, transcrições "Audio:", e pedidos de CPF. Extraia só informação útil.
 10. **NUNCA ofereça transferir para atendente** por conta própria. Isso é controlado pelos botões do sistema.
+11. **ENDEREÇO DE POLO — REGRA CRÍTICA**: NUNCA, JAMAIS, INVENTE endereço, rua, número, bairro, ponto de referência, horário ou CEP de polo. Se o aluno perguntar endereço/local de polo e isso NÃO estiver explicitamente no bloco "ENDEREÇOS OFICIAIS DOS POLOS" (quando presente), responda APENAS: "Deixa eu confirmar essa informação com a equipe para te passar certinho, tá?". O sistema cuida da transferência automática quando o aluno expressa intenção de visita ou dificuldade. NÃO mencione metrô, linha, terminal, hospital ou referência geográfica de polo se não estiver nas referências.
 
 ## COMO CONVERSAR (REGRA MAIS IMPORTANTE):
 Você tá no WhatsApp. Ninguém manda textão no zap. Seja breve, natural e direta.
@@ -5214,6 +5508,142 @@ def process_openai_supervisor_loop():
         p(f"  [OPENAI-SUP] auditadas={audited} alta={flagged_high} media={flagged_med}")
 
 
+def _oneshot_fix_vanessa_barra_funda():
+    """One-shot executado uma unica vez no startup do agente apos o deploy
+    da correcao do polo Barra Funda. Procura a conv ativa da 'Vanessa Carmona'
+    que recebeu endereco errado (Rua dos Tres Irmaos, 100) e envia mensagem
+    humanizada de correcao + nota interna + tentativa de distribuicao.
+
+    Garante idempotencia atraves de agent_config (chave 'oneshot_vanessa_done').
+    """
+    KEY = 'oneshot_vanessa_barra_funda_done'
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM agent_config WHERE key = %s", (KEY,))
+        row = cur.fetchone()
+        already = bool(row and (row[0] or '').strip())
+        cur.close()
+        conn.close()
+        if already:
+            return
+    except Exception:
+        pass
+
+    p("  [ONESHOT-VANESSA] iniciando correcao manual...")
+    target = None
+    try:
+        r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
+                         params={'limit': 300, 'status': 'open'}, timeout=20)
+        if r.status_code != 200:
+            p(f"  [ONESHOT-VANESSA] DCZ status={r.status_code}")
+            return
+        data = r.json()
+        convs = data.get('data', data) if isinstance(data, dict) else data
+        cands = []
+        for c in convs:
+            ct = c.get('contact') or {}
+            name = (ct.get('name') or c.get('contactName') or '').strip().lower()
+            if 'vanessa' in name and 'carmona' in name:
+                cands.append(c)
+        if not cands:
+            p("  [ONESHOT-VANESSA] nenhuma conv ativa de Vanessa Carmona encontrada")
+            # marca como done pra nao tentar a cada restart
+            try:
+                conn = psycopg2.connect(**DB_CONFIG)
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO agent_config (key, value, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                """, (KEY, 'not_found'))
+                conn.commit()
+                cur.close()
+                conn.close()
+            except Exception:
+                pass
+            return
+        target = sorted(cands, key=lambda x: x.get('updatedAt') or x.get('lastMessageAt') or '',
+                        reverse=True)[0]
+    except Exception as e:
+        p(f"  [ONESHOT-VANESSA] erro listar convs: {e}")
+        return
+
+    conv_id = target.get('id')
+    phone = (target.get('contact') or {}).get('phone') or target.get('contactPhoneNumber') or ''
+    p(f"  [ONESHOT-VANESSA] conv={conv_id[:12]} phone={phone}")
+
+    # 1) nota interna pra equipe
+    nota = (
+        "⚠️ *Correção manual via IA* — IA havia enviado endereço incorreto da Barra Funda "
+        "(Rua dos Três Irmãos, 100). Mensagem de desculpas + endereço correto enviados. "
+        "Distribuição automática em seguida."
+    )
+    try:
+        requests.post(f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                      headers=H, json={'body': nota, 'isInternal': True}, timeout=15)
+    except Exception:
+        pass
+
+    # 2) mensagem humanizada de correcao + endereco oficial
+    msg = (
+        "Vanessa, me desculpe! 😔 Acabei te passando o endereço errado da Barra Funda. "
+        "Vou te passar a informação certa aqui:\n\n"
+        "*Polo Barra Funda*\n"
+        "📍 *Rua do Bosque, 1621, Loja 12 - Térreo*\n"
+        "_10 minutos do Metrô - Estação Palmeiras Barra Funda - Linha 3 - Vermelha_\n\n"
+        "E como vi que tá sendo difícil resolver tudo por aqui mesmo, vou *te transferir agora* "
+        "para um(a) consultor(a) que vai te orientar direitinho e tirar todas as dúvidas. "
+        "Em pouquinho alguém te chama por aqui 💙"
+    )
+    try:
+        time.sleep(1.5)
+        send_and_track(conv_id, msg, force=True)  # force ignora dedup (correcao critica)
+        _register_signature(conv_id, 'oneshot_vanessa', msg)
+    except Exception as e:
+        p(f"  [ONESHOT-VANESSA] erro enviar msg: {e}")
+
+    # 3) tentativa de distribuir
+    try:
+        global _current_phone, student_profile
+        _current_phone = phone
+        ct = target.get('contact') or {}
+        first = (ct.get('name') or '').split()[0] if (ct.get('name') or '') else 'Vanessa'
+        student_profile = {'name': ct.get('name') or 'Vanessa Carmona',
+                           'first_name': first, 'phone': phone}
+        if is_within_business_hours():
+            ok = distribute_to_attendant(
+                conv_id,
+                reason='Correção manual: endereço errado da Barra Funda enviado pela IA — atendimento humano para orientar pessoalmente',
+            )
+            p(f"  [ONESHOT-VANESSA] distribute_to_attendant -> {ok}")
+        else:
+            record_pending_escalation(
+                conv_id, reason='vanessa_correcao', tier='insist',
+                retorno_label=next_human_available_label(),
+                question='Correção manual: endereço errado Barra Funda',
+            )
+            p("  [ONESHOT-VANESSA] fora do horario - registrado em pending_escalation")
+    except Exception as e:
+        p(f"  [ONESHOT-VANESSA] erro distribuir: {e}")
+
+    # 4) marcar como done (idempotencia)
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO agent_config (key, value, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """, (KEY, conv_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        p(f"  [ONESHOT-VANESSA] marcado done em agent_config")
+    except Exception as e:
+        p(f"  [ONESHOT-VANESSA] erro marcar done: {e}")
+
+
 def _after_hours_escalation_tier(conv_id):
     """Retorna 'first' ou 'insist' baseado em quantos pedidos de atendente
     o aluno fez dentro da janela AFTER_HOURS_INSIST_WINDOW_MIN.
@@ -7145,6 +7575,25 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         p(f"  [RETENÇÃO] Conversa encaminhada para Wesley - follow-ups desativados")
         return
 
+    # === POLO: intencao de ir presencialmente / dificuldade comunicacao online ===
+    # Resolve o caso "Vanessa Carmona" (LLM inventou endereco da Barra Funda).
+    # SEMPRE transfere para humano quando aluno expressa intencao de ir, e o
+    # endereco enviado vem de POLOS_OFICIAIS (NUNCA inventado pelo LLM).
+    try:
+        polo_intent = detect_polo_intent(question)
+    except Exception:
+        polo_intent = {'intent': 'none', 'polo_mencionado': None}
+    if polo_intent['intent'] == 'visit':
+        p(f"  [POLO-VISIT] Intencao de visita / dificuldade: \"{question[:80]}\"")
+        handle_polo_visit_intent(conv_id, polo_intent.get('polo_mencionado'), question=question)
+        conversation_messages.append({'role': 'user', 'text': question})
+        return
+    if polo_intent['intent'] == 'address_only':
+        p(f"  [POLO-ADDR] Pedido de endereco: \"{question[:80]}\"")
+        handle_polo_address_only(conv_id, polo_intent.get('polo_mencionado'), question=question)
+        conversation_messages.append({'role': 'user', 'text': question})
+        return
+
     # === "JÁ SOU ALUNO" / "QUERO ME MATRICULAR" (resposta ao "não encontrado na base") ===
     if q_lower in ('já sou aluno', 'ja sou aluno'):
         _awaiting_cpf = True
@@ -7861,6 +8310,12 @@ def main():
         p(f"  [VARREDURA] Concluída! {_sweep_count} alunos movidos de volta para Base de Alunos")
     except Exception as e_sweep:
         p(f"  [VARREDURA] Erro na varredura: {e_sweep}")
+
+    # === ONE-SHOT: correcao manual Vanessa Carmona (endereco Barra Funda errado) ===
+    try:
+        _oneshot_fix_vanessa_barra_funda()
+    except Exception as e_one:
+        p(f"  [ONESHOT-VANESSA] erro: {e_one}")
 
     while True:
         try:

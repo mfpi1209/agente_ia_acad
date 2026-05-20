@@ -7,6 +7,68 @@
 
 ---
 
+### [2026-05-20] - Endereços oficiais dos polos + intent de visita presencial
+
+**Decisão**
+Adicionar fonte canônica de endereços dos 11 polos (`POLOS_OFICIAIS`) no
+código, detectar intenção de visita/dificuldade na comunicação ANTES do LLM
+e transferir para consultor humano com mensagem humanizada, eliminando
+alucinação de endereço pelo LLM.
+
+**Componentes**
+- `POLOS_OFICIAIS`: lista de 11 polos (Barra Funda, Vila Prudente 2, Morumbi,
+  Taboão Centro, Taboão Mituizi, Sapopemba, Freguesia do Ó, Ibirapuera,
+  Campinas, Capivari, Itapira) com endereço + ponto de referência.
+- `_normalize_polo_match(text)`: mapeia texto livre para a entrada certa
+  (com aliases tipo "Moema" → Ibirapuera, "Ouro Verde" → Campinas, "Mituzi/Mituzzi" → Taboão Mituizi).
+- `detect_polo_intent(text)`: classifica em `visit`, `address_only` ou `none`.
+  Triggers de visita: "ir pessoalmente", "ir ao polo", "dificil comunicacao",
+  "conversar pessoalmente", "prefiro ir", "qual endereco do polo", etc.
+- `handle_polo_visit_intent(conv_id, polo, question)`:
+  1. Manda mensagem humanizada com endereço oficial (se polo identificado).
+  2. Avisa que vai transferir.
+  3. Chama `distribute_to_attendant` se dentro do horário; fora do horário
+     registra em `pending_escalation` + marca `handoff_active(motivo='polo_visit')`.
+- `handle_polo_address_only(conv_id, polo, question)`: responde só com
+  endereço oficial sem transferir. Se polo não identificado, lista os 11.
+- Plug em `handle_message` ANTES do LLM e DEPOIS do bloco de retenção.
+- `SYSTEM_PROMPT` ganha **REGRA ABSOLUTA #11**: NUNCA inventar endereço,
+  rua, número, bairro, referência, horário ou CEP de polo. Se aluno
+  perguntar e não houver bloco oficial de endereços nas referências,
+  responder: *"Deixa eu confirmar essa informação com a equipe..."*.
+
+**One-shot Vanessa Carmona**
+- `_oneshot_fix_vanessa_barra_funda()` executado uma única vez no startup
+  do agente (idempotência via `agent_config.oneshot_vanessa_barra_funda_done`).
+- Procura conv ativa da Vanessa, manda nota interna + mensagem humanizada
+  de desculpas + endereço correto + distribui para consultor humano.
+
+**Contexto**
+- Imagem da conversa com Vanessa Carmona mostrou o LLM inventando endereço
+  da Barra Funda como "Rua dos Três Irmãos, 100" — alucinação pura. A KB
+  não tem essa rua. O endereço correto é "Rua do Bosque, 1621".
+- Usuária pediu regra global: sempre que aluno indicar dificuldade ou
+  intenção de visitar polo, transferir para humano com mensagem humanizada.
+
+**Alternativas descartadas**
+- Inserir os 11 polos como Q&A na `knowledge_base` → mais lento, sujeito
+  a embedding decidir pegar ou não; pior controle. Fonte código é mais
+  determinística.
+- Apenas regra no prompt → LLM ignora "REGRAS ABSOLUTAS" eventualmente
+  quando o aluno insiste. Interceptação ANTES do LLM elimina essa janela.
+- Endpoint admin temporário para corrigir Vanessa → expõe superfície. O
+  one-shot no startup é self-contained, idempotente e some sozinho.
+
+**Impacto**
+- Aluno pergunta endereço/local de polo → resposta oficial, sem alucinação.
+- Aluno indica intenção de ir presencial / dificuldade online → mensagem
+  humanizada + transferência automática (ou fila pré-abertura fora do horário).
+- Caso Vanessa será resolvido no primeiro start do agente após este deploy.
+- Para atualizar endereço de polo no futuro: editar `POLOS_OFICIAIS` no
+  código + redeploy. Fonte única da verdade.
+
+---
+
 ### [2026-05-20] - Anti-repetição "à prova de tudo" + supervisor OpenAI
 
 **Decisão**
