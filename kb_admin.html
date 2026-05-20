@@ -2066,11 +2066,23 @@ async function promptDel(id){if(!confirm('Deletar este prompt?'))return;const r=
 // ==== AUDITORIA IA (supervisor OpenAI findings) ====
 let _auditTimer=null;
 const AUDIT_TYPE_LABELS={
+  repeticao:'Repetição',
   repeticao_resposta:'Repetição de resposta',
   contradicao:'Contradição',
   falha_pre_opening:'Falha pré-abertura',
   sobre_resposta:'Continuou após handoff',
   duplicado_distribuicao:'Distribuição duplicada',
+  assignment_mismatch:'Atendente divergente',
+  resposta_generica:'Resposta genérica',
+  regra_a1_errada:'Regra A1 não seguida',
+  polo_alucinado:'Endereço de polo errado',
+  tom_inadequado:'Tom inadequado',
+  nao_respondeu_pergunta:'Não respondeu pergunta',
+  informacao_incorreta:'Informação incorreta',
+  perdido_conversa:'Conversa perdida (sem follow-up)',
+  matricula_mal_direcionada:'Matrícula mal direcionada',
+  alucinacao_geral:'Alucinação',
+  outro:'Outro',
   ok:'Sem problema',
 };
 const AUDIT_SEV_BADGE={

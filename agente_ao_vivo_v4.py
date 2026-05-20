@@ -4809,9 +4809,9 @@ SUPERVISOR_HUMAN_GRACE_S = 5 * 60               # se humano respondeu nos ultimo
 # Custo controlado por intervalo + cap por ciclo.
 OPENAI_SUPERVISOR_ENABLED = os.environ.get('OPENAI_SUPERVISOR_ENABLED', '1') in ('1', 'true', 'True')
 OPENAI_SUPERVISOR_MODEL = os.environ.get('OPENAI_SUPERVISOR_MODEL', 'gpt-5.1')
-OPENAI_SUPERVISOR_INTERVAL_S = int(os.environ.get('OPENAI_SUPERVISOR_INTERVAL_S', '300'))   # 5min
-OPENAI_SUPERVISOR_MAX_CONVS = int(os.environ.get('OPENAI_SUPERVISOR_MAX_CONVS', '15'))     # por ciclo
-OPENAI_SUPERVISOR_LOOKBACK_MIN = int(os.environ.get('OPENAI_SUPERVISOR_LOOKBACK_MIN', '60'))  # convs com atividade nos ultimos 60min
+OPENAI_SUPERVISOR_INTERVAL_S = int(os.environ.get('OPENAI_SUPERVISOR_INTERVAL_S', '180'))   # 3min
+OPENAI_SUPERVISOR_MAX_CONVS = int(os.environ.get('OPENAI_SUPERVISOR_MAX_CONVS', '25'))     # por ciclo
+OPENAI_SUPERVISOR_LOOKBACK_MIN = int(os.environ.get('OPENAI_SUPERVISOR_LOOKBACK_MIN', '120'))  # convs com atividade nos ultimos 2h
 _last_openai_supervisor_ts = 0
 _openai_supervisor_audited = {}  # conv_id -> ts da ultima auditoria nesse processo
 
@@ -5584,30 +5584,55 @@ def process_supervisor_loop():
 #   marca handoff_active(motivo='supervisor_block') -> agente CALA na conv.
 # Findings ficam em agent_audit_findings (visiveis em dashboard).
 
-_OPENAI_SUPERVISOR_PROMPT = """Voce e um auditor que revisa conversas de um agente de IA brasileiro com alunos universitarios.
+_OPENAI_SUPERVISOR_PROMPT = """Voce e um auditor SENIOR de qualidade que revisa conversas de um agente de IA com alunos universitarios da Cruzeiro do Sul.
 
-Sua tarefa: identificar SE o agente cometeu algum dos problemas abaixo na ultima janela da conversa.
+Contexto do agente:
+- E um canal de ATENDIMENTO ACADEMICO (NaO comercial — matricula deve ser orientada via consultor).
+- Horario de atendimento: Seg-Sex 9h-20h, Sab 9h-13h. Fora disso o bot deve dizer "fora do horario" OU oferecer fila pre-abertura quando faltar <= 60min para 9h.
+- Regras canonicas que o bot DEVE seguir:
+  * A1 (prova regimental) do MES VIGENTE: dizer que a nota e divulgada ate o final do mes. NaO mandar procurar tutor.
+  * A1 de MES ANTERIOR: orientar a procurar tutor/professor.
+  * Sem mes: perguntar de qual mes e a A1.
+  * MasterClass: enviar instrucao canonica (link, prazo 48-72h, email masterclass@cruzeirodosul.edu.br).
+  * Polo / visita presencial: usar endereco canonico OFICIAL, NUNCA inventar endereco. Transferir para humano se aluno demonstra dificuldade.
+  * Retencao (cancelar/trancar): transferir para Wesley.
+- O bot tem dedup; nao deve enviar a mesma mensagem (ou mensagem com mesmo SIGNIFICADO) 2x.
+- Apos um handoff humanizado ("vou te transferir para X"), o bot NaO pode mais responder na conv.
 
-PROBLEMAS POSSIVEIS:
-- "repeticao_resposta": bot mandou 2 mensagens com SIGNIFICADO equivalente em sequencia (mesmo que palavras diferentes)
-- "contradicao": bot afirmou X e depois Y inconsistente com X
-- "falha_pre_opening": bot disse que esta "fora do horario" quando deveria ter oferecido fila pre-abertura (acontece quando falta <= 60min para 9h em dia util ou sabado)
-- "sobre_resposta": bot continuou respondendo apos uma mensagem de handoff/transferencia humanizada (tipo "vou te transferir para X" ou "Wesley vai retomar amanha")
-- "duplicado_distribuicao": ha 2 ou mais notas internas de "Distribuicao automatica" para a mesma conv
-- "ok": NENHUM dos problemas acima
+SUA TAREFA: identifique SE o agente cometeu qualquer problema na ultima janela da conversa.
+
+TIPOS DE PROBLEMA (escolha o que melhor descreve; use 'outro' se nao se encaixar):
+- "repeticao": 2+ mensagens do bot com mesmo significado, mesmo que com palavras diferentes
+- "contradicao": bot afirmou X depois Y inconsistente
+- "falha_pre_opening": disse "fora do horario" quando deveria ter oferecido fila pre-abertura
+- "sobre_resposta": bot continuou respondendo apos mensagem de handoff humano
+- "duplicado_distribuicao": 2+ notas "Distribuicao automatica" pra mesma conv
+- "resposta_generica": bot mandou "eu entendo"/"ok"/empatia vazia sem agregar nada (especialmente depois de info do aluno)
+- "regra_a1_errada": aluno falou sobre A1 e bot nao seguiu a regra (mandou pro tutor sendo do mes vigente, ou nao perguntou o mes)
+- "polo_alucinado": bot informou endereco/CEP de polo que parece inventado ou divergente do oficial
+- "tom_inadequado": frio, formal demais, ou nao acolhedor pra contexto sensivel (cancelamento, problema serio)
+- "nao_respondeu_pergunta": aluno fez uma pergunta especifica e o bot ignorou / respondeu outra coisa
+- "informacao_incorreta": bot deu prazo/email/procedimento que nao corresponde ao padrao do time
+- "perdido_conversa": bot enviou info e nao houve follow-up nem encerramento (deveria ter feito proativamente)
+- "matricula_mal_direcionada": aluno disse que quer matricular e bot nao orientou que e canal academico ou nao transferiu pra consultor
+- "alucinacao_geral": bot inventou algo que nao consta na base (numero, fato, prazo, link)
+- "outro": qualquer outro problema relevante de qualidade — descreva no resumo
+- "ok": nenhum problema observavel
 
 SEVERIDADE:
-- "alta": problema grave que prejudica o aluno (repeticao identica, sobre_resposta apos handoff)
-- "media": problema visivel mas com baixo impacto
-- "baixa": suspeita leve
+- "alta": prejudica o aluno claramente (info errada, repeticao, regra quebrada, alucinacao critica como endereco de polo)
+- "media": qualidade ruim mas sem prejuizo direto (resposta_generica, tom_inadequado, perdido_conversa)
+- "baixa": suspeita leve, ambiguo
 
-Retorne EXCLUSIVAMENTE JSON valido com os campos:
+Seja RIGOROSO mas justo: se tem duvida, marque como "baixa" ou "ok". Nao invente problemas. Se voce vir algo que prejudica o atendimento ainda que nao esteja no catalogo, use "outro".
+
+Retorne EXCLUSIVAMENTE JSON valido:
 {
-  "tem_problema": true/false,
-  "tipo": "<um dos tipos acima ou ok>",
+  "tem_problema": true|false,
+  "tipo": "<tipo>",
   "severidade": "alta|media|baixa|nenhuma",
-  "resumo": "<1 frase explicando>",
-  "trecho_problematico": "<texto curto que evidencia o problema>"
+  "resumo": "<1-2 frases explicando o que aconteceu e por que e problema>",
+  "trecho_problematico": "<trecho curto da conversa que evidencia>"
 }
 
 NAO inclua nada alem do JSON.
@@ -5686,8 +5711,11 @@ def _openai_supervisor_audit_conv(conv_id, msgs_window):
         return None
     if not msgs_window:
         return None
+    # Filtro minimo: precisa ter pelo menos 1 msg do bot E 1 do aluno para
+    # ter algo significativo para auditar (era >=2 do bot, muito restritivo).
     bot_count = sum(1 for r, _, _, _ in msgs_window if r == 'bot')
-    if bot_count < 2:
+    aluno_count = sum(1 for r, _, _, _ in msgs_window if r == 'aluno')
+    if bot_count < 1 or aluno_count < 1:
         return None
     convo_str = []
     for role, body, _, _ in msgs_window[-10:]:
@@ -5703,8 +5731,8 @@ def _openai_supervisor_audit_conv(conv_id, msgs_window):
                 {'role': 'user', 'content': f"Conversa (cronologica):\n{convo_text}\n\nAnalise."}
             ],
             temperature=0.0,
-            max_tokens=300,
-            timeout=30,
+            max_tokens=600,
+            timeout=45,
         )
         content = resp.choices[0].message.content or '{}'
         parsed = json.loads(content)
@@ -5743,8 +5771,8 @@ def process_openai_supervisor_loop():
         if not cid:
             continue
         last_audit_ts = _openai_supervisor_audited.get(cid, 0)
-        # nao re-auditar mesma conv mais que 1x a cada 15min
-        if now_ts - last_audit_ts < 15 * 60:
+        # nao re-auditar mesma conv mais que 1x a cada 10min (era 15)
+        if now_ts - last_audit_ts < 10 * 60:
             continue
         # ignorar convs ja com handoff supervisor_block ativo
         try:
