@@ -4632,7 +4632,7 @@ SUPERVISOR_HUMAN_GRACE_S = 5 * 60               # se humano respondeu nos ultimo
 # falha do pre_opening, etc) e grava findings em agent_audit_findings.
 # Custo controlado por intervalo + cap por ciclo.
 OPENAI_SUPERVISOR_ENABLED = os.environ.get('OPENAI_SUPERVISOR_ENABLED', '1') in ('1', 'true', 'True')
-OPENAI_SUPERVISOR_MODEL = os.environ.get('OPENAI_SUPERVISOR_MODEL', 'gpt-4o')
+OPENAI_SUPERVISOR_MODEL = os.environ.get('OPENAI_SUPERVISOR_MODEL', 'gpt-5.1')
 OPENAI_SUPERVISOR_INTERVAL_S = int(os.environ.get('OPENAI_SUPERVISOR_INTERVAL_S', '300'))   # 5min
 OPENAI_SUPERVISOR_MAX_CONVS = int(os.environ.get('OPENAI_SUPERVISOR_MAX_CONVS', '15'))     # por ciclo
 OPENAI_SUPERVISOR_LOOKBACK_MIN = int(os.environ.get('OPENAI_SUPERVISOR_LOOKBACK_MIN', '60'))  # convs com atividade nos ultimos 60min

@@ -7,6 +7,48 @@
 
 ---
 
+### [2026-05-20] - Auto-correção de findings + upgrade para GPT-5.1
+
+**Decisão**
+- Trocar `OPENAI_SUPERVISOR_MODEL` default de `gpt-4o` para `gpt-5.1`
+  (reasoning forte, contexto 400K, ~4x mais barato em produção).
+- Criar endpoint `POST /api/audit/findings/{id}/fix` que executa correção
+  automática sob demanda. Primeiro handler suportado: `assignment_mismatch`
+  → reaplica PATCH lead+business+change-attendant até convergir (5 retries
+  com backoff). Se sucesso, finding marcado `resolved_by='auto-fix:<tipo>'`.
+- Botão "Corrigir agora" na aba Auditoria IA do Cockpit, em verde, separado
+  do "Apenas arquivar" (que continua sendo arquivamento sem correção).
+- Maps de atendentes (`ATTENDANT_MAP`, `CRM_ATTENDANT_MAP`,
+  `STAGE_ATENDIMENTO_ID`) duplicados no `kb_api.py` por enquanto — sem
+  refatoração para módulo compartilhado para não tocar o agente em produção.
+
+**Contexto**
+Usuário relatou que precisava corrigir manualmente no CRM cada vez que a
+verificação determinística (`_enforce_assignment_consistency`) flagrava
+divergência. Pediu supervisor "inteligente o suficiente para arrumar
+sozinho" e modelo OpenAI mais recente (GPT-4o "muito antigo").
+
+**Alternativas descartadas**
+- *Refatorar módulo compartilhado já agora*: maior risco em produção
+  funcionando; postergado.
+- *Loop autônomo ON por default*: descartado nesta fase. Auto-fix é
+  acionado pelo botão — usuário valida antes de virar autônomo.
+- *Modelo GPT-5.5* (~US$10/dia): GPT-5.1 atende reasoning necessário com
+  custo 4x menor.
+- *Função compartilhada via HTTP entre kb_api e agente*: o agente não
+  expõe HTTP; complexidade de IPC não compensa para uso pontual.
+
+**Impacto**
+- Custo OpenAI: ~US$4/dia (estimado para 4.3k chamadas/dia com gpt-5.1).
+- UI: card de finding ganha botão verde "Corrigir agora" para
+  `assignment_mismatch`; cinza "Apenas arquivar" para os demais.
+- Manutenção: maps de atendentes devem ser atualizados em DOIS lugares
+  (agente_ao_vivo_v4.py e kb_api.py) até refatoração futura.
+- Reversível: setar env `OPENAI_SUPERVISOR_MODEL=gpt-4o` reverte modelo;
+  remover endpoint /fix reverte auto-correção.
+
+---
+
 ### [2026-05-20] - Endereços oficiais dos polos + intent de visita presencial
 
 **Decisão**

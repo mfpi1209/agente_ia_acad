@@ -2171,9 +2171,10 @@ function renderAuditList(items){
         ${trecho}
         ${win?`<details class="mt-2"><summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-700">Ver janela analisada</summary><div class="mt-1.5 p-2 bg-gray-50 rounded-lg space-y-0.5">${win}</div></details>`:''}
         ${links?`<div class="mt-2 flex flex-wrap items-center gap-1">${links}</div>`:''}
-        <div class="mt-2 flex items-center gap-2 text-xs">
-          ${!it.resolved_at?`<button class="btn btn-p btn-sm" onclick="resolveAudit(${it.id},false)"><i class="fas fa-check"></i> Resolver</button>`:''}
-          ${(!it.resolved_at&&it.action_taken==='agent_silenced')?`<button class="btn btn-w btn-sm" onclick="resolveAudit(${it.id},true)"><i class="fas fa-unlock"></i> Resolver + Liberar agente</button>`:''}
+        <div class="mt-2 flex items-center gap-2 text-xs flex-wrap">
+          ${!it.resolved_at && it.problem_type==='assignment_mismatch'?`<button id="fix-${it.id}" class="btn btn-sm" onclick="autoFixAudit(${it.id})" style="background:#16a34a;color:#fff;font-size:11px;padding:6px 12px;border:none;border-radius:6px;cursor:pointer;"><i class="fas fa-wand-magic-sparkles mr-1"></i>Corrigir agora</button>`:''}
+          ${!it.resolved_at?`<button class="btn btn-sm" onclick="resolveAudit(${it.id},false)" style="background:#6b7280;color:#fff;font-size:11px;padding:6px 12px;border:none;border-radius:6px;cursor:pointer;"><i class="fas fa-archive"></i> Apenas arquivar</button>`:''}
+          ${(!it.resolved_at&&it.action_taken==='agent_silenced')?`<button class="btn btn-w btn-sm" onclick="resolveAudit(${it.id},true)"><i class="fas fa-unlock"></i> Liberar agente</button>`:''}
           <span class="text-gray-400 ml-auto">modelo: ${esc(it.model||'')}</span>
         </div>
       </div>`;
@@ -2181,7 +2182,35 @@ function renderAuditList(items){
 }
 async function resolveAudit(id,unblock){
   const r=await fetch(A+'/api/audit/findings/'+id+'/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({unblock})});
-  if(r.ok){toast(unblock?'Resolvido + agente liberado':'Resolvido');loadAuditFindings();}else{toast('Erro','error');}
+  if(r.ok){toast(unblock?'Arquivado + agente liberado':'Arquivado');loadAuditFindings();}else{toast('Erro','error');}
+}
+
+async function autoFixAudit(id){
+  const btn=document.getElementById('fix-'+id);
+  const orig=btn?btn.innerHTML:'';
+  if(btn){btn.disabled=true;btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> Corrigindo...';}
+  try{
+    const r=await fetch(A+'/api/audit/findings/'+id+'/fix',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const d=await r.json();
+    if(d.ok && d.fixed){
+      toast('Corrigido automaticamente ✓','success');
+      loadAuditFindings();
+    }else if(d.ok && !d.fixed){
+      const res=d.result||{};
+      const parts=[];
+      if(!res.ok_lead) parts.push('Lead');
+      if(!res.ok_biz) parts.push('Negócio');
+      if(!res.ok_chat) parts.push('Chat');
+      toast('Correção parcial: '+(parts.join(', ')||'?')+' ainda divergente após '+(res.attempts||'?')+' tentativas','error');
+      if(btn){btn.disabled=false;btn.innerHTML=orig;}
+    }else{
+      toast('Erro: '+(d.error||'desconhecido'),'error');
+      if(btn){btn.disabled=false;btn.innerHTML=orig;}
+    }
+  }catch(e){
+    toast('Erro de rede','error');
+    if(btn){btn.disabled=false;btn.innerHTML=orig;}
+  }
 }
 
 // ==== FORA DO HORÁRIO ====

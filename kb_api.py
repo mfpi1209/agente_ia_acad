@@ -1762,6 +1762,233 @@ async def find_duplicates():
 
 DCZ_CRM = 'https://crm.g1.datacrazy.io/api/crm'
 
+# === Maps de atendentes (espelho do agente_ao_vivo_v4) ===
+# Mantidos aqui para o endpoint de auto-fix poder executar PATCHes diretamente
+# no DCZ sem depender do processo do agente. Se atualizar la, atualizar aqui.
+STAGE_ATENDIMENTO_ID = 'ce42afe6-757f-405c-aa34-6668f4a75d07'
+ATTENDANT_MAP = {
+    'julia':   '69161295adb204a6c1033c27',
+    'marilia': '6903721f1be7fd548fbd5cd3',
+    'gustavo': '69026c3a4c877a72ba961aa6',
+    'mariana': '69025e95b4c8740e16bb5fbf',
+    'debora':  '69025ddf04698c58701e2792',
+    'joyce':   '69024f58706ac6e207bf961e',
+    'emanuel': '690248cb1f4a6684ed64de58',
+    'jessica': '690247b616be0c8343ba8b3a',
+    'camila':  '69024741a25c3347e8bdcb4d',
+    'danubia': '6902473c20efbbc9adb9d08f',
+    'wesley':  '69024605706ac6e207a35209',
+    'felipe':  '696fcd21767a0bfa800d1034',
+    'beatriz': '6989ef9a6ae58a6435bd2438',
+}
+CRM_ATTENDANT_MAP = {
+    'julia':   'e85ac56f-0dbb-4233-9825-b6b1616d07f7',
+    'marilia': '79dc861b-152e-4e8d-8bcf-a99ff64090ba',
+    'gustavo': 'a19ff106-ca9b-42aa-b7cd-3d3ac5231b9f',
+    'mariana': 'eeb44e51-1193-4d77-812b-7b6873d011c8',
+    'debora':  '26882d34-6787-4a06-aa8a-691b42406570',
+    'joyce':   'b4a6025c-b5dc-4261-980f-fac1309637fd',
+    'emanuel': '0b7f49cb-6fba-4f7b-8de8-f838fa03ea08',
+    'jessica': 'b0335732-776e-4bf5-9d5b-44830cbca10d',
+    'camila':  'e8e5ddd9-796c-4f89-8670-c5cbf3a2f02f',
+    'danubia': 'ab86c173-3353-4c43-9a2e-0a90507bb7bf',
+    'wesley':  'dd6cbed7-7666-45d1-bd90-368c8b97e217',
+    'felipe':  '59039319-9f52-4ec8-8e12-e554bcd7a9ef',
+    'beatriz': 'ab65b480-1761-42d8-815f-c7e3c8a7b6b4',
+}
+
+
+def _norm_attendant_name(name):
+    import unicodedata
+    if not name:
+        return ''
+    n = name.strip().lower()
+    n = ''.join(c for c in unicodedata.normalize('NFD', n)
+                if unicodedata.category(c) != 'Mn')
+    return n
+
+
+def _lookup_attendant_id_api(name, table):
+    """Resolve attendant_id por nome (full -> first -> prefix-match)."""
+    norm = _norm_attendant_name(name)
+    if not norm:
+        return None
+    if norm in table:
+        return table[norm]
+    first = norm.split()[0] if norm else ''
+    if first and first in table:
+        return table[first]
+    for k, v in table.items():
+        if norm.startswith(k) or k in norm.split():
+            return v
+    return None
+
+
+def _dcz_perform_assignment_fix(conv_id, lead_id, phone, expected_name,
+                                max_retries=5):
+    """Re-aplica PATCH lead + business + change-attendant ate convergir.
+    Versao da API (paralela ao _enforce_assignment_consistency do agente).
+
+    Retorna dict com {ok_lead, ok_biz, ok_chat, attempts, biz_id, lead_id,
+    final_lead_att, final_biz_att, final_chat_att, expected_crm_id,
+    expected_chat_id, expected_name, error_log[]}.
+    """
+    h = {'Authorization': f'Bearer {DCZ_TOKEN}', 'Content-Type': 'application/json'}
+    expected_crm_id = _lookup_attendant_id_api(expected_name, CRM_ATTENDANT_MAP) or ''
+    expected_chat_id = _lookup_attendant_id_api(expected_name, ATTENDANT_MAP) or ''
+    result = {
+        'ok_lead': False, 'ok_biz': False, 'ok_chat': False,
+        'attempts': 0, 'biz_id': '', 'lead_id': lead_id,
+        'final_lead_att': '', 'final_biz_att': '', 'final_chat_att': '',
+        'expected_crm_id': expected_crm_id,
+        'expected_chat_id': expected_chat_id,
+        'expected_name': expected_name,
+        'error_log': [],
+    }
+    if not expected_crm_id and not expected_chat_id:
+        result['error_log'].append(f"nome '{expected_name}' nao mapeado")
+        return result
+
+    def _read_lead_att():
+        if not lead_id:
+            return ''
+        try:
+            r = http_requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=h, timeout=10)
+            if r.status_code != 200:
+                result['error_log'].append(f"GET lead status={r.status_code}")
+                return ''
+            ld = r.json()
+            att = ld.get('attendant') or {}
+            return att.get('id', '') if isinstance(att, dict) else (att or '')
+        except Exception as e:
+            result['error_log'].append(f"GET lead err: {e}")
+            return ''
+
+    def _find_biz():
+        if lead_id:
+            try:
+                r = http_requests.get(f'{DCZ_CRM}/leads/{lead_id}/businesses',
+                                      headers=h, timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    bl = data.get('data', data) if isinstance(data, dict) else data
+                    if isinstance(bl, list) and bl:
+                        b = bl[0]
+                        return (b.get('id', '') if isinstance(b, dict) else str(b),
+                                b if isinstance(b, dict) else {})
+            except Exception as e:
+                result['error_log'].append(f"sub-biz err: {e}")
+        if phone:
+            clean = phone.replace('+', '').replace(' ', '').replace('-', '')
+            for try_phone in [clean, ('55' + clean) if not clean.startswith('55') else clean[2:]]:
+                try:
+                    r = http_requests.get(f'{DCZ_CRM}/businesses', headers=h,
+                                          params={'search': try_phone, 'limit': 10},
+                                          timeout=10)
+                    if r.status_code != 200:
+                        continue
+                    data = r.json()
+                    bl = data.get('data', data) if isinstance(data, dict) else data
+                    if not isinstance(bl, list):
+                        continue
+                    for b in bl:
+                        b_lead = b.get('leadId') or ''
+                        if not b_lead and isinstance(b.get('lead'), dict):
+                            b_lead = b['lead'].get('id', '')
+                        if lead_id and b_lead == lead_id:
+                            return b.get('id', ''), b
+                    if bl:
+                        return bl[0].get('id', ''), bl[0]
+                except Exception:
+                    continue
+        return '', {}
+
+    def _read_biz_att(biz_obj, biz_id):
+        if biz_obj:
+            att = biz_obj.get('attendant') or {}
+            if isinstance(att, dict) and att.get('id'):
+                return att.get('id', '')
+        if not biz_id:
+            return ''
+        try:
+            r = http_requests.get(f'{DCZ_CRM}/businesses/{biz_id}', headers=h, timeout=10)
+            if r.status_code != 200:
+                return ''
+            bd = r.json()
+            att = bd.get('attendant') or {}
+            return att.get('id', '') if isinstance(att, dict) else (att or '')
+        except Exception:
+            return ''
+
+    def _read_chat_att():
+        if not conv_id:
+            return ''
+        try:
+            r = http_requests.get(f'{DCZ_MSG}/messaging/conversations/{conv_id}',
+                                  headers=h, timeout=10)
+            if r.status_code != 200:
+                return ''
+            cd = r.json()
+            att = cd.get('attendant') or {}
+            if isinstance(att, dict):
+                return att.get('id', '')
+            return cd.get('attendantId', '') or ''
+        except Exception:
+            return ''
+
+    backoff = [0.5, 1.0, 2.0, 3.0, 4.0]
+    for attempt in range(max_retries + 1):
+        result['attempts'] = attempt + 1
+        biz_id, biz_obj = _find_biz()
+        result['biz_id'] = biz_id
+
+        cur_lead = _read_lead_att()
+        cur_biz = _read_biz_att(biz_obj, biz_id)
+        cur_chat = _read_chat_att()
+        result['final_lead_att'] = cur_lead
+        result['final_biz_att'] = cur_biz
+        result['final_chat_att'] = cur_chat
+
+        lead_ok = (cur_lead == expected_crm_id) if lead_id else True
+        biz_ok = (cur_biz == expected_crm_id) if biz_id else False
+        chat_ok = (cur_chat == expected_chat_id) if expected_chat_id else True
+
+        result['ok_lead'] = lead_ok
+        result['ok_biz'] = biz_ok
+        result['ok_chat'] = chat_ok
+
+        if lead_ok and biz_ok and chat_ok:
+            return result
+
+        if attempt >= max_retries:
+            break
+
+        if not lead_ok and lead_id and expected_crm_id:
+            try:
+                http_requests.patch(f'{DCZ_CRM}/leads/{lead_id}', headers=h,
+                                    json={'attendant': {'id': expected_crm_id}},
+                                    timeout=10)
+            except Exception as e:
+                result['error_log'].append(f"PATCH lead err: {e}")
+        if not biz_ok and biz_id and expected_crm_id:
+            try:
+                http_requests.patch(f'{DCZ_CRM}/businesses/{biz_id}', headers=h,
+                                    json={'attendant': {'id': expected_crm_id},
+                                          'stageId': STAGE_ATENDIMENTO_ID},
+                                    timeout=10)
+            except Exception as e:
+                result['error_log'].append(f"PATCH biz err: {e}")
+        if not chat_ok and expected_chat_id and conv_id:
+            try:
+                http_requests.post(
+                    f'{DCZ_MSG}/messaging/conversations/{conv_id}/change-attendant',
+                    headers=h, json={'attendantId': expected_chat_id}, timeout=15)
+            except Exception as e:
+                result['error_log'].append(f"change-attendant err: {e}")
+        time.sleep(backoff[min(attempt, len(backoff) - 1)])
+
+    return result
+
 @app.get("/api/student/{phone}")
 async def get_student(phone: str):
     """Busca dados do aluno no DataCrazy CRM + memória local."""
@@ -2347,6 +2574,74 @@ async def audit_findings_resolve(finding_id: int, request: Request):
         conn.commit()
         cur.close()
     return {'ok': True, 'id': finding_id, 'conv_id': conv_id, 'unblocked': unblock}
+
+
+@app.post("/api/audit/findings/{finding_id}/fix")
+async def audit_findings_auto_fix(finding_id: int, request: Request):
+    """Auto-corrige o problema descrito no finding (sem precisar de
+    intervencao manual no CRM). Por enquanto suporta:
+    - assignment_mismatch: reaplica PATCH lead+business+change-attendant
+      ate convergir (5 retries com backoff).
+
+    Se a correcao convergir, marca o finding como resolved_by='auto-fix:<tipo>'.
+    Se nao convergir, mantem em aberto e retorna o estado parcial p/ o front
+    decidir se mostra como sucesso parcial / pede intervencao humana.
+    """
+    _ensure_audit_table_api()
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT id, conv_id, phone, problem_type, detail, resolved_at
+            FROM agent_audit_findings WHERE id = %s
+        """, (finding_id,))
+        row = cur.fetchone()
+        if not row:
+            cur.close()
+            raise HTTPException(404, 'finding nao encontrado')
+        if row['resolved_at']:
+            cur.close()
+            return {'ok': True, 'already_resolved': True, 'id': finding_id}
+
+        ptype = row['problem_type'] or ''
+        detail = row['detail'] or {}
+        if isinstance(detail, str):
+            try:
+                detail = json.loads(detail)
+            except Exception:
+                detail = {}
+
+        conv_id = detail.get('conv_id') or row['conv_id'] or ''
+        lead_id = detail.get('lead_id', '') or ''
+        phone = detail.get('phone') or row['phone'] or ''
+        expected_name = detail.get('expected_name', '') or ''
+
+        # ---- DISPATCH ----
+        if ptype == 'assignment_mismatch':
+            if not expected_name or (not lead_id and not conv_id):
+                cur.close()
+                return {'ok': False, 'error': 'detail_incompleto',
+                        'detail_keys': list(detail.keys())}
+            fix_result = _dcz_perform_assignment_fix(
+                conv_id=conv_id, lead_id=lead_id, phone=phone,
+                expected_name=expected_name, max_retries=5,
+            )
+            success = bool(fix_result.get('ok_lead')
+                           and fix_result.get('ok_biz')
+                           and fix_result.get('ok_chat'))
+            if success:
+                cur.execute("""
+                    UPDATE agent_audit_findings
+                    SET resolved_at = NOW(), resolved_by = %s
+                    WHERE id = %s
+                """, (f'auto-fix:{ptype}', finding_id))
+                conn.commit()
+            cur.close()
+            return {'ok': True, 'fixed': success, 'result': fix_result,
+                    'id': finding_id}
+
+        cur.close()
+        return {'ok': False, 'error': 'no_handler_for_problem_type',
+                'problem_type': ptype}
 
 
 @app.post("/api/audit/findings/bulk-resolve")
