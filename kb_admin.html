@@ -2162,7 +2162,10 @@ function renderAuditList(items){
           <span class="badge b-gray">${esc(typeLabel)}</span>
           <span class="text-xs text-gray-400">${dt}</span>
           ${resolved}${blocked}
-          <span class="ml-auto text-xs text-gray-400">${it.phone?'tel: '+esc(it.phone):'conv: <span class="font-mono">'+(it.conv_id||'').substring(0,12)+'</span>'}</span>
+          <div class="ml-auto text-right">
+            <div class="text-xs text-gray-400">${it.phone?'tel: '+esc(it.phone):'conv: <span class="font-mono">'+(it.conv_id||'').substring(0,12)+'</span>'}</div>
+            ${it.student_first_name?`<div class="text-xs text-gray-500 font-medium">${esc(it.student_first_name)}</div>`:''}
+          </div>
         </div>
         <div class="mt-2 text-sm text-gray-800">${esc(it.summary||'')}</div>
         ${trecho}

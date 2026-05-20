@@ -2246,23 +2246,44 @@ async def audit_findings_list(
         elif status == 'resolved':
             conds.append("resolved_at IS NOT NULL")
         where = " AND ".join(conds)
+        # Prefix de WHERE para o sub-select de student_memory (sem precisar repetir CONDS la)
         with get_db() as conn:
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            # LEFT JOIN com student_memory pelo phone (normalizado: so digitos)
+            # para enriquecer o finding com o nome do aluno quando disponivel.
             cur.execute(f"""
-                SELECT id, conv_id, phone, model, severity, problem_type,
-                       summary, detail, action_taken, resolved_at, resolved_by,
-                       created_at
-                FROM agent_audit_findings
+                SELECT
+                    f.id, f.conv_id, f.phone, f.model, f.severity, f.problem_type,
+                    f.summary, f.detail, f.action_taken, f.resolved_at, f.resolved_by,
+                    f.created_at,
+                    sm.student_name
+                FROM agent_audit_findings f
+                LEFT JOIN student_memory sm
+                    ON regexp_replace(COALESCE(sm.phone, ''), '\\D', '', 'g')
+                       = regexp_replace(COALESCE(f.phone, ''), '\\D', '', 'g')
+                   AND length(regexp_replace(COALESCE(f.phone, ''), '\\D', '', 'g')) > 0
                 WHERE {where}
-                ORDER BY created_at DESC
+                ORDER BY f.created_at DESC
                 LIMIT %s
             """, params + [limit])
             rows = cur.fetchall()
+            # Normaliza timestamps marcando UTC explicitamente para o browser
+            # converter para o timezone local (resolvendo o "19:01" que era 16:01 BRT).
+            from datetime import timezone as _tz
             for r in rows:
                 if r.get('created_at'):
-                    r['created_at'] = r['created_at'].isoformat()
+                    ts = r['created_at']
+                    if hasattr(ts, 'tzinfo') and ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=_tz.utc)
+                    r['created_at'] = ts.isoformat()
                 if r.get('resolved_at'):
-                    r['resolved_at'] = r['resolved_at'].isoformat()
+                    ts = r['resolved_at']
+                    if hasattr(ts, 'tzinfo') and ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=_tz.utc)
+                    r['resolved_at'] = ts.isoformat()
+                # extrai primeiro nome p/ exibicao compacta no frontend
+                full = (r.get('student_name') or '').strip()
+                r['student_first_name'] = full.split()[0] if full else ''
             # contagem global por severidade — normaliza en->pt (high/medium/low -> alta/media/baixa)
             # pois o supervisor OpenAI grava em pt e a verificacao de distribuicao em en.
             cur.execute(f"""
