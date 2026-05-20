@@ -7,6 +7,38 @@
 
 ---
 
+### [2026-05-20] - Supervisor loop (follow-up / close independente da memória)
+
+**Decisão**
+Adicionar `process_supervisor_loop()` que roda a cada 10 ciclos do agente (~30s),
+consultando o DCZ diretamente (timestamps + últimas mensagens) para garantir:
+1. **Follow-up 1** quando o agente respondeu e o aluno ficou em silêncio ≥ `FOLLOWUP_1_DELAY`
+   sem mensagem de follow-up já enviada.
+2. **Encerramento** quando o último envio foi follow-up e o silêncio ≥ `CLOSE_DELAY`.
+
+Dedup persistente em `supervisor_actions` (Postgres). Ao agir, sincroniza
+`_conv_states` para evitar duplicata no loop em memória.
+
+**Contexto**
+Após restarts (watchdog, rebuild Easypanel), `_conv_states` era zerado e conversas
+em espera de follow-up/close ficavam paradas — o usuário reportou alunos com 10–40min
+sem "Ainda está por aí?" mesmo com agente online. Resgates manuais (`_send_followup_image.py`)
+resolveram o sintoma pontual, mas não a causa.
+
+**Alternativas descartadas**
+- *Persistir `_conv_states` inteiro no banco:* mais escrita e ainda perde estado em crash
+  entre snapshots.
+- *Só aumentar `IN_HOURS_RESCUE_MAX_AGE`:* não cobre follow-up (aluno já foi respondido).
+- *Supervisor só follow-up sem close:* deixaria conversas eternas após follow-up.
+
+**Impacto**
+- Arquivo: `agente_ao_vivo_v4.py` — bloco `SUPERVISOR LOOP`, hook em `cycle % 10`.
+- Tabela nova: `supervisor_actions` (auto-criada no primeiro ciclo).
+- Não substitui resgates (`IN-HOURS`, `AH`, `POST-CLOSE`); complementa o fluxo normal.
+- Ignora conversas com atendente humano atribuído (mesma regra do follow-up em memória).
+
+---
+
 ### [2026-05-19] - Integração CAA SIAA (snapshot diário de solicitações)
 
 **Decisão**

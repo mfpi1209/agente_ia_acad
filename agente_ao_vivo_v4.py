@@ -3885,6 +3885,242 @@ def process_post_close_rescue():
         p(f"  [POST-CLOSE-RESCUE] Total tratadas: {rescued}")
 
 
+# ===================== SUPERVISOR LOOP (follow-up / close via DCZ, sem depender de _conv_states) =====================
+_SUPERVISOR_TABLE_READY = False
+SUPERVISOR_MAX_FOLLOWUP_PER_CYCLE = 8
+SUPERVISOR_MAX_CLOSE_PER_CYCLE = 5
+SUPERVISOR_MAX_FOLLOWUP_AGE_S = 8 * 3600       # nao manda 1o follow-up se silencio > 8h
+SUPERVISOR_MAX_CLOSE_AGE_S = 24 * 3600
+SUPERVISOR_ACTION_COOLDOWN_S = 2 * 3600        # nao repete mesma acao na mesma conv em 2h
+
+_FOLLOWUP_BODY_MARKERS = (
+    'ainda está por aí', 'ainda esta por ai', 'tudo certo por aí', 'tudo certo por ai',
+    'se tiver mais alguma dúvida', 'se precisar de mais alguma coisa',
+)
+_HANDOFF_BODY_MARKERS = (
+    'vou te transferir', 'vou te conectar', 'vou pedir para', 'distribuição automática',
+)
+
+
+def _ensure_supervisor_table():
+    global _SUPERVISOR_TABLE_READY
+    if _SUPERVISOR_TABLE_READY:
+        return
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS supervisor_actions (
+                id SERIAL PRIMARY KEY,
+                conv_id VARCHAR(64) NOT NULL,
+                action VARCHAR(32) NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_supervisor_conv_action
+            ON supervisor_actions (conv_id, action, created_at DESC)
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        _SUPERVISOR_TABLE_READY = True
+    except Exception as e:
+        p(f"  [SUPERVISOR] tabela indisponivel (memoria only): {e}")
+
+
+def _supervisor_recent_action(conv_id, action, cooldown_s=SUPERVISOR_ACTION_COOLDOWN_S):
+    _ensure_supervisor_table()
+    if not _SUPERVISOR_TABLE_READY:
+        return False
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT 1 FROM supervisor_actions
+            WHERE conv_id = %s AND action = %s
+              AND created_at > NOW() - (%s || ' seconds')::interval
+            LIMIT 1
+        """, (conv_id, action, str(int(cooldown_s))))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _supervisor_record_action(conv_id, action):
+    _ensure_supervisor_table()
+    if not _SUPERVISOR_TABLE_READY:
+        return
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO supervisor_actions (conv_id, action) VALUES (%s, %s)",
+            (conv_id, action),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _iso_age_seconds(iso_ts):
+    if not iso_ts:
+        return None
+    try:
+        from datetime import datetime as _dt
+        dt = _dt.fromisoformat(str(iso_ts).replace('Z', '+00:00'))
+        return time.time() - dt.timestamp()
+    except Exception:
+        return None
+
+
+def _body_has_marker(body, markers):
+    b = (body or '').lower()
+    return any(m in b for m in markers)
+
+
+def _last_outbound_from_msgs(msgs):
+    """Ultima mensagem enviada (bot/atendente), mais recente primeiro na API."""
+    if not isinstance(msgs, list):
+        return None
+    for m in msgs:
+        if m.get('isInternal'):
+            continue
+        if m.get('received', False):
+            continue
+        body = (m.get('body') or m.get('text') or '').strip()
+        if body or _message_has_thread_payload(m):
+            return m
+    return None
+
+
+def _sync_conv_state_after_supervisor(cid, phone, followup_stage, waiting=True):
+    st = _conv_states.setdefault(cid, _default_conv_state())
+    st['phone'] = phone or st.get('phone', '')
+    st['waiting_for_client'] = waiting
+    st['followup_stage'] = followup_stage
+    st['inactivity_start'] = time.time()
+    st['_human_took_over'] = False
+
+
+def process_supervisor_loop():
+    """Varredura independente da memoria: garante follow-up e encerramento por inatividade.
+
+    Usa timestamps do DCZ (lastSended/lastReceived) + ultimas mensagens da thread.
+    Sobrevive a restart do agente; dedup em supervisor_actions no Postgres.
+    """
+    fu_done = 0
+    close_done = 0
+    try:
+        r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
+                         params={'limit': 250, 'status': 'open'}, timeout=35)
+        if r.status_code != 200:
+            return
+        data = r.json()
+        convs = data.get('data', data) if isinstance(data, dict) else data
+    except Exception as e:
+        p(f"  [SUPERVISOR] erro lista: {e}")
+        return
+    if not isinstance(convs, list):
+        return
+
+    for c in convs:
+        if close_done >= SUPERVISOR_MAX_CLOSE_PER_CYCLE and fu_done >= SUPERVISOR_MAX_FOLLOWUP_PER_CYCLE:
+            break
+        try:
+            cid = c.get('id', '')
+            if not cid:
+                continue
+            inst = c.get('instance', {}) or {}
+            iid = inst.get('id', '') if isinstance(inst, dict) else str(inst)
+            if iid != INSTANCE_ACADEMICO_ID:
+                continue
+            if 'finished' in (c.get('statuses', []) or []):
+                continue
+            if c.get('attendants', []):
+                continue
+
+            recv = c.get('lastReceivedMessageDate', '') or ''
+            sent = c.get('lastSendedMessageDate', '') or ''
+            if not sent:
+                continue
+            if recv and recv > sent:
+                continue
+
+            silence_s = _iso_age_seconds(sent)
+            if silence_s is None:
+                continue
+
+            ct = c.get('contact', {}) or {}
+            phone = (ct.get('phoneNumber', '') or ct.get('contactId', '') or '').replace('+', '').replace(' ', '')
+            if phone.startswith('55') and len(phone) > 11:
+                phone = phone[2:]
+            name = (ct.get('name', '') or '').strip()
+            first = name.split()[0] if name else ''
+            name_fmt = f", {first}" if first else ""
+
+            try:
+                msgs = get_conversation_messages_api(cid, limit=12)
+            except Exception:
+                msgs = []
+            last_out = _last_outbound_from_msgs(msgs)
+            last_body = (last_out.get('body') or last_out.get('text') or '') if last_out else ''
+
+            _tlm = c.get('lastMessage') or {}
+            if isinstance(_tlm, dict) and _is_template_message(_tlm):
+                continue
+            if last_out and _is_template_message(last_out):
+                continue
+            if _body_has_marker(last_body, _HANDOFF_BODY_MARKERS):
+                continue
+
+            # --- Estagio 2: encerrar apos follow-up sem resposta ---
+            if (close_done < SUPERVISOR_MAX_CLOSE_PER_CYCLE
+                    and silence_s >= CLOSE_DELAY
+                    and silence_s <= SUPERVISOR_MAX_CLOSE_AGE_S
+                    and _body_has_marker(last_body, _FOLLOWUP_BODY_MARKERS)):
+                if _supervisor_recent_action(cid, 'auto_close'):
+                    continue
+                lb_low = (last_body or '').lower()
+                if any(fp.lower() in lb_low for fp in LAST_MSG_CLOSE_PHRASES):
+                    continue
+                close_msg = CLOSE_INACTIVITY_MSG.format(name=name_fmt)
+                p(f"  [SUPERVISOR-CLOSE] ...{phone[-4:] if phone else '????'} {int(silence_s)}s pos-follow-up")
+                send_message_crm(cid, close_msg, buttons=CLOSE_INACTIVITY_BUTTONS)
+                log_to_db(cid, '(supervisor)', close_msg, 1.0, 'auto_close')
+                close_conversation_crm(cid, phone=phone)
+                _supervisor_record_action(cid, 'auto_close')
+                _sync_conv_state_after_supervisor(cid, phone, followup_stage=0, waiting=False)
+                conversation_greeted.discard(cid)
+                close_done += 1
+                continue
+
+            # --- Estagio 1: primeiro follow-up ---
+            if (fu_done < SUPERVISOR_MAX_FOLLOWUP_PER_CYCLE
+                    and silence_s >= FOLLOWUP_1_DELAY
+                    and silence_s <= SUPERVISOR_MAX_FOLLOWUP_AGE_S
+                    and not _body_has_marker(last_body, _FOLLOWUP_BODY_MARKERS)):
+                if _supervisor_recent_action(cid, 'followup_1'):
+                    continue
+                msg1 = FOLLOWUP_1_MSG.format(name=name_fmt)
+                p(f"  [SUPERVISOR-FU1] ...{phone[-4:] if phone else '????'} {int(silence_s)}s sem resposta")
+                send_message_crm(cid, msg1, buttons=FOLLOWUP_1_BUTTONS)
+                log_to_db(cid, '(supervisor)', msg1, 1.0, 'followup_1')
+                _supervisor_record_action(cid, 'followup_1')
+                _sync_conv_state_after_supervisor(cid, phone, followup_stage=1, waiting=True)
+                fu_done += 1
+        except Exception as e_one:
+            p(f"  [SUPERVISOR] erro conv {c.get('id', '?')[:12]}: {e_one}")
+
+    if fu_done or close_done:
+        p(f"  [SUPERVISOR] follow-up={fu_done} encerramentos={close_done}")
+
+
 def _after_hours_escalation_tier(conv_id):
     """Retorna 'first' ou 'insist' baseado em quantos pedidos de atendente
     o aluno fez dentro da janela AFTER_HOURS_INSIST_WINDOW_MIN.
@@ -6453,6 +6689,10 @@ def main():
                     process_post_close_rescue()
                 except Exception as e_pcr:
                     p(f"  [POST-CLOSE-RESCUE] Erro: {e_pcr}")
+                try:
+                    process_supervisor_loop()
+                except Exception as e_sup:
+                    p(f"  [SUPERVISOR] Erro: {e_sup}")
 
             if cycle % 2 == 0:
                 active_count = sum(1 for s in _conv_states.values() if s.get('waiting_for_client'))
