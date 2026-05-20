@@ -2259,9 +2259,9 @@ async def audit_findings_list(
                     sm.student_name
                 FROM agent_audit_findings f
                 LEFT JOIN student_memory sm
-                    ON regexp_replace(COALESCE(sm.phone, ''), '\\D', '', 'g')
-                       = regexp_replace(COALESCE(f.phone, ''), '\\D', '', 'g')
-                   AND length(regexp_replace(COALESCE(f.phone, ''), '\\D', '', 'g')) > 0
+                    ON RIGHT(regexp_replace(COALESCE(sm.phone, ''), '\\D', '', 'g'), 11)
+                       = RIGHT(regexp_replace(COALESCE(f.phone, ''), '\\D', '', 'g'), 11)
+                   AND length(regexp_replace(COALESCE(f.phone, ''), '\\D', '', 'g')) >= 10
                 WHERE {where}
                 ORDER BY f.created_at DESC
                 LIMIT %s
