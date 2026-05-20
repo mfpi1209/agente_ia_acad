@@ -2576,6 +2576,83 @@ async def audit_findings_resolve(finding_id: int, request: Request):
     return {'ok': True, 'id': finding_id, 'conv_id': conv_id, 'unblocked': unblock}
 
 
+@app.get("/api/audit/findings/{finding_id}/conversation")
+async def audit_finding_conversation(finding_id: int, limit: int = Query(30, ge=5, le=100)):
+    """Retorna o trecho da conversa associada a um finding, lendo de
+    ia_interaction_log (logs locais do agente). Cada item:
+      {created_at, role:'aluno'|'bot', body, action}
+
+    Permite ao revisor ver a conversa direto no card sem precisar abrir
+    o lead no DataCrazy.
+    """
+    _ensure_audit_table_api()
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT conv_id, phone, detail, created_at
+            FROM agent_audit_findings WHERE id = %s
+        """, (finding_id,))
+        f = cur.fetchone()
+        if not f:
+            cur.close()
+            raise HTTPException(404, 'finding nao encontrado')
+        conv_id = f['conv_id'] or ''
+        finding_ts = f.get('created_at')
+        detail = f.get('detail') or {}
+        if isinstance(detail, str):
+            try:
+                detail = json.loads(detail)
+            except Exception:
+                detail = {}
+
+        # Janela: ate `limit` interacoes em torno do momento do finding.
+        # Pegamos por conv_id, ordenadas por created_at, pegando as mais
+        # recentes ATe o momento do finding (com pequeno buffer +5min depois).
+        items = []
+        if conv_id:
+            cur.execute("""
+                SELECT created_at, pergunta_recebida, resposta_gerada, acao
+                FROM ia_interaction_log
+                WHERE conversation_id = %s
+                  AND (
+                    %s::timestamp IS NULL
+                    OR created_at <= %s::timestamp + interval '5 minutes'
+                  )
+                ORDER BY created_at DESC
+                LIMIT %s
+            """, (conv_id, finding_ts, finding_ts, limit))
+            rows = cur.fetchall()
+            # Inverte para cronologico ascendente
+            rows = list(reversed(rows))
+            from datetime import timezone as _tz
+            for r in rows:
+                ts = r['created_at']
+                if hasattr(ts, 'tzinfo') and ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_tz.utc)
+                ts_iso = ts.isoformat() if ts else ''
+                q = (r['pergunta_recebida'] or '').strip()
+                a = (r['resposta_gerada'] or '').strip()
+                act = r.get('acao') or ''
+                # Cada interacao = mensagem do aluno (se houver) + resposta do bot
+                if q and q != '(dedup)':
+                    items.append({'created_at': ts_iso, 'role': 'aluno',
+                                  'body': q, 'action': ''})
+                if a:
+                    items.append({'created_at': ts_iso, 'role': 'bot',
+                                  'body': a, 'action': act})
+
+        # tambem inclui o `window` do detail se existir (do supervisor OpenAI)
+        win = detail.get('window') if isinstance(detail, dict) else None
+        cur.close()
+        return {
+            'ok': True,
+            'finding_id': finding_id,
+            'conv_id': conv_id,
+            'items': items,
+            'supervisor_window': win if isinstance(win, list) else None,
+        }
+
+
 @app.post("/api/audit/findings/{finding_id}/fix")
 async def audit_findings_auto_fix(finding_id: int, request: Request):
     """Auto-corrige o problema descrito no finding (sem precisar de

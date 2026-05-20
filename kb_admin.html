@@ -2181,7 +2181,8 @@ function renderAuditList(items){
         </div>
         <div class="mt-2 text-sm text-gray-800">${esc(it.summary||'')}</div>
         ${trecho}
-        ${win?`<details class="mt-2"><summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-700">Ver janela analisada</summary><div class="mt-1.5 p-2 bg-gray-50 rounded-lg space-y-0.5">${win}</div></details>`:''}
+        ${win?`<details class="mt-2"><summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-700">Ver janela analisada (supervisor)</summary><div class="mt-1.5 p-2 bg-gray-50 rounded-lg space-y-0.5">${win}</div></details>`:''}
+        <details class="mt-2" id="conv-wrap-${it.id}"><summary class="cursor-pointer text-xs text-blue-600 hover:text-blue-800 font-medium" onclick="loadAuditConv(${it.id}, this)"><i class="fas fa-comments mr-1"></i>Ver conversa completa</summary><div id="conv-${it.id}" class="mt-2 p-3 bg-gray-50 rounded-lg max-h-80 overflow-y-auto text-xs space-y-1.5"><div class="text-gray-400 italic">Carregando...</div></div></details>
         ${links?`<div class="mt-2 flex flex-wrap items-center gap-1">${links}</div>`:''}
         <div class="mt-2 flex items-center gap-2 text-xs flex-wrap">
           ${!it.resolved_at && it.problem_type==='assignment_mismatch'?`<button id="fix-${it.id}" class="btn btn-sm" onclick="autoFixAudit(${it.id})" style="background:#16a34a;color:#fff;font-size:11px;padding:6px 12px;border:none;border-radius:6px;cursor:pointer;"><i class="fas fa-wand-magic-sparkles mr-1"></i>Corrigir agora</button>`:''}
@@ -2192,6 +2193,39 @@ function renderAuditList(items){
       </div>`;
   }).join('');
 }
+async function loadAuditConv(id, summaryEl){
+  // Carrega a conversa uma vez (a primeira vez que o details abre)
+  const wrap=document.getElementById('conv-wrap-'+id);
+  const box=document.getElementById('conv-'+id);
+  if(!box) return;
+  // se ja carregou, nao recarrega
+  if(box.dataset.loaded==='1') return;
+  // wrap details ja abriu por padrao no clique; se nao quiser recarregar a cada abrir, ok
+  try{
+    const r=await fetch(A+'/api/audit/findings/'+id+'/conversation?limit=40');
+    const d=await r.json();
+    if(!d.ok||!d.items||!d.items.length){
+      box.innerHTML='<div class="text-gray-400 italic">Sem mensagens registradas no banco local pra esta conversa.</div>';
+      box.dataset.loaded='1';
+      return;
+    }
+    const html=d.items.map(m=>{
+      const ts=m.created_at?new Date(m.created_at).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
+      const isAluno=m.role==='aluno';
+      const align=isAluno?'justify-start':'justify-end';
+      const bg=isAluno?'bg-white border border-gray-200':'bg-blue-50 border border-blue-200';
+      const lbl=isAluno?'Aluno':'Agente';
+      const act=m.action?`<span class="ml-2 text-gray-400 text-[10px]">[${esc(m.action)}]</span>`:'';
+      return `<div class="flex ${align}"><div class="${bg} rounded-lg p-2 max-w-[85%]"><div class="text-[10px] text-gray-400 mb-0.5">${lbl} · ${ts}${act}</div><div class="whitespace-pre-wrap break-words">${esc(m.body||'')}</div></div></div>`;
+    }).join('');
+    box.innerHTML=html;
+    box.dataset.loaded='1';
+  }catch(e){
+    console.error('loadAuditConv',e);
+    box.innerHTML='<div class="text-red-500 italic">Erro ao carregar conversa</div>';
+  }
+}
+
 async function resolveAudit(id,unblock){
   const r=await fetch(A+'/api/audit/findings/'+id+'/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({unblock})});
   if(r.ok){toast(unblock?'Arquivado + agente liberado':'Arquivado');loadAuditFindings();}else{toast('Erro','error');}
