@@ -5706,17 +5706,20 @@ def _openai_supervisor_get_window(conv_id, max_msgs=10):
 
 
 def _openai_supervisor_audit_conv(conv_id, msgs_window):
-    """Chama OpenAI e retorna dict com analise ou None em erro."""
+    """Chama OpenAI e retorna dict com analise, 'skip:<motivo>' string, ou None em erro."""
     if not OPENAI_API_KEY:
-        return None
+        return 'skip:no_api_key'
     if not msgs_window:
-        return None
-    # Filtro minimo: precisa ter pelo menos 1 msg do bot E 1 do aluno para
-    # ter algo significativo para auditar (era >=2 do bot, muito restritivo).
+        return 'skip:no_window'
+    # Filtro minimo: pelo menos 2 msgs total e pelo menos 1 do agente (bot OU
+    # humano) E 1 do aluno. Aceitamos conversas com handoff humano para auditar
+    # se o agente fez algo errado antes do handoff.
     bot_count = sum(1 for r, _, _, _ in msgs_window if r == 'bot')
+    humano_count = sum(1 for r, _, _, _ in msgs_window if r == 'humano')
     aluno_count = sum(1 for r, _, _, _ in msgs_window if r == 'aluno')
-    if bot_count < 1 or aluno_count < 1:
-        return None
+    agente_count = bot_count + humano_count
+    if agente_count < 1 or aluno_count < 1:
+        return 'skip:insufficient'
     convo_str = []
     for role, body, _, _ in msgs_window[-10:]:
         convo_str.append(f"[{role}] {body}")
@@ -5779,6 +5782,11 @@ def process_openai_supervisor_loop():
     audited = 0
     flagged_high = 0
     flagged_med = 0
+    skip_cache = 0
+    skip_block = 0
+    skip_no_window = 0
+    skip_insufficient = 0
+    skip_error = 0
     for c in convs:
         if audited >= OPENAI_SUPERVISOR_MAX_CONVS:
             break
@@ -5786,19 +5794,30 @@ def process_openai_supervisor_loop():
         if not cid:
             continue
         last_audit_ts = _openai_supervisor_audited.get(cid, 0)
-        # nao re-auditar mesma conv mais que 1x a cada 10min (era 15)
+        # nao re-auditar mesma conv mais que 1x a cada 10min
         if now_ts - last_audit_ts < 10 * 60:
+            skip_cache += 1
             continue
         # ignorar convs ja com handoff supervisor_block ativo
         try:
             ho_motivo, _ = _is_handoff_active(cid)
             if ho_motivo == 'supervisor_block':
+                skip_block += 1
                 continue
         except Exception:
             pass
         window = _openai_supervisor_get_window(cid, max_msgs=10)
         result = _openai_supervisor_audit_conv(cid, window)
+        if isinstance(result, str) and result.startswith('skip:'):
+            if 'no_window' in result:
+                skip_no_window += 1
+            elif 'insufficient' in result:
+                skip_insufficient += 1
+            else:
+                skip_error += 1
+            continue
         if result is None:
+            skip_error += 1
             continue
         audited += 1
         _openai_supervisor_audited[cid] = now_ts
@@ -5855,6 +5874,11 @@ def process_openai_supervisor_loop():
             'convs_audited': audited,
             'flagged_high': flagged_high,
             'flagged_med': flagged_med,
+            'skip_cache': skip_cache,
+            'skip_block': skip_block,
+            'skip_no_window': skip_no_window,
+            'skip_insufficient': skip_insufficient,
+            'skip_error': skip_error,
             'model': OPENAI_SUPERVISOR_MODEL,
             'interval_s': OPENAI_SUPERVISOR_INTERVAL_S,
             'lookback_min': OPENAI_SUPERVISOR_LOOKBACK_MIN,

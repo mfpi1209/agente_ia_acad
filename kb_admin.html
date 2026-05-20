@@ -2138,7 +2138,14 @@ function renderSupervisorHealth(d){
   if(errStr){color='#dc2626';label='com erro';}
   else if(!h.updated_at){color='#6b7280';label='sem dados';}
   else if(h.convs_audited===0 && (h.convs_total||0)>0){color='#d97706';label='nada auditado';}
-  el.innerHTML=`<span style="color:${color};font-weight:600;">● Supervisor ${label}</span> · modelo: <span class="font-mono">${esc(model)}</span> · último ciclo: ${lastRun} · convs ${h.convs_audited||0}/${h.convs_total||0} · findings ${flagged}`+
+  const skips=[];
+  if(h.skip_cache)skips.push(`cache:${h.skip_cache}`);
+  if(h.skip_block)skips.push(`bloq:${h.skip_block}`);
+  if(h.skip_no_window)skips.push(`sem_janela:${h.skip_no_window}`);
+  if(h.skip_insufficient)skips.push(`insuf:${h.skip_insufficient}`);
+  if(h.skip_error)skips.push(`erro:${h.skip_error}`);
+  const skipStr=skips.length?` · skips: <span class="font-mono text-gray-500">${skips.join(' ')}</span>`:'';
+  el.innerHTML=`<span style="color:${color};font-weight:600;">● Supervisor ${label}</span> · modelo: <span class="font-mono">${esc(model)}</span> · último ciclo: ${lastRun} · convs ${h.convs_audited||0}/${h.convs_total||0} · findings ${flagged}${skipStr}`+
     (errStr?`<div class="mt-1 px-2 py-1 rounded" style="background:#fef2f2;border:1px solid #fecaca;color:#991b1b;"><strong>Último erro</strong> (${errAt}): <span class="font-mono">${esc(errStr.substring(0,200))}</span></div>`:'');
 }
 function renderAuditCounts(counts){
