@@ -102,6 +102,19 @@ body.dark-mode .b-gray{background:rgba(107,114,128,.2);color:#9ca3af;}
 body.dark-mode .b-purple{background:rgba(147,51,234,.15);color:#c084fc;}
 body.dark-mode .stat-card.blue::after,.stat-card.green::after,.stat-card.yellow::after,.stat-card.purple::after,.stat-card.red::after{opacity:.1;}
 body.dark-mode .wa-bg{background:#1a1d27;}
+/* === audit chat (Ver conversa completa) === */
+.audit-chat-box{background:#f9fafb;border:1px solid #e5e7eb;}
+body.dark-mode .audit-chat-box{background:#0f1117;border-color:#2a2e3f;}
+.audit-chat-aluno{background:#ffffff;color:#111827;border:1px solid #e5e7eb;}
+body.dark-mode .audit-chat-aluno{background:#22263a;color:#e4e6ed;border-color:#2a2e3f;}
+.audit-chat-bot{background:#dbeafe;color:#1e3a8a;border:1px solid #bfdbfe;}
+body.dark-mode .audit-chat-bot{background:#1e2a4d;color:#bfdbfe;border-color:#2d3f6b;}
+.audit-chat-meta{color:#6b7280;font-size:10px;}
+body.dark-mode .audit-chat-meta{color:#9ca3af;}
+.audit-chat-action{color:#9ca3af;font-size:10px;}
+body.dark-mode .audit-chat-action{color:#6b7280;}
+.audit-chat-empty{color:#9ca3af;font-style:italic;}
+body.dark-mode .audit-chat-empty{color:#6b7085;}
 body.dark-mode .wa-bot{background:#22263a;color:#e4e6ed;}
 body.dark-mode .wa-user{background:#2e4a3e;color:#e4e6ed;}
 body.dark-mode .wa-meta{color:#6b7085;}
@@ -625,7 +638,7 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
     <div>
       <h3 class="text-lg font-bold text-gray-800"><i class="fas fa-shield-halved mr-1.5 text-purple-500"></i>Auditoria IA — Supervisor OpenAI</h3>
       <p class="text-xs text-gray-500 mt-1">Findings detectados automaticamente pelo modelo revisor. Atualiza a cada 30s.</p>
-      <div id="audit-supervisor-health" class="text-xs mt-1.5"></div>
+      <div id="audit-sup-status" class="text-xs mt-1.5"></div>
     </div>
     <div class="flex items-center gap-2 flex-wrap">
       <select id="audit-status" class="input text-sm" onchange="loadAuditFindings()">
@@ -2094,8 +2107,35 @@ const AUDIT_SEV_BADGE={
 };
 function initAudit(){
   loadAuditFindings();
+  loadAuditSupStatus();
   if(_auditTimer)clearInterval(_auditTimer);
-  _auditTimer=setInterval(loadAuditFindings,30000);
+  _auditTimer=setInterval(()=>{loadAuditFindings();loadAuditSupStatus();},30000);
+}
+
+async function loadAuditSupStatus(){
+  const el=document.getElementById('audit-sup-status');
+  if(!el)return;
+  try{
+    const r=await fetch(A+'/api/audit/supervisor-status');
+    const d=await r.json();
+    if(!d.ok||!d.stats){
+      el.innerHTML='<span class="text-gray-400">Supervisor ainda não rodou ciclos…</span>';
+      return;
+    }
+    const s=d.stats;
+    const lastAt=s.last_cycle_at?new Date(s.last_cycle_at*1000).toLocaleString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—';
+    const errStyle=s.errors>0?'color:#dc2626':'color:#6b7280';
+    el.innerHTML=`
+      <span class="font-mono">modelo: <strong>${esc(s.model||'?')}</strong></span> ·
+      ciclos: <strong>${s.cycles||0}</strong> ·
+      convs auditadas: <strong>${s.audited_total||0}</strong> ·
+      problemas detectados: <strong>${s.problems_found||0}</strong> ·
+      <span style="${errStyle}">erros: <strong>${s.errors||0}</strong>${s.last_error?' — '+esc(s.last_error).substring(0,60):''}</span> ·
+      último ciclo: ${lastAt} (auditou ${s.last_cycle_audited||0} de ${s.convs_listed||0} listadas)
+    `;
+  }catch(e){
+    el.innerHTML='<span class="text-red-500">Erro ao carregar status</span>';
+  }
 }
 async function loadAuditFindings(){
   try{
@@ -2104,49 +2144,14 @@ async function loadAuditFindings(){
     const hours=document.getElementById('audit-hours')?.value||'72';
     const qs=new URLSearchParams({status,hours,limit:'100'});
     if(sev)qs.set('severity',sev);
-    const [r,rh]=await Promise.all([
-      fetch(A+'/api/audit/findings?'+qs.toString()),
-      fetch(A+'/api/audit/supervisor-health'),
-    ]);
+    const r=await fetch(A+'/api/audit/findings?'+qs.toString());
     const d=await r.json();
-    const dh=await rh.json();
     renderAuditCounts(d.counts||{});
-    renderSupervisorHealth(dh);
     renderAuditList(d.items||[]);
   }catch(e){
     console.error('audit error',e);
     document.getElementById('audit-list').innerHTML='<div class="text-sm text-red-600">Erro ao carregar</div>';
   }
-}
-
-function renderSupervisorHealth(d){
-  const el=document.getElementById('audit-supervisor-health');
-  if(!el) return;
-  if(!d||!d.ok){el.innerHTML='';return;}
-  const h=d.health||{};
-  const errStr=d.last_error||'';
-  const errAt=d.last_error_at?new Date(d.last_error_at).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
-  let lastRun='nunca';
-  if(h.updated_at){
-    const dt=new Date(h.updated_at);
-    const ago=Math.round((Date.now()-dt.getTime())/60000);
-    lastRun=ago+'min atrás';
-  }
-  const model=h.model||'?';
-  const flagged=(h.flagged_high||0)+(h.flagged_med||0);
-  let color='#16a34a',label='OK';
-  if(errStr){color='#dc2626';label='com erro';}
-  else if(!h.updated_at){color='#6b7280';label='sem dados';}
-  else if(h.convs_audited===0 && (h.convs_total||0)>0){color='#d97706';label='nada auditado';}
-  const skips=[];
-  if(h.skip_cache)skips.push(`cache:${h.skip_cache}`);
-  if(h.skip_block)skips.push(`bloq:${h.skip_block}`);
-  if(h.skip_no_window)skips.push(`sem_janela:${h.skip_no_window}`);
-  if(h.skip_insufficient)skips.push(`insuf:${h.skip_insufficient}`);
-  if(h.skip_error)skips.push(`erro:${h.skip_error}`);
-  const skipStr=skips.length?` · skips: <span class="font-mono text-gray-500">${skips.join(' ')}</span>`:'';
-  el.innerHTML=`<span style="color:${color};font-weight:600;">● Supervisor ${label}</span> · modelo: <span class="font-mono">${esc(model)}</span> · último ciclo: ${lastRun} · convs ${h.convs_audited||0}/${h.convs_total||0} · findings ${flagged}${skipStr}`+
-    (errStr?`<div class="mt-1 px-2 py-1 rounded" style="background:#fef2f2;border:1px solid #fecaca;color:#991b1b;"><strong>Último erro</strong> (${errAt}): <span class="font-mono">${esc(errStr.substring(0,200))}</span></div>`:'');
 }
 function renderAuditCounts(counts){
   const alta=counts.alta||0,media=counts.media||0,baixa=counts.baixa||0;
@@ -2218,7 +2223,7 @@ function renderAuditList(items){
         <div class="mt-2 text-sm text-gray-800">${esc(it.summary||'')}</div>
         ${trecho}
         ${win?`<details class="mt-2"><summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-700">Ver janela analisada (supervisor)</summary><div class="mt-1.5 p-2 bg-gray-50 rounded-lg space-y-0.5">${win}</div></details>`:''}
-        <details class="mt-2" id="conv-wrap-${it.id}"><summary class="cursor-pointer text-xs text-blue-600 hover:text-blue-800 font-medium" onclick="loadAuditConv(${it.id}, this)"><i class="fas fa-comments mr-1"></i>Ver conversa completa</summary><div id="conv-${it.id}" class="mt-2 p-3 bg-gray-50 rounded-lg max-h-80 overflow-y-auto text-xs space-y-1.5"><div class="text-gray-400 italic">Carregando...</div></div></details>
+        <details class="mt-2" id="conv-wrap-${it.id}"><summary class="cursor-pointer text-xs text-blue-600 hover:text-blue-800 font-medium" onclick="loadAuditConv(${it.id}, this)"><i class="fas fa-comments mr-1"></i>Ver conversa completa</summary><div id="conv-${it.id}" class="audit-chat-box mt-2 p-3 rounded-lg max-h-80 overflow-y-auto text-xs space-y-1.5"><div class="audit-chat-empty">Carregando...</div></div></details>
         ${links?`<div class="mt-2 flex flex-wrap items-center gap-1">${links}</div>`:''}
         <div class="mt-2 flex items-center gap-2 text-xs flex-wrap">
           ${!it.resolved_at && it.problem_type==='assignment_mismatch'?`<button id="fix-${it.id}" class="btn btn-sm" onclick="autoFixAudit(${it.id})" style="background:#16a34a;color:#fff;font-size:11px;padding:6px 12px;border:none;border-radius:6px;cursor:pointer;"><i class="fas fa-wand-magic-sparkles mr-1"></i>Corrigir agora</button>`:''}
@@ -2230,18 +2235,14 @@ function renderAuditList(items){
   }).join('');
 }
 async function loadAuditConv(id, summaryEl){
-  // Carrega a conversa uma vez (a primeira vez que o details abre)
-  const wrap=document.getElementById('conv-wrap-'+id);
   const box=document.getElementById('conv-'+id);
   if(!box) return;
-  // se ja carregou, nao recarrega
   if(box.dataset.loaded==='1') return;
-  // wrap details ja abriu por padrao no clique; se nao quiser recarregar a cada abrir, ok
   try{
     const r=await fetch(A+'/api/audit/findings/'+id+'/conversation?limit=40');
     const d=await r.json();
     if(!d.ok||!d.items||!d.items.length){
-      box.innerHTML='<div class="text-gray-400 italic">Sem mensagens registradas no banco local pra esta conversa.</div>';
+      box.innerHTML='<div class="audit-chat-empty">Sem mensagens registradas no banco local pra esta conversa.</div>';
       box.dataset.loaded='1';
       return;
     }
@@ -2249,21 +2250,16 @@ async function loadAuditConv(id, summaryEl){
       const ts=m.created_at?new Date(m.created_at).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
       const isAluno=m.role==='aluno';
       const align=isAluno?'justify-start':'justify-end';
-      // Cores explicitas via inline style — funcionam em light E dark mode
-      // (sem depender de classes Tailwind que podem ter contraste invertido).
-      const bubble=isAluno
-        ? 'background:#f3f4f6;border:1px solid #d1d5db;color:#111827;'
-        : 'background:#dbeafe;border:1px solid #93c5fd;color:#1e3a8a;';
+      const cls=isAluno?'audit-chat-aluno':'audit-chat-bot';
       const lbl=isAluno?'Aluno':'Agente';
-      const lblColor=isAluno?'#6b7280':'#1e40af';
-      const act=m.action?`<span style="margin-left:6px;color:#9ca3af;font-size:10px;">[${esc(m.action)}]</span>`:'';
-      return `<div class="flex ${align}"><div class="rounded-lg p-2 max-w-[85%]" style="${bubble}"><div style="font-size:10px;color:${lblColor};margin-bottom:2px;font-weight:600;">${lbl} · ${ts}${act}</div><div class="whitespace-pre-wrap break-words" style="font-size:12px;line-height:1.45;">${esc(m.body||'')}</div></div></div>`;
+      const act=m.action?`<span class="audit-chat-action ml-2">[${esc(m.action)}]</span>`:'';
+      return `<div class="flex ${align}"><div class="${cls} rounded-lg p-2 max-w-[85%]"><div class="audit-chat-meta mb-0.5">${lbl} · ${ts}${act}</div><div class="whitespace-pre-wrap break-words text-xs">${esc(m.body||'')}</div></div></div>`;
     }).join('');
     box.innerHTML=html;
     box.dataset.loaded='1';
   }catch(e){
     console.error('loadAuditConv',e);
-    box.innerHTML='<div class="text-red-500 italic">Erro ao carregar conversa</div>';
+    box.innerHTML='<div class="audit-chat-empty" style="color:#ef4444">Erro ao carregar conversa</div>';
   }
 }
 

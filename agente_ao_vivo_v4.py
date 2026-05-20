@@ -4815,6 +4815,20 @@ OPENAI_SUPERVISOR_LOOKBACK_MIN = int(os.environ.get('OPENAI_SUPERVISOR_LOOKBACK_
 _last_openai_supervisor_ts = 0
 _openai_supervisor_audited = {}  # conv_id -> ts da ultima auditoria nesse processo
 
+# Telemetria do supervisor — usado para debug/observabilidade na aba Auditoria IA.
+_openai_sup_stats = {
+    'cycles': 0,             # quantos ciclos rodaram (process_openai_supervisor_loop)
+    'last_cycle_at': 0,      # ts unix do ultimo ciclo
+    'convs_listed': 0,       # convs achadas no DCZ no ultimo ciclo
+    'audited_total': 0,      # convs efetivamente auditadas (chamada OpenAI feita) — acumulado
+    'problems_found': 0,     # quantas vezes a OpenAI retornou tem_problema=true — acumulado
+    'errors': 0,             # erros de chamada OpenAI — acumulado
+    'last_error': '',        # ultima string de erro
+    'last_results': [],      # ultimos 20 resultados {conv_id, tem_problema, tipo, severidade, when}
+    'last_cycle_audited': 0, # quantas no ultimo ciclo
+    'last_cycle_problems': 0,
+}
+
 _FOLLOWUP_BODY_MARKERS = (
     'ainda está por aí', 'ainda esta por ai', 'tudo certo por aí', 'tudo certo por ai',
     'se tiver mais alguma dúvida', 'se precisar de mais alguma coisa',
@@ -5680,12 +5694,7 @@ def _openai_supervisor_get_window(conv_id, max_msgs=10):
         if r.status_code != 200:
             return []
         data = r.json()
-        # DataCrazy retorna {"messages": [...]} para messaging API.
-        # Algumas rotas usam {"data": [...]}. Tentamos ambos.
-        if isinstance(data, dict):
-            msgs = data.get('messages') or data.get('data') or []
-        else:
-            msgs = data
+        msgs = data.get('data', data) if isinstance(data, dict) else data
         if not isinstance(msgs, list):
             return []
         out = []
@@ -5711,20 +5720,17 @@ def _openai_supervisor_get_window(conv_id, max_msgs=10):
 
 
 def _openai_supervisor_audit_conv(conv_id, msgs_window):
-    """Chama OpenAI e retorna dict com analise, 'skip:<motivo>' string, ou None em erro."""
+    """Chama OpenAI e retorna dict com analise ou None em erro."""
     if not OPENAI_API_KEY:
-        return 'skip:no_api_key'
+        return None
     if not msgs_window:
-        return 'skip:no_window'
-    # Filtro minimo: pelo menos 2 msgs total e pelo menos 1 do agente (bot OU
-    # humano) E 1 do aluno. Aceitamos conversas com handoff humano para auditar
-    # se o agente fez algo errado antes do handoff.
+        return None
+    # Filtro minimo: precisa ter pelo menos 1 msg do bot E 1 do aluno para
+    # ter algo significativo para auditar (era >=2 do bot, muito restritivo).
     bot_count = sum(1 for r, _, _, _ in msgs_window if r == 'bot')
-    humano_count = sum(1 for r, _, _, _ in msgs_window if r == 'humano')
     aluno_count = sum(1 for r, _, _, _ in msgs_window if r == 'aluno')
-    agente_count = bot_count + humano_count
-    if agente_count < 1 or aluno_count < 1:
-        return 'skip:insufficient'
+    if bot_count < 1 or aluno_count < 1:
+        return None
     convo_str = []
     for role, body, _, _ in msgs_window[-10:]:
         convo_str.append(f"[{role}] {body}")
@@ -5744,24 +5750,28 @@ def _openai_supervisor_audit_conv(conv_id, msgs_window):
         )
         content = resp.choices[0].message.content or '{}'
         parsed = json.loads(content)
+        _openai_sup_stats['audited_total'] = _openai_sup_stats.get('audited_total', 0) + 1
+        if parsed.get('tem_problema'):
+            _openai_sup_stats['problems_found'] = _openai_sup_stats.get('problems_found', 0) + 1
+        # ring-buffer dos ultimos 20 resultados (pra debug)
+        from datetime import datetime as _dt, timezone as _tz
+        item = {
+            'conv_id': conv_id[:16],
+            'tem_problema': bool(parsed.get('tem_problema')),
+            'tipo': parsed.get('tipo') or '',
+            'severidade': parsed.get('severidade') or '',
+            'resumo': (parsed.get('resumo') or '')[:200],
+            'when': _dt.now(_tz.utc).isoformat(),
+        }
+        lst = _openai_sup_stats.setdefault('last_results', [])
+        lst.append(item)
+        if len(lst) > 20:
+            del lst[:len(lst) - 20]
         return parsed
     except Exception as e:
-        err_str = f"{type(e).__name__}: {e}"
-        p(f"  [OPENAI-SUP] erro chamada OpenAI conv={conv_id[:12]}: {err_str}")
-        # Salva ultimo erro em agent_config p/ aparecer no Cockpit
-        try:
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO agent_config (key, value, updated_at)
-                VALUES ('supervisor_last_error', %s, NOW())
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-            """, (err_str[:500],))
-            conn.commit()
-            cur.close()
-            conn.close()
-        except Exception:
-            pass
+        _openai_sup_stats['errors'] = _openai_sup_stats.get('errors', 0) + 1
+        _openai_sup_stats['last_error'] = f"{conv_id[:12]}: {e}"[:300]
+        p(f"  [OPENAI-SUP] erro chamada OpenAI conv={conv_id[:12]}: {e}")
         return None
 
 
@@ -5780,18 +5790,20 @@ def process_openai_supervisor_loop():
 
     _ensure_audit_table()
 
+    _openai_sup_stats['cycles'] = _openai_sup_stats.get('cycles', 0) + 1
+    _openai_sup_stats['last_cycle_at'] = now_ts
+
     convs = _openai_supervisor_fetch_convs()
+    _openai_sup_stats['convs_listed'] = len(convs) if convs else 0
     if not convs:
+        _openai_sup_stats['last_cycle_audited'] = 0
+        _openai_sup_stats['last_cycle_problems'] = 0
         return
 
     audited = 0
     flagged_high = 0
     flagged_med = 0
-    skip_cache = 0
-    skip_block = 0
-    skip_no_window = 0
-    skip_insufficient = 0
-    skip_error = 0
+    cycle_problems = 0
     for c in convs:
         if audited >= OPENAI_SUPERVISOR_MAX_CONVS:
             break
@@ -5799,35 +5811,25 @@ def process_openai_supervisor_loop():
         if not cid:
             continue
         last_audit_ts = _openai_supervisor_audited.get(cid, 0)
-        # nao re-auditar mesma conv mais que 1x a cada 10min
+        # nao re-auditar mesma conv mais que 1x a cada 10min (era 15)
         if now_ts - last_audit_ts < 10 * 60:
-            skip_cache += 1
             continue
         # ignorar convs ja com handoff supervisor_block ativo
         try:
             ho_motivo, _ = _is_handoff_active(cid)
             if ho_motivo == 'supervisor_block':
-                skip_block += 1
                 continue
         except Exception:
             pass
         window = _openai_supervisor_get_window(cid, max_msgs=10)
         result = _openai_supervisor_audit_conv(cid, window)
-        if isinstance(result, str) and result.startswith('skip:'):
-            if 'no_window' in result:
-                skip_no_window += 1
-            elif 'insufficient' in result:
-                skip_insufficient += 1
-            else:
-                skip_error += 1
-            continue
         if result is None:
-            skip_error += 1
             continue
         audited += 1
         _openai_supervisor_audited[cid] = now_ts
         if not result.get('tem_problema'):
             continue
+        cycle_problems += 1
         sev = (result.get('severidade') or 'baixa').lower()
         ptype = (result.get('tipo') or '').lower()
         resumo = result.get('resumo') or ''
@@ -5868,38 +5870,29 @@ def process_openai_supervisor_loop():
             action_taken=action, phone=phone, model=OPENAI_SUPERVISOR_MODEL,
         )
 
-    if audited:
-        p(f"  [OPENAI-SUP] auditadas={audited} alta={flagged_high} media={flagged_med}")
-
-    # Grava saude do supervisor para o Cockpit consultar
+    _openai_sup_stats['last_cycle_audited'] = audited
+    _openai_sup_stats['last_cycle_problems'] = cycle_problems
+    # Persiste stats em agent_config para o Cockpit/API ler.
     try:
-        stats = {
-            'last_run_ts': int(time.time()),
-            'convs_total': len(convs),
-            'convs_audited': audited,
-            'flagged_high': flagged_high,
-            'flagged_med': flagged_med,
-            'skip_cache': skip_cache,
-            'skip_block': skip_block,
-            'skip_no_window': skip_no_window,
-            'skip_insufficient': skip_insufficient,
-            'skip_error': skip_error,
-            'model': OPENAI_SUPERVISOR_MODEL,
-            'interval_s': OPENAI_SUPERVISOR_INTERVAL_S,
-            'lookback_min': OPENAI_SUPERVISOR_LOOKBACK_MIN,
-        }
+        snap = dict(_openai_sup_stats)
+        snap['model'] = OPENAI_SUPERVISOR_MODEL
+        snap['enabled'] = bool(OPENAI_SUPERVISOR_ENABLED)
+        snap['interval_s'] = OPENAI_SUPERVISOR_INTERVAL_S
+        snap_json = json.dumps(snap, ensure_ascii=False, default=str)
         conn = get_db()
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO agent_config (key, value, updated_at)
-            VALUES ('supervisor_health', %s, NOW())
+            VALUES ('openai_supervisor_stats', %s, NOW())
             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-        """, (json.dumps(stats),))
+        """, (snap_json[:8000],))
         conn.commit()
         cur.close()
         conn.close()
-    except Exception as e:
-        p(f"  [OPENAI-SUP] erro salvar stats: {e}")
+    except Exception as e_snap:
+        p(f"  [OPENAI-SUP] erro persistir stats: {e_snap}")
+    if audited:
+        p(f"  [OPENAI-SUP] auditadas={audited} (problems={cycle_problems}) alta={flagged_high} media={flagged_med}")
 
 
 def _oneshot_fix_vanessa_barra_funda():

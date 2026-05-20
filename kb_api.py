@@ -2576,35 +2576,29 @@ async def audit_findings_resolve(finding_id: int, request: Request):
     return {'ok': True, 'id': finding_id, 'conv_id': conv_id, 'unblocked': unblock}
 
 
-@app.get("/api/audit/supervisor-health")
-async def audit_supervisor_health():
-    """Retorna estado do supervisor OpenAI (modelo, ultimo ciclo, ultimo erro)."""
-    health = {}
-    last_err = ''
-    last_err_at = None
+@app.get("/api/audit/supervisor-status")
+async def audit_supervisor_status():
+    """Retorna o estado atual do supervisor OpenAI (telemetria gravada pelo
+    agente em agent_config.openai_supervisor_stats). Util para debug:
+    se 'cycles' aumenta mas 'problems_found' fica 0, significa que o
+    modelo esta rodando e nao detectando problemas. Se 'errors' > 0,
+    indica falha na chamada OpenAI (ver last_error)."""
     try:
         with get_db() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT value, updated_at FROM agent_config WHERE key = 'supervisor_health'")
+            cur.execute("SELECT value FROM agent_config WHERE key = 'openai_supervisor_stats'")
             row = cur.fetchone()
-            if row:
-                try:
-                    health = json.loads(row[0]) if row[0] else {}
-                except Exception:
-                    health = {}
-                if row[1]:
-                    health['updated_at'] = row[1].isoformat() + 'Z' if row[1].tzinfo is None else row[1].isoformat()
-            cur.execute("SELECT value, updated_at FROM agent_config WHERE key = 'supervisor_last_error'")
-            row = cur.fetchone()
-            if row:
-                last_err = row[0] or ''
-                if row[1]:
-                    last_err_at = (row[1].isoformat() + 'Z' if row[1].tzinfo is None else row[1].isoformat())
             cur.close()
+            if not row or not row[0]:
+                return {'ok': True, 'stats': None,
+                        'hint': 'Supervisor ainda nao rodou ou nao persistiu stats'}
+            try:
+                stats = json.loads(row[0])
+            except Exception:
+                return {'ok': False, 'error': 'invalid_stats_json'}
+            return {'ok': True, 'stats': stats}
     except Exception as e:
         return {'ok': False, 'error': str(e)}
-    return {'ok': True, 'health': health, 'last_error': last_err,
-            'last_error_at': last_err_at}
 
 
 @app.get("/api/audit/findings/{finding_id}/conversation")
