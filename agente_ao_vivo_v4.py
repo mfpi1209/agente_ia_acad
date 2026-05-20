@@ -429,6 +429,177 @@ def detect_masterclass_intent(text):
             return True
     return False
 
+
+# === A1 / Prova Regimental ===
+# Regra: aluno fala da A1 -> precisamos identificar o MeS da prova.
+#  - Mes vigente: nota e divulgada ate o fim do mes (resposta padrao).
+#  - Mes passado ou anterior: orienta a entrar em contato com tutor/professor.
+#  - Sem mes informado: pergunta de qual mes e a A1.
+_A1_TRIGGERS = [
+    'a1', 'prova a1', 'regimental', 'nota da a1', 'nota a1', 'a1 zerada',
+    'a1 esta zerada', 'a1 está zerada', 'minha a1', 'nota de a1',
+]
+
+_MESES_PT = {
+    'janeiro': 1, 'jan': 1,
+    'fevereiro': 2, 'fev': 2,
+    'marco': 3, 'mar': 3,
+    'abril': 4, 'abr': 4,
+    'maio': 5, 'mai': 5,
+    'junho': 6, 'jun': 6,
+    'julho': 7, 'jul': 7,
+    'agosto': 8, 'ago': 8,
+    'setembro': 9, 'set': 9,
+    'outubro': 10, 'out': 10,
+    'novembro': 11, 'nov': 11,
+    'dezembro': 12, 'dez': 12,
+}
+
+
+def _mes_atual_brt():
+    """Retorna numero do mes atual em BRT (UTC-3)."""
+    from datetime import datetime, timezone, timedelta
+    return datetime.now(timezone(timedelta(hours=-3))).month
+
+
+def detect_a1_intent(text):
+    """Retorna dict com:
+      - is_a1: bool (mencionou A1/regimental)
+      - mes: int|None (mes referenciado, 1-12)
+      - quando: 'vigente'|'anterior'|'desconhecido'
+    """
+    if not text:
+        return {'is_a1': False, 'mes': None, 'quando': 'desconhecido'}
+    import unicodedata, re
+    norm = ''.join(c for c in unicodedata.normalize('NFD', text.lower())
+                   if unicodedata.category(c) != 'Mn')
+    norm = ' '.join(norm.split())
+
+    # 1) Detecta menção a A1/regimental.
+    # 'a1' precisa estar isolado (nao parte de outra palavra) ou prefixado por
+    # 'prova ', 'nota '. Usamos regex \\ba1\\b para evitar falsos positivos
+    # como em palavras com a1 no meio.
+    is_a1 = False
+    for kw in _A1_TRIGGERS:
+        kw_n = ''.join(c for c in unicodedata.normalize('NFD', kw.lower())
+                       if unicodedata.category(c) != 'Mn')
+        if kw_n == 'a1':
+            if re.search(r'\ba1\b', norm):
+                is_a1 = True
+                break
+        elif kw_n in norm:
+            is_a1 = True
+            break
+    if not is_a1:
+        return {'is_a1': False, 'mes': None, 'quando': 'desconhecido'}
+
+    mes_atual = _mes_atual_brt()
+    mes_ref = None
+    quando = 'desconhecido'
+
+    # 2) Frases que indicam tempo relativo
+    if any(s in norm for s in ('deste mes', 'este mes', 'esse mes',
+                                'mes atual', 'mes vigente', 'agora',
+                                'hoje', 'fiz agora', 'fiz hoje',
+                                'essa semana', 'esta semana', 'nessa semana',
+                                'recem', 'recente', 'a pouco', 'ha pouco',
+                                'fiz esse mes', 'fiz este mes', 'fiz deste mes')):
+        return {'is_a1': True, 'mes': mes_atual, 'quando': 'vigente'}
+
+    if any(s in norm for s in ('mes passado', 'do mes passado',
+                                'mes anterior', 'antigo', 'antiga',
+                                'do semestre passado', 'meses atras',
+                                'meses atrás')):
+        prev = mes_atual - 1 if mes_atual > 1 else 12
+        return {'is_a1': True, 'mes': prev, 'quando': 'anterior'}
+
+    # 3) Mes explicito por nome
+    for nome, num in _MESES_PT.items():
+        if re.search(rf'\b{nome}\b', norm):
+            mes_ref = num
+            break
+
+    # 4) Mes explicito por numero MM/AAAA ou MM/AA
+    if mes_ref is None:
+        m = re.search(r'\b(\d{1,2})[/\-](\d{2,4})\b', norm)
+        if m:
+            try:
+                mm = int(m.group(1))
+                if 1 <= mm <= 12:
+                    mes_ref = mm
+            except Exception:
+                pass
+
+    if mes_ref is not None:
+        quando = 'vigente' if mes_ref == mes_atual else 'anterior'
+
+    return {'is_a1': True, 'mes': mes_ref, 'quando': quando}
+
+
+def _nome_mes_pt(num):
+    nomes = ['', 'janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
+             'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro']
+    return nomes[num] if 1 <= num <= 12 else '?'
+
+
+def handle_a1_intent(conv_id, intent_info, question=''):
+    """Envia resposta canonica baseada no tempo da A1. Dedup 6h por
+    cenario (vigente/anterior/perguntar)."""
+    quando = intent_info.get('quando', 'desconhecido')
+    mes = intent_info.get('mes')
+    name_prefix = _student_first_name_prefix(conv_id)
+
+    if quando == 'vigente':
+        mes_label = _nome_mes_pt(mes) if mes else 'deste mês'
+        msg = (
+            f"Tranquilo{name_prefix}! 😊\n\n"
+            f"A nota da *A1 de {mes_label}* (regimental) é divulgada "
+            f"*até o final do mês*. Ou seja, ainda está dentro do prazo "
+            f"normal de lançamento.\n\n"
+            f"Se ao final do mês a nota continuar zerada ou não aparecer, "
+            f"me avisa que a gente investiga junto, tá? 💙"
+        )
+        sig = 'a1_vigente'
+    elif quando == 'anterior':
+        mes_label = _nome_mes_pt(mes) if mes else 'de um mês anterior'
+        msg = (
+            f"Entendi{name_prefix}! 😊\n\n"
+            f"Como a sua *A1 ({mes_label})* foi de um mês anterior, a nota "
+            f"já deveria ter sido divulgada na plataforma.\n\n"
+            f"Nesse caso, o ideal é entrar em contato direto com o(a) *tutor(a) "
+            f"ou professor(a) da disciplina*, que pode te orientar sobre o "
+            f"que aconteceu com o lançamento.\n\n"
+            f"Se precisar de mais alguma coisa, é só me chamar! 💙"
+        )
+        sig = 'a1_anterior'
+    else:
+        msg = (
+            f"Claro{name_prefix}! Pra te ajudar certinho com a A1 (regimental), "
+            f"me conta de qual *mês* ela foi? 😊\n\n"
+            f"(_pode ser 'deste mês', 'mês passado' ou o nome do mês mesmo,"
+            f" tipo 'A1 de abril'_)"
+        )
+        sig = 'a1_ask_mes'
+
+    try:
+        if _signature_recently_sent(conv_id, sig, window_s=6 * 3600):
+            p(f"  [A1] dedup: {sig} ja enviado nas ultimas 6h - suprimindo")
+            return False
+    except Exception:
+        pass
+    meta_typing_on()
+    sent_ok = send_and_track(conv_id, msg)
+    try:
+        log_to_db(conv_id, question or f'[a1_{quando}]', msg, 1.0, f'a1_{quando}')
+    except Exception:
+        pass
+    if sent_ok:
+        try:
+            _register_signature(conv_id, sig, msg)
+        except Exception:
+            pass
+    return True
+
 DB_CONFIG = {
     'host': os.environ.get('DB_HOST', 'localhost'),
     'port': int(os.environ.get('DB_PORT', 5432)),
@@ -8155,6 +8326,20 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         waiting_for_client = False; inactivity_start = 0
         p(f"  [RETENÇÃO] Conversa encaminhada para Wesley - follow-ups desativados")
         return
+
+    # === A1 / PROVA REGIMENTAL ===
+    # Regra do time: nota da A1 do MeS VIGENTE eh divulgada ate o fim do mes.
+    # A1 de MeS ANTERIOR: orienta procurar tutor/professor.
+    # Sem mes informado: pergunta de qual mes.
+    try:
+        a1_info = detect_a1_intent(question)
+        if a1_info.get('is_a1'):
+            p(f"  [A1] intent detectado mes={a1_info.get('mes')} quando={a1_info.get('quando')}")
+            if handle_a1_intent(conv_id, a1_info, question=question):
+                conversation_messages.append({'role': 'user', 'text': question})
+            return
+    except Exception as e_a1:
+        p(f"  [A1] erro: {e_a1}")
 
     # === MASTERCLASS FAQ ===
     # Resposta canonica definida pelo time. Plugado ANTES do polo/LLM para
