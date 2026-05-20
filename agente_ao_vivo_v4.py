@@ -325,6 +325,32 @@ def handle_polo_visit_intent(conv_id, polo_entry, question=''):
     return True
 
 
+def handle_masterclass_intent(conv_id, question=''):
+    """Responde a perguntas sobre certificado do Masterclass.
+    Dedup por signature (6h) para evitar repeticao se o aluno reenviar.
+    Retorna True se enviou, False se foi suprimido por dedup.
+    """
+    try:
+        if _signature_recently_sent(conv_id, 'masterclass_info', window_s=6 * 3600):
+            p(f"  [MASTERCLASS] dedup: ja enviado nas ultimas 6h - suprimindo")
+            return False
+    except Exception:
+        pass
+    meta_typing_on()
+    sent_ok = send_and_track(conv_id, MASTERCLASS_MSG)
+    try:
+        log_to_db(conv_id, question or '[masterclass_intent]', MASTERCLASS_MSG,
+                  1.0, 'masterclass_info')
+    except Exception:
+        pass
+    if sent_ok:
+        try:
+            _register_signature(conv_id, 'masterclass_info', MASTERCLASS_MSG)
+        except Exception:
+            pass
+    return True
+
+
 def handle_polo_address_only(conv_id, polo_entry, question=''):
     """Aluno pediu so o endereco de um polo — responde com endereco oficial.
     Se polo nao foi identificado, pergunta qual polo."""
@@ -369,6 +395,39 @@ COMMERCIAL_REDIRECT_MSG = ("Certo!\n\nEste canal é dedicado ao atendimento dos 
                            "Vamos transferir esta conversa para nosso time comercial e em breve, "
                            "você receberá uma mensagem de um(a) de nossos consultores(as) que vai "
                            "te orientar e tirar todas as suas dúvidas. 😉\nAté mais!")
+
+# === MasterClass FAQ ===
+# Resposta canonica definida pelo time. NUNCA deve ser parafraseada pelo LLM.
+_MASTERCLASS_TRIGGERS = [
+    'masterclass', 'master class', 'master-class',
+]
+
+MASTERCLASS_MSG = (
+    "Sobre o certificado do *Masterclass*, vou te orientar 😊\n\n"
+    "Se você já conferiu seu e-mail e não encontrou, o próximo passo é "
+    "*acessar novamente o link do Masterclass* e preencher o formulário com seus dados.\n\n"
+    "Depois de enviar, *aguarde de 48 a 72 horas* pra receber o certificado "
+    "no e-mail que você cadastrou.\n\n"
+    "Se mesmo assim não receber, você pode entrar em contato direto pelo e-mail:\n"
+    "📧 *masterclass@cruzeirodosul.edu.br*\n\n"
+    "Qualquer dúvida, é só me avisar! 💙"
+)
+
+
+def detect_masterclass_intent(text):
+    """True se o aluno mencionou 'masterclass' (variantes acentuacao/espaco)."""
+    if not text:
+        return False
+    import unicodedata
+    norm = ''.join(c for c in unicodedata.normalize('NFD', text.lower())
+                   if unicodedata.category(c) != 'Mn')
+    norm = ' '.join(norm.split())
+    for kw in _MASTERCLASS_TRIGGERS:
+        kw_n = ''.join(c for c in unicodedata.normalize('NFD', kw.lower())
+                       if unicodedata.category(c) != 'Mn')
+        if kw_n in norm:
+            return True
+    return False
 
 DB_CONFIG = {
     'host': os.environ.get('DB_HOST', 'localhost'),
@@ -8096,6 +8155,19 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         waiting_for_client = False; inactivity_start = 0
         p(f"  [RETENÇÃO] Conversa encaminhada para Wesley - follow-ups desativados")
         return
+
+    # === MASTERCLASS FAQ ===
+    # Resposta canonica definida pelo time. Plugado ANTES do polo/LLM para
+    # garantir que NUNCA seja parafraseada (o LLM tende a inventar prazos/email).
+    try:
+        if detect_masterclass_intent(question):
+            p(f"  [MASTERCLASS] intent detectado — resposta canonica")
+            if handle_masterclass_intent(conv_id, question=question):
+                conversation_messages.append({'role': 'user', 'text': question})
+                conversation_messages.append({'role': 'bot', 'text': MASTERCLASS_MSG})
+            return
+    except Exception as e_mc:
+        p(f"  [MASTERCLASS] erro: {e_mc}")
 
     # === POLO: intencao de ir presencialmente / dificuldade comunicacao online ===
     # Resolve o caso "Vanessa Carmona" (LLM inventou endereco da Barra Funda).

@@ -2120,21 +2120,20 @@ function renderAuditCounts(counts){
   `;
 }
 function auditLinks(it){
-  // botoes para abrir o lead/conversa no DataCrazy.
-  // 1) link direto ao lead (mais util: abre o lead ID exato)
-  // 2) link de busca por phone (fallback se nao tiver lead_id)
+  // DCZ nao expoe URL publica /leads/{id} (da 404). O caminho que funciona
+  // eh /multiservice?search={phone} — mesmo padrao usado nas outras abas.
+  // Tambem oferecemos botao "Copiar lead ID" para busca manual no CRM.
   const d=it.detail||{};
   const leadId=d.lead_id||d.leadId||'';
   const phone=it.phone||d.phone||'';
   const convId=it.conv_id||'';
   let out='';
-  if(leadId){
-    const u=DCZ_APP+'/leads/'+encodeURIComponent(leadId);
-    out+=`<a href="${u}" target="_blank" rel="noopener" class="btn btn-sm" style="font-size:11px;padding:4px 10px;background:#6366f1;color:#fff;text-decoration:none;border-radius:6px;"><i class="fas fa-external-link-alt mr-1"></i>Abrir lead</a>`;
-  }
   if(phone){
     const u=DCZ_APP+'/multiservice?search='+encodeURIComponent(phone);
-    out+=`<a href="${u}" target="_blank" rel="noopener" class="btn btn-sm ml-1" style="font-size:11px;padding:4px 10px;background:#0ea5e9;color:#fff;text-decoration:none;border-radius:6px;"><i class="fas fa-search mr-1"></i>Buscar por telefone</a>`;
+    out+=`<a href="${u}" target="_blank" rel="noopener" class="btn btn-sm" style="font-size:11px;padding:4px 10px;background:#6366f1;color:#fff;text-decoration:none;border-radius:6px;"><i class="fas fa-external-link-alt mr-1"></i>Abrir no CRM (telefone)</a>`;
+  }
+  if(leadId){
+    out+=`<button class="btn btn-sm ml-1" onclick="navigator.clipboard.writeText('${leadId}');toast('Lead ID copiado','info');return false;" style="font-size:11px;padding:4px 10px;background:#0ea5e9;color:#fff;border:none;border-radius:6px;cursor:pointer;" title="${leadId}"><i class="fas fa-copy mr-1"></i>Copiar Lead ID</button>`;
   }
   if(!leadId && !phone && convId){
     out+=`<span class="text-xs text-gray-400 ml-1">conv: <span class="font-mono">${convId.substring(0,18)}</span></span>`;
