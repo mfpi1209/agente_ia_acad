@@ -3481,11 +3481,15 @@ def send_and_track(conv_id, text, buttons=None, force=False):
     if lock is not None:
         lock.acquire()
     try:
-        # === RECHECK: dispatch MUITO recente -> race condition ===
-        # Caso reportado: in_hours_rescue distribuiu, mas LLM ja estava
-        # gerando outra resposta em paralelo. Quando o send chega, a
-        # distribuicao acabou de marcar handoff_active. Suprime para nao
-        # mandar mensagem orfa depois da transferencia.
+        # === RECHECK: handoff_active vigente -> suprimir resposta orfa ===
+        # ACAO C (2026-05-21): expandido. Antes so checava dispatch <90s.
+        # Agora qualquer handoff ativo (supervisor_block, retention,
+        # pre_opening_queue, etc) suprime envio. Caso reportado: bot
+        # respondia DEPOIS de "Vou te transferir para X" pq race condition
+        # entre LLM e marcacao do handoff. 106 casos de sobre_resposta.
+        #
+        # Mensagens legitimas (msg de transferencia do distribute, nudges
+        # do handoff loop, etc) usam force=True para escapar.
         if not force and conv_id:
             try:
                 _ensure_dedup_tables()
@@ -3502,9 +3506,22 @@ def send_and_track(conv_id, text, buttons=None, force=False):
                     _ho = cur.fetchone()
                     cur.close()
                     conn.close()
-                    if _ho and _ho[0] == 'dispatch' and (_ho[2] or 999) < 90:
-                        p(f"  [DEDUP-DISPATCH] {conv_id[:12]} dispatch p/ {_ho[1]} ha {_ho[2]:.0f}s - SUPRIMIDO (race condition)")
-                        return 'suppressed'
+                    if _ho:
+                        _ho_motivo = _ho[0]
+                        _ho_target = _ho[1] or ''
+                        _ho_age = _ho[2] or 999
+                        # dispatch <90s = race condition pura (do antigo check)
+                        if _ho_motivo == 'dispatch' and _ho_age < 90:
+                            p(f"  [DEDUP-DISPATCH] {conv_id[:12]} dispatch p/ {_ho_target} ha {_ho_age:.0f}s - SUPRIMIDO (race condition)")
+                            return 'suppressed'
+                        # qualquer outro handoff ativo = bot deve calar
+                        if _ho_motivo in (
+                            'supervisor_block', 'retention', 'retention_after_hours',
+                            'polo_visit', 'after_hours_insist', 'pre_opening_queue',
+                            'human_unavailable',
+                        ):
+                            p(f"  [HANDOFF-BLOCK] {conv_id[:12]} handoff_active={_ho_motivo} target={_ho_target} - SUPRIMIDO")
+                            return 'suppressed'
             except Exception:
                 pass
         if not force and conv_id and _body_recently_sent(conv_id, text, SEND_BODY_DEDUP_WINDOW_S):
@@ -6186,6 +6203,13 @@ def process_supervisor_loop():
                     continue
                 if _supervisor_has_attendant_fresh(cid):
                     p(f"  [SUPERVISOR-CLOSE] skip ...{phone[-4:] if phone else '????'} humano ativo / finalizada")
+                    continue
+                # ACAO C (2026-05-21): NAO encerrar quando handoff_active vigente.
+                # Bug: bot encerrava conv depois que humano foi prometido mas ainda
+                # nao respondeu, gerando 'sobre_resposta' e 'perdido_conversa'.
+                ho_motivo_cl, _ = _is_handoff_active(cid)
+                if ho_motivo_cl:
+                    p(f"  [SUPERVISOR-CLOSE] skip ...{phone[-4:] if phone else '????'} handoff_active={ho_motivo_cl}")
                     continue
                 close_msg = CLOSE_INACTIVITY_MSG.format(name=name_fmt)
                 tag = 'pos-follow-up' if close_after_followup else 'orfa-handoff'
@@ -10754,6 +10778,17 @@ def main():
                                     continue
                         except Exception:
                             pass
+                        # ACAO C (2026-05-21): NAO enviar follow-up se handoff
+                        # ativo (consultor humano prometido aguardando).
+                        try:
+                            ho_motivo_fu_main, _ = _is_handoff_active(cid)
+                            if ho_motivo_fu_main:
+                                p(f"  [FOLLOWUP-1] [{cur_phone[-4:] if cur_phone else '????'}] handoff_active={ho_motivo_fu_main} - skip")
+                                st['followup_stage'] = 1
+                                st['inactivity_start'] = time.time()
+                                continue
+                        except Exception:
+                            pass
                         # ACAO B (2026-05-21): dedup ANTES do envio. Bug:
                         # main loop nao tinha signature dedup (so o supervisor
                         # tinha). Resultado: 'Ainda esta por ai?' enviado 2x
@@ -10814,6 +10849,15 @@ def main():
                             continue
                         if _closes_this_cycle >= _MAX_CLOSES_PER_CYCLE:
                             continue
+                        # ACAO C (2026-05-21): NAO encerrar se handoff vigente.
+                        # Bug: bot encerrava antes do humano prometido responder.
+                        try:
+                            ho_motivo_cl_main, _ = _is_handoff_active(cid)
+                            if ho_motivo_cl_main:
+                                p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] handoff_active={ho_motivo_cl_main} - skip")
+                                continue
+                        except Exception:
+                            pass
                         # ACAO B (2026-05-21): dedup ANTES do envio. Bug: mensagem
                         # de encerramento enviada 2x. Se signature ja registrada,
                         # so finaliza conv sem reenviar msg.
