@@ -5757,7 +5757,17 @@ def _openai_supervisor_get_window(conv_id, max_msgs=10):
         if r.status_code != 200:
             return []
         data = r.json()
-        msgs = data.get('data', data) if isinstance(data, dict) else data
+        # DCZ /conversations/{id}/messages retorna {"messages": [...]},
+        # NaO {"data": [...]} (esse eh para /conversations). O fix anterior
+        # (commit 5b8488c) endereceou outro caminho — esse aqui ainda usava
+        # 'data' e por isso o supervisor lia window vazia para todas as 75
+        # convs listadas.
+        if isinstance(data, dict):
+            msgs = data.get('messages') or data.get('data') or []
+        elif isinstance(data, list):
+            msgs = data
+        else:
+            msgs = []
         if not isinstance(msgs, list):
             return []
         out = []
