@@ -535,6 +535,93 @@ def detect_masterclass_intent(text):
     return False
 
 
+# === ESQUECI MINHA SENHA / REDEFINIR SENHA ===
+# Resposta canonica definida pelo time (atualizada em 2026-05-21):
+# Aluno clica em "Esqueci minha senha" -> digita TELEFONE atualizado ->
+# recebe codigo por SMS -> cria nova senha.
+# NAO eh por e-mail/link/CPF. O LLM ja errou nesse caminho — entao
+# resposta canonica e ANTI-paraphrase, plugada ANTES do KB/LLM.
+_ESQUECI_SENHA_TRIGGERS = [
+    'esqueci minha senha', 'esqueci a senha', 'esqueci senha',
+    'esqueci a minha senha', 'esqueci a senha do portal',
+    'esqueci a senha do app', 'esqueci a senha da duda',
+    'esqueci o meu acesso',
+    # variantes de "como fazer"
+    'recuperar minha senha', 'recuperar a senha', 'recuperar senha',
+    'redefinir minha senha', 'redefinir a senha', 'redefinir senha',
+    'trocar minha senha', 'trocar a senha', 'trocar senha',
+    'mudar minha senha', 'mudar a senha', 'mudar senha',
+    'alterar minha senha', 'alterar a senha', 'alterar senha',
+    'criar nova senha', 'nova senha',
+    # variantes de problema
+    'minha senha nao ta funcionando', 'minha senha não tá funcionando',
+    'minha senha nao funciona', 'minha senha não funciona',
+    'senha nao funciona', 'senha não funciona',
+    'senha invalida', 'senha inválida',
+    'esqueci a senha do portal do aluno',
+    # variantes simples
+    'como recupero a senha', 'como recupero minha senha',
+    'como redefino a senha', 'como redefino minha senha',
+    'como troco a senha', 'como troco minha senha',
+    'como mudo a senha', 'como mudo minha senha',
+]
+
+ESQUECI_SENHA_MSG = (
+    "Pra redefinir sua senha, é só clicar em *Esqueci minha senha* na "
+    "tela de login. Você vai digitar o seu *telefone atualizado* e "
+    "receber um *código por SMS*. Informa o código no campo indicado e "
+    "na sequência você cria sua *nova senha* 💙\n\n"
+    "⚠️ O telefone precisa estar atualizado no seu cadastro pra o SMS "
+    "chegar. Se você trocou de número e não recebeu o SMS, me avisa que "
+    "a gente vê o melhor caminho juntos."
+)
+
+
+def detect_esqueci_senha_intent(text):
+    """True se o aluno perguntou sobre redefinir/recuperar/trocar senha
+    ou disse explicitamente 'esqueci minha senha'."""
+    if not text:
+        return False
+    import unicodedata
+    norm = ''.join(c for c in unicodedata.normalize('NFD', text.lower())
+                   if unicodedata.category(c) != 'Mn')
+    norm = ' '.join(norm.split())
+    for kw in _ESQUECI_SENHA_TRIGGERS:
+        kw_n = ''.join(c for c in unicodedata.normalize('NFD', kw.lower())
+                       if unicodedata.category(c) != 'Mn')
+        if kw_n in norm:
+            return True
+    return False
+
+
+def handle_esqueci_senha_intent(conv_id, question=''):
+    """Envia a resposta canonica sobre Esqueci Minha Senha (telefone+SMS).
+    Dedup de 6h. Bloqueia o LLM de parafrasear/inventar info errada
+    (e-mail/link/CPF). Retorna True se enviou (ou se foi dedup), False
+    em caso de erro."""
+    sig = 'esqueci_senha_canonical'
+    try:
+        if _signature_recently_sent(conv_id, sig, window_s=6 * 3600):
+            p(f"  [ESQUECI-SENHA] dedup: ja enviado nas ultimas 6h - suprimindo")
+            return True
+    except Exception:
+        pass
+    try:
+        meta_typing_on()
+        sent_ok = send_and_track(conv_id, ESQUECI_SENHA_MSG)
+        if sent_ok:
+            log_to_db(conv_id, question or '', ESQUECI_SENHA_MSG, 1.0, sig)
+            try:
+                _register_signature(conv_id, sig, ESQUECI_SENHA_MSG)
+            except Exception:
+                pass
+            p(f"  [ESQUECI-SENHA] resposta canonica enviada (telefone + SMS)")
+        return sent_ok
+    except Exception as e:
+        p(f"  [ESQUECI-SENHA] erro: {e}")
+        return False
+
+
 # === A1 / Prova Regimental ===
 # Regra: aluno fala da A1 -> precisamos identificar o MeS da prova.
 #  - Mes vigente: nota e divulgada ate o fim do mes (resposta padrao).
@@ -9319,6 +9406,22 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             return
     except Exception as e_a1:
         p(f"  [A1] erro: {e_a1}")
+
+    # === ESQUECI MINHA SENHA / REDEFINIR SENHA ===
+    # Procedimento OFICIAL: clica em "Esqueci minha senha" -> digita
+    # telefone atualizado -> recebe codigo por SMS -> cria nova senha.
+    # NAO eh por e-mail/link/CPF. Resposta canonica ANTES do KB/LLM para
+    # impedir paraphrase errada (o KB antigo dizia "faça login com email
+    # acadêmico antes" — frase confusa e impossivel para quem esqueceu).
+    try:
+        if detect_esqueci_senha_intent(question):
+            p(f"  [ESQUECI-SENHA] intent detectado — resposta canonica (telefone + SMS)")
+            if handle_esqueci_senha_intent(conv_id, question=question):
+                conversation_messages.append({'role': 'user', 'text': question})
+                conversation_messages.append({'role': 'bot', 'text': ESQUECI_SENHA_MSG})
+            return
+    except Exception as e_es:
+        p(f"  [ESQUECI-SENHA] erro: {e_es}")
 
     # === MASTERCLASS FAQ ===
     # Resposta canonica definida pelo time. Plugado ANTES do polo/LLM para
