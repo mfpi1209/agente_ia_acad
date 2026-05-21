@@ -5887,17 +5887,26 @@ def _openai_supervisor_audit_conv(conv_id, msgs_window):
     convo_text = "\n".join(convo_str)
     try:
         client = OpenAI(api_key=OPENAI_API_KEY)
-        resp = client.chat.completions.create(
-            model=OPENAI_SUPERVISOR_MODEL,
-            response_format={'type': 'json_object'},
-            messages=[
+        # Modelos gpt-5.x / o1-x usam max_completion_tokens (max_tokens da 400).
+        # gpt-4o e anteriores usam max_tokens. Detecta pelo nome.
+        _mname = (OPENAI_SUPERVISOR_MODEL or '').lower()
+        _use_new_token_param = _mname.startswith('gpt-5') or _mname.startswith('o1') or _mname.startswith('o3') or _mname.startswith('o4')
+        _kwargs = {
+            'model': OPENAI_SUPERVISOR_MODEL,
+            'response_format': {'type': 'json_object'},
+            'messages': [
                 {'role': 'system', 'content': _OPENAI_SUPERVISOR_PROMPT},
                 {'role': 'user', 'content': f"Conversa (cronologica):\n{convo_text}\n\nAnalise."}
             ],
-            temperature=0.0,
-            max_tokens=600,
-            timeout=45,
-        )
+            'timeout': 45,
+        }
+        if _use_new_token_param:
+            _kwargs['max_completion_tokens'] = 1200
+            # gpt-5/o-series so aceita temperature default (1) — nao mandar
+        else:
+            _kwargs['max_tokens'] = 600
+            _kwargs['temperature'] = 0.0
+        resp = client.chat.completions.create(**_kwargs)
         content = resp.choices[0].message.content or '{}'
         parsed = json.loads(content)
         _openai_sup_stats['audited_total'] = _openai_sup_stats.get('audited_total', 0) + 1
