@@ -7,6 +7,55 @@
 
 ---
 
+### [2026-05-21] - Silenciamento do supervisor fecha o ciclo (distribui + nudge + pending)
+
+**Decisão**
+Quando o supervisor OpenAI detecta severidade ALTA + tipo crítico
+(`repeticao_resposta`, `sobre_resposta`, `duplicado_distribuicao`) e
+silencia o agente naquela conv, agora o sistema também:
+1. Verifica se a conv já tem atendente humano.
+2. **Sem humano + dentro do expediente:** distribui imediatamente via
+   `distribute_to_attendant` (lock atômico + signature dedup já existentes).
+3. **Sem humano + fora do expediente:** registra `pending_escalation`
+   com `reason='supervisor_block'`, `tier='priority'` para entrar na
+   fila Cockpit e ser distribuído na abertura.
+4. **Com humano:** registra `pending_escalation` com
+   `reason='supervisor_block_with_human'`, `tier='priority'` apenas para
+   destacar na fila (humano já vê a conv).
+5. Envia 1 nudge único ao aluno ("já registrei aqui, em pouquinho um(a)
+   consultor(a) retoma") com signature `supervisor_block_nudge` TTL 4h.
+6. SÓ DEPOIS chama `_mark_handoff_active(supervisor_block, 6h)`. A ordem
+   importa: `handoff_active` é PK única por conv, então marcar
+   `supervisor_block` por último sobrescreve eventual `dispatch` deixado
+   pela distribuição e mantém o bot silenciado.
+
+**Contexto**
+Usuária questionou: "Se eu não clicar em Liberar agente e o aluno
+enviar mensagem, ele não fica sem resposta nem distribuição?". Análise
+do código confirmou o gap: o silenciamento era passivo — só marcava
+`handoff_active` e registrava finding, sem garantir caminho para humano.
+O `process_in_hours_rescue` cobria o caso depois de ~10min, mas durante
+esse intervalo o aluno ficava sem nenhum sinal de atendimento.
+
+**Alternativas descartadas**
+- *Não silenciar imediatamente, só registrar finding*: perde a proteção
+  contra o bot continuar errando (era o ponto inicial do silenciamento).
+- *Encadear distribuição via supervisor_loop interno em vez de
+  imediatamente*: aumentaria latência sem ganho real.
+- *Inverter ordem (silenciar antes de distribuir)*: `_mark_handoff_active`
+  com motivo `dispatch` dentro de `distribute_to_attendant` sobrescreveria
+  o `supervisor_block`, anulando o silenciamento.
+
+**Impacto**
+- Buraco de até 10min entre silenciamento e resgate eliminado.
+- Aluno recebe nudge imediato confirmando que está sendo atendido.
+- Cockpit recebe entrada `priority` na fila com motivo claro.
+- Bot continua silenciado normalmente (humano libera via dashboard).
+- Cobertura assíncrona do `in_hours_rescue` continua funcionando como
+  safety net redundante (não atrapalha por causa do lock atômico).
+
+---
+
 ### [2026-05-21] - Ligar/Desligar real do agente via flag em `agent_config`
 
 **Decisão**

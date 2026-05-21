@@ -6249,16 +6249,102 @@ def process_openai_supervisor_loop():
 
         action = ''
         if sev == 'alta' and ptype in ('repeticao_resposta', 'sobre_resposta', 'duplicado_distribuicao'):
-            # CALA o agente nessa conv ate intervencao humana
+            # === Silenciar bot + FECHAR O CICLO (gap detectado pelo usuario) ===
+            # Antes: so silenciava e finding ficava no dashboard. Gap: se a conv
+            # nao tinha atendente, aluno ficava ate 10min sem resposta ate o
+            # in_hours_rescue pegar. Agora distribui IMEDIATAMENTE + nudge.
             try:
+                conv_attendants = c.get('attendants', []) or []
+                tem_humano = bool(conv_attendants)
+                distributed_now = False
+                target_consultant = ''
+
+                # Passo 1: se nao tem humano e estamos no expediente, distribuir.
+                # distribute_to_attendant() tem lock atomico + signature dedup,
+                # entao e seguro chamar mesmo com concorrencia do in_hours_rescue.
+                if not tem_humano:
+                    try:
+                        # Sincroniza globals para record_pending_escalation
+                        # encontrar phone/nome (sao lidas dentro da funcao).
+                        try:
+                            globals()['_current_phone'] = phone
+                            _conv_states.setdefault(cid, _default_conv_state())['phone'] = phone
+                        except Exception:
+                            pass
+                        if is_within_business_hours():
+                            distributed_now = distribute_to_attendant(
+                                cid,
+                                reason=f'supervisor_block:{ptype} - distribuicao imediata',
+                                silent_after_hours=True,
+                            )
+                        if distributed_now:
+                            p(f"  [OPENAI-SUP] {cid[:12]} sem humano - distribuido imediatamente")
+                        else:
+                            # Fora do expediente OU falha de distribuicao —
+                            # registra pending_escalation para nao perder.
+                            try:
+                                record_pending_escalation(
+                                    cid,
+                                    reason='supervisor_block',
+                                    tier='priority',
+                                    retorno_label=next_human_available_label(),
+                                    question=resumo[:200],
+                                )
+                                p(f"  [OPENAI-SUP] {cid[:12]} sem humano + sem distribuicao - registrado em pending_escalation")
+                            except Exception as e_rec:
+                                p(f"  [OPENAI-SUP] erro pending_escalation: {e_rec}")
+                    except Exception as e_dist:
+                        p(f"  [OPENAI-SUP] erro distribuicao supervisor: {e_dist}")
+                else:
+                    # Ja tem humano - registra como priority para destacar na fila.
+                    try:
+                        globals()['_current_phone'] = phone
+                        _conv_states.setdefault(cid, _default_conv_state())['phone'] = phone
+                        record_pending_escalation(
+                            cid,
+                            reason='supervisor_block_with_human',
+                            tier='priority',
+                            retorno_label='consultor ja esta na conversa',
+                            question=resumo[:200],
+                        )
+                        p(f"  [OPENAI-SUP] {cid[:12]} ja com humano({len(conv_attendants)}) - registrado priority na fila")
+                    except Exception:
+                        pass
+
+                # Passo 2: nudge unico ao aluno (4h ttl), so se ainda nao enviou.
+                # Antes do silenciamento porque send_and_track nao tem block.
+                try:
+                    nudge_sig = 'supervisor_block_nudge'
+                    if not _signature_recently_sent(cid, nudge_sig, window_s=4 * 3600):
+                        nudge = (
+                            "Oii! Já registrei aqui sua conversa e em pouquinho "
+                            "um(a) consultor(a) vai dar continuidade ao seu atendimento, tá? 💙"
+                        )
+                        try:
+                            send_and_track(cid, nudge)
+                            _register_signature(cid, nudge_sig, nudge)
+                            p(f"  [OPENAI-SUP] {cid[:12]} nudge enviado ao aluno")
+                        except Exception as e_nu:
+                            p(f"  [OPENAI-SUP] erro nudge: {e_nu}")
+                except Exception:
+                    pass
+
+                # Passo 3: silenciar bot POR ULTIMO. handoff_active e 1 linha por
+                # conv (chave primaria), entao isso sobrescreve um eventual
+                # 'dispatch' deixado por distribute_to_attendant. Bot fica
+                # silenciado de fato ate humano clicar 'Liberar agente'.
                 _mark_handoff_active(cid, 'supervisor_block',
                                      target='', ttl_s=6 * 3600,
                                      body=f"supervisor_block: {ptype}")
                 action = 'agent_silenced'
                 flagged_high += 1
-                p(f"  [OPENAI-SUP] {cid[:12]} ALTA/{ptype} - agente bloqueado por 6h | {resumo}")
-            except Exception:
+                _silenced_summary = (
+                    f"distribuido={distributed_now} tem_humano={tem_humano}"
+                )
+                p(f"  [OPENAI-SUP] {cid[:12]} ALTA/{ptype} - silenciado 6h | {_silenced_summary} | {resumo[:80]}")
+            except Exception as e_blk:
                 action = 'audit_only'
+                p(f"  [OPENAI-SUP] erro silenciamento+distribuicao: {e_blk}")
         else:
             if sev == 'media':
                 flagged_med += 1
