@@ -401,6 +401,78 @@ COMMERCIAL_REDIRECT_MSG = (
     "Em pouquinho alguém te chama por aqui! 💙"
 )
 
+# === INICIO DAS AULAS (matricula nova) ===
+# Regra: quem se matricula AGORA em graduacao ingressa na turma do 2o
+# semestre (agosto). NaO eh fevereiro. Resposta canonica e ANTI-alucinacao.
+_INICIO_AULAS_TRIGGERS = [
+    # perguntas explicitas sobre data de inicio
+    'quando comecam as aulas', 'quando começam as aulas',
+    'quando comeca as aulas', 'quando começa as aulas',
+    'quando comecam aula', 'quando começam aula',
+    'quando inicia as aulas', 'quando iniciam as aulas',
+    'quando inicia aula', 'quando iniciam aula',
+    'quando vou comecar', 'quando vou começar',
+    'inicio das aulas', 'início das aulas',
+    'data de inicio', 'data de início',
+    'mes que comeca', 'mês que começa',
+    'em que mes', 'em que mês',
+    'que mes', 'que mês',
+    # contestacoes diretas a info errada anterior
+    'comecam em fevereiro', 'começam em fevereiro',
+    'comeca em fevereiro', 'começa em fevereiro',
+    'inicia em fevereiro',
+    'em fevereiro mesmo', 'em fevereiro',
+    'comecam em janeiro', 'começam em janeiro',
+    'inicia em janeiro', 'em janeiro',
+    'turma de fevereiro', 'turma de janeiro',
+]
+
+INICIO_AULAS_MSG = (
+    "Sobre o início das aulas, deixa eu te explicar 😊\n\n"
+    "Quem está se matriculando *agora* em graduação ingressa na "
+    "*turma do 2º semestre*, então as aulas começam em *agosto*.\n\n"
+    "Se precisar de mais informações sobre cronograma ou calendário "
+    "acadêmico, posso te transferir pra um(a) consultor(a) — é só me avisar!"
+)
+
+
+def detect_inicio_aulas_intent(text):
+    """True se o aluno perguntou sobre quando as aulas comecam/iniciam ou
+    mencionou 'fevereiro/janeiro' no contexto de inicio (matricula nova)."""
+    if not text:
+        return False
+    import unicodedata
+    norm = ''.join(c for c in unicodedata.normalize('NFD', text.lower())
+                   if unicodedata.category(c) != 'Mn')
+    norm = ' '.join(norm.split())
+    for kw in _INICIO_AULAS_TRIGGERS:
+        kw_n = ''.join(c for c in unicodedata.normalize('NFD', kw.lower())
+                       if unicodedata.category(c) != 'Mn')
+        if kw_n in norm:
+            return True
+    return False
+
+
+def handle_inicio_aulas_intent(conv_id, question=''):
+    """Envia a resposta canonica sobre inicio das aulas (turma de agosto).
+    Dedup de 6h. Bloqueia o LLM de parafrasear/inventar informacao errada."""
+    sig = 'inicio_aulas_canonical'
+    if _signature_recently_sent(conv_id, sig, window_s=6 * 3600):
+        p(f"  [INICIO-AULAS] dedup: ja enviado nas ultimas 6h - suprimindo")
+        return True
+    try:
+        meta_typing_on()
+        sent_ok = send_and_track(conv_id, INICIO_AULAS_MSG)
+        if sent_ok:
+            log_to_db(conv_id, question or '', INICIO_AULAS_MSG, 1.0, sig)
+            _register_signature(conv_id, sig, INICIO_AULAS_MSG)
+            p(f"  [INICIO-AULAS] resposta canonica enviada (turma de agosto)")
+        return sent_ok
+    except Exception as e:
+        p(f"  [INICIO-AULAS] erro: {e}")
+        return False
+
+
 # === MasterClass FAQ ===
 # Resposta canonica definida pelo time. NUNCA deve ser parafraseada pelo LLM.
 _MASTERCLASS_TRIGGERS = [
@@ -1020,6 +1092,7 @@ Sua personalidade: simpática, paciente, fala de um jeito leve e natural. Você 
 9. **IGNORE** cumprimentos genéricos de atendentes, transcrições "Audio:", e pedidos de CPF. Extraia só informação útil.
 10. **NUNCA ofereça transferir para atendente** por conta própria. Isso é controlado pelos botões do sistema.
 11. **ENDEREÇO DE POLO — REGRA CRÍTICA**: NUNCA, JAMAIS, INVENTE endereço, rua, número, bairro, ponto de referência, horário ou CEP de polo. Se o aluno perguntar endereço/local de polo e isso NÃO estiver explicitamente no bloco "ENDEREÇOS OFICIAIS DOS POLOS" (quando presente), responda APENAS: "Deixa eu confirmar essa informação com a equipe para te passar certinho, tá?". O sistema cuida da transferência automática quando o aluno expressa intenção de visita ou dificuldade. NÃO mencione metrô, linha, terminal, hospital ou referência geográfica de polo se não estiver nas referências.
+12. **INÍCIO DAS AULAS — REGRA CRÍTICA**: Quem se matricular AGORA em graduação ingressa na **turma do 2º semestre (agosto)**. NUNCA diga que as aulas começam em "fevereiro" ou "janeiro" para alunos novos/matriculados agora — isso é informação ERRADA. Se o aluno perguntar quando as aulas começam (perguntas tipo "quando começa", "quando inicia", "em que mês", "vou começar em agosto?", "fevereiro?"), responda que para quem está se matriculando agora as aulas iniciam em **agosto** (2º semestre). Se houver dúvida sobre cronograma detalhado ou calendário acadêmico, transfira para consultor.
 
 ## COMO CONVERSAR (REGRA MAIS IMPORTANTE):
 Você tá no WhatsApp. Ninguém manda textão no zap. Seja breve, natural e direta.
@@ -8724,6 +8797,20 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             return
     except Exception as e_mc:
         p(f"  [MASTERCLASS] erro: {e_mc}")
+
+    # === INICIO DAS AULAS (matricula nova -> turma de agosto) ===
+    # Regra critica do time: quem se matricula agora ingressa na turma do
+    # 2o semestre (agosto). O LLM ja errou dizendo "fevereiro". Resposta
+    # canonica ANTES do LLM para nunca paragrafar errado.
+    try:
+        if detect_inicio_aulas_intent(question):
+            p(f"  [INICIO-AULAS] intent detectado — resposta canonica (turma de agosto)")
+            if handle_inicio_aulas_intent(conv_id, question=question):
+                conversation_messages.append({'role': 'user', 'text': question})
+                conversation_messages.append({'role': 'bot', 'text': INICIO_AULAS_MSG})
+            return
+    except Exception as e_ia:
+        p(f"  [INICIO-AULAS] erro: {e_ia}")
 
     # === POLO: intencao de ir presencialmente / dificuldade comunicacao online ===
     # Resolve o caso "Vanessa Carmona" (LLM inventou endereco da Barra Funda).
