@@ -7,6 +7,68 @@
 
 ---
 
+### [2026-05-21] - Varredura sistêmica: Ações A-F sobre 418 findings da auditoria IA
+
+**Decisão**
+6 ações cirúrgicas em pontos específicos do agente baseadas na varredura do
+supervisor OpenAI. Commits atômicos por ação, `py_compile` após cada edit.
+
+1. **Ação A — Reset estado pós-escalação CPF** (`20b82aa`): reseta
+   `_awaiting_cpf` e `_awaiting_polo_confirm` após `distribute_to_attendant`
+   no `is_escalation_trigger`. Corrige colisão "bot distribui + manda 'não
+   encontramos você'".
+2. **Ação B — Dedup signature no main loop** (`20b82aa`):
+   `_signature_recently_sent`/`_register_signature` no follow-up e auto-close
+   do `def main`. Supervisor loop já tinha; main loop não. Cobre 191 casos
+   `repeticao`.
+3. **Ação C — Fortificar handoff_active** (`72b2605`): check em 3 pontos
+   - `send_and_track`: motivos expandidos (`supervisor_block`, `retention`,
+     `polo_visit`, `pre_opening_queue`, `human_unavailable`, etc).
+   - `process_supervisor_loop` close path: novo check.
+   - main loop follow-up e close paths: novo check.
+   Cobre 106 casos `sobre_resposta`.
+4. **Ação D — Retries longos + auto-fix com cutoff temporal** (`af547c2`):
+   `_enforce_assignment_consistency` max_retries 2→4, sleeps 3/6/9→5/10/15/20/30s.
+   Nova função `_audit_autofix_assignment_findings` faz PATCH em findings
+   <60min. `AUDIT_AUTOFIX_CUTOFF_MIN=60` protege histórico DataCrazy contra
+   mudanças retroativas. Cobre 86 casos `assignment_mismatch`.
+5. **Ação E — Bloquear auto-close com aluno ativo** (`17decaa`): removido
+   shortcut `elapsed >= 3600 -> safe_to_close=True` que pulava check
+   `recv_ts > sent_ts`. Mesmo check adicionado no supervisor close path.
+   Cobre 35 casos `perdido_conversa`.
+6. **Ação F — Escalar com confidence baixa** (`83a04c0`): gate antes de
+   `send_and_track` da resposta LLM principal. Se `confidence < 0.30` e
+   dentro do horário, escala humano. Cobre 53 casos `resposta_generica`.
+
+**Contexto**
+Usuária reportou recorrência de erros e pediu varredura completa em vez de
+fix caso-a-caso. Audit retornou 418 findings únicos. Caso da imagem (loop de
+redistribuição Danubia→Felipe→Camila→Felipe em 22min com nota
+`supervisor_block_with_human`) coberto por Ação C e D.
+
+**Alternativas descartadas**
+- **Auto** em vez de **Opus**: usuária aprovou Opus pelo menor risco.
+- **Dry-run** Ação D: usuária aprovou execução direta com cutoff temporal.
+- Refatorar `send_message_crm` para `force=True`: alterava 8 callers; check
+  em `send_and_track` (que já tem o parâmetro) é menos invasivo.
+
+**Impacto**
+- Mensagens duplicadas em follow-up/close devem cair a zero.
+- Bot respondendo após handoff bloqueado em 3 pontos.
+- `assignment_mismatch` deve cair com retries longos + auto-fix.
+- Conversas com pergunta nova aberta não são mais encerradas.
+- Resposta LLM com baixa confiança escala em vez de ser enviada.
+- Risco residual: distribute mais lento em DCZ degradado (~75s a mais com
+  5 retries). Mitigado por max 30s entre tentativas.
+
+**Recuperação de bug introduzido**
+O primeiro commit Ação A (`87db99d`) introduziu 3 erros de indentação
+detectados por `py_compile`. Resetado com `git reset --hard 2e036f3` (não
+pushed) e refeito. Daqui pra frente, todo edit valida `py_compile` antes
+do próximo.
+
+---
+
 ### [2026-05-21] - Guards de ação + handoff stale + dispatch race condition
 
 **Decisão**
