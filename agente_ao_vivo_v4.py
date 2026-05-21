@@ -10068,6 +10068,27 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     p(f"  Resultado: conf={confidence:.2f} | top_sim={top_score:.3f}")
     p(f"  Resposta: {clean[:200]}...")
 
+    # ACAO F (2026-05-21): se confidence MUITO baixa (<0.30), escalar para
+    # consultor humano em vez de mandar resposta generica do LLM. Bug:
+    # 53 casos 'resposta_generica'/'nao_respondeu' onde bot mandava resposta
+    # vaga e nao escalava. Threshold 0.30 eh conservador — entre 0.30 e
+    # 0.40 ainda manda mas anexa botao "Falar com atendente".
+    if confidence < 0.30 and is_within_business_hours():
+        p(f"  [LOW-CONF] conf={confidence:.2f} < 0.30 -> escalando direto")
+        _low_conf_msg = (
+            "Pra eu não te passar nenhuma informação errada, vou te transferir "
+            "para um de nossos consultores, tá? Um momento, por favor! 😊"
+        )
+        send_and_track(conv_id, _low_conf_msg, force=True)
+        conversation_messages.append({'role': 'bot', 'text': _low_conf_msg})
+        log_to_db(conv_id, question, _low_conf_msg, confidence, 'escalate_low_conf')
+        try:
+            distribute_to_attendant(conv_id, f'Baixa confianca da IA ({confidence:.2f})')
+        except Exception as e_lc:
+            p(f"  [LOW-CONF] erro distribute: {e_lc}")
+        waiting_for_client = False; inactivity_start = 0
+        return
+
     if results and results[0][4]:
         try:
             media_list = json.loads(results[0][4])
