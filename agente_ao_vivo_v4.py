@@ -9678,13 +9678,21 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                 )
             except Exception:
                 pass
+            # ACAO A (2026-05-21): reset flags apos escalacao CPF (after-hours)
+            _awaiting_cpf = False
+            _awaiting_polo_confirm = False
             waiting_for_client = False; inactivity_start = 0
             return
         log_to_db(conv_id, question, ESCALATION_MSG, 0.1, 'escalate_cpf')
         distributed = distribute_to_attendant(conv_id, 'Dados sensíveis detectados (CPF/RGM)')
         conversation_messages.append({'role': 'bot', 'text': ESCALATION_MSG})
+        # ACAO A (2026-05-21): reset flags apos escalacao CPF. Bug imagem 1:
+        # bot distribuia para Felipe E disparava fluxo "Nao encontramos voce"
+        # + polos. Causa: _awaiting_cpf/_awaiting_polo_confirm persistiam.
+        _awaiting_cpf = False
+        _awaiting_polo_confirm = False
         waiting_for_client = False; inactivity_start = 0
-        p(f"  [ESCALADO] Distribuído={distributed} - Follow-ups desativados")
+        p(f"  [ESCALADO] Distribuído={distributed} - flags resetadas — humano assumiu")
         return
 
     # === STRIP EMOJIS + ASTERISCOS ===
@@ -10746,10 +10754,27 @@ def main():
                                     continue
                         except Exception:
                             pass
+                        # ACAO B (2026-05-21): dedup ANTES do envio. Bug:
+                        # main loop nao tinha signature dedup (so o supervisor
+                        # tinha). Resultado: 'Ainda esta por ai?' enviado 2x
+                        # quando ambos loops disparavam proximos. 191 casos
+                        # de 'repeticao' flagrados pelo supervisor IA.
+                        try:
+                            if _signature_recently_sent(cid, 'followup_1', window_s=2 * 3600):
+                                p(f"  [FOLLOWUP-1] [{cur_phone[-4:] if cur_phone else '????'}] dedup signature - skip")
+                                st['followup_stage'] = 1
+                                st['inactivity_start'] = time.time()
+                                continue
+                        except Exception:
+                            pass
                         msg1 = FOLLOWUP_1_MSG.format(name=name_fmt)
                         p(f"  [FOLLOWUP-1] [{cur_phone[-4:] if cur_phone else '????'}] {int(elapsed)}s sem resposta")
                         send_message_crm(cid, msg1, buttons=FOLLOWUP_1_BUTTONS)
                         log_to_db(cid, '(inatividade)', msg1, 1.0, 'followup_1')
+                        try:
+                            _register_signature(cid, 'followup_1', msg1)
+                        except Exception:
+                            pass
                         st['followup_stage'] = 1
                         st['inactivity_start'] = time.time()
 
@@ -10789,6 +10814,21 @@ def main():
                             continue
                         if _closes_this_cycle >= _MAX_CLOSES_PER_CYCLE:
                             continue
+                        # ACAO B (2026-05-21): dedup ANTES do envio. Bug: mensagem
+                        # de encerramento enviada 2x. Se signature ja registrada,
+                        # so finaliza conv sem reenviar msg.
+                        try:
+                            if _signature_recently_sent(cid, 'auto_close', window_s=2 * 3600):
+                                p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] dedup signature - so finaliza conv")
+                                close_conversation_crm(cid, phone=cur_phone)
+                                st['conversation_messages'] = []
+                                conversation_greeted.discard(cid)
+                                st['waiting_for_client'] = False
+                                st['followup_stage'] = 0
+                                st['inactivity_start'] = 0
+                                continue
+                        except Exception:
+                            pass
                         close_msg = CLOSE_INACTIVITY_MSG.format(name=name_fmt)
                         p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] {int(elapsed)}s -> encerrando")
                         _closes_this_cycle += 1
@@ -10802,6 +10842,10 @@ def main():
                                 p(f"  Erro ao salvar antes de fechar: {e}")
                         send_message_crm(cid, close_msg, buttons=CLOSE_INACTIVITY_BUTTONS)
                         log_to_db(cid, '(inatividade)', close_msg, 1.0, 'auto_close')
+                        try:
+                            _register_signature(cid, 'auto_close', close_msg)
+                        except Exception:
+                            pass
                         close_conversation_crm(cid, phone=cur_phone)
                         st['conversation_messages'] = []
                         conversation_greeted.discard(cid)
