@@ -911,9 +911,9 @@ ALMOCO_DURACAO_MIN = 60
 SAIDA_ANTE_MIN = 20
 
 # ===================== HORÁRIO DE ATENDIMENTO (sobrescrito por agent_config) =====================
-BUSINESS_HOURS_WEEKDAY_START = 9   # Seg-Sex início
+BUSINESS_HOURS_WEEKDAY_START = 8   # Seg-Sex início (mudado de 9 para 8 em 2026-05-21: alguns consultores entram 8h)
 BUSINESS_HOURS_WEEKDAY_END = 20    # Seg-Sex fim (exclusivo)
-BUSINESS_HOURS_SATURDAY_START = 9
+BUSINESS_HOURS_SATURDAY_START = 8  # Sáb início (mantido coerente com weekday)
 BUSINESS_HOURS_SATURDAY_END = 13   # Sábado fim (exclusivo)
 
 # Janela "quase abrindo": faltam <= PRE_OPENING_MARGIN_MIN para o expediente comecar
