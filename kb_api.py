@@ -2579,6 +2579,55 @@ async def audit_findings_resolve(finding_id: int, request: Request):
     return {'ok': True, 'id': finding_id, 'conv_id': conv_id, 'unblocked': unblock}
 
 
+@app.get("/api/diag/dcz-msgs/{conv_id}")
+async def diag_dcz_msgs(conv_id: str):
+    """Endpoint diagnostico — chama o DCZ /messaging/conversations/{id}/messages
+    e retorna o JSON cru pra ver exatamente quais chaves o DCZ usa.
+    Usado para debugar o caso empty_window=75 no supervisor."""
+    import os, requests
+    DCZ_MSG = os.environ.get('DCZ_MSG', 'https://api.datacrazy.com.br')
+    DCZ_TOKEN = os.environ.get('DCZ_TOKEN', '')
+    if not DCZ_TOKEN:
+        return {'ok': False, 'error': 'DCZ_TOKEN nao configurado'}
+    H = {'Authorization': f'Bearer {DCZ_TOKEN}', 'Content-Type': 'application/json'}
+    try:
+        r = requests.get(
+            f'{DCZ_MSG}/messaging/conversations/{conv_id}/messages',
+            headers=H, params={'limit': 5}, timeout=15
+        )
+        out = {'status': r.status_code, 'headers': dict(r.headers)}
+        try:
+            j = r.json()
+            out['type'] = str(type(j).__name__)
+            if isinstance(j, dict):
+                out['keys'] = list(j.keys())
+                out['sample'] = {}
+                for k in list(j.keys())[:5]:
+                    v = j[k]
+                    if isinstance(v, list):
+                        out['sample'][k] = f'<list len={len(v)}>'
+                        if v and isinstance(v[0], dict):
+                            out['sample'][f'{k}[0]_keys'] = list(v[0].keys())
+                            out['sample'][f'{k}[0]'] = {kk: str(vv)[:80] for kk, vv in list(v[0].items())[:10]}
+                    elif isinstance(v, dict):
+                        out['sample'][k] = {'keys': list(v.keys())[:10]}
+                    else:
+                        out['sample'][k] = str(v)[:120]
+            elif isinstance(j, list):
+                out['list_len'] = len(j)
+                if j and isinstance(j[0], dict):
+                    out['first_item_keys'] = list(j[0].keys())
+                    out['first_item'] = {k: str(v)[:80] for k, v in list(j[0].items())[:10]}
+            else:
+                out['raw_short'] = str(j)[:300]
+        except Exception as e_json:
+            out['json_error'] = str(e_json)
+            out['text_short'] = r.text[:500]
+        return out
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
 @app.get("/api/diag/time")
 async def diag_time():
     """Endpoint diagnostico — retorna a percepcao do servidor sobre o

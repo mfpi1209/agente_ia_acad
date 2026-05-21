@@ -5750,34 +5750,26 @@ def _openai_supervisor_fetch_convs():
 
 
 def _openai_supervisor_get_window(conv_id, max_msgs=10):
-    """Retorna lista [(role, text, ts, is_internal)] das ultimas mensagens."""
+    """Retorna lista [(role, text, ts, is_internal)] das ultimas mensagens.
+
+    Usa get_conversation_messages_api (que ja eh validado e funciona) em
+    vez de chamar o DCZ diretamente. O caminho proprio anterior estava
+    retornando lista vazia para todas as 75 convs (caso reportado).
+    """
     try:
-        r = requests.get(f'{DCZ_MSG}/messaging/conversations/{conv_id}/messages',
-                         headers=H, params={'limit': max_msgs * 2}, timeout=15)
-        if r.status_code != 200:
-            return []
-        data = r.json()
-        # DCZ /conversations/{id}/messages retorna {"messages": [...]},
-        # NaO {"data": [...]} (esse eh para /conversations). O fix anterior
-        # (commit 5b8488c) endereceou outro caminho — esse aqui ainda usava
-        # 'data' e por isso o supervisor lia window vazia para todas as 75
-        # convs listadas.
-        if isinstance(data, dict):
-            msgs = data.get('messages') or data.get('data') or []
-        elif isinstance(data, list):
-            msgs = data
-        else:
-            msgs = []
-        if not isinstance(msgs, list):
+        msgs = get_conversation_messages_api(conv_id, limit=max_msgs * 2)
+        if not msgs or not isinstance(msgs, list):
             return []
         out = []
         for m in msgs[:max_msgs]:
-            body = (m.get('body') or m.get('text') or '').strip()
+            if not isinstance(m, dict):
+                continue
+            body = (m.get('body') or m.get('text') or m.get('content') or '').strip()
             if not body:
                 continue
-            from_me = bool(m.get('isFromMe') or m.get('fromMe'))
-            is_internal = bool(m.get('isInternal'))
-            has_attendant = bool(m.get('attendant'))
+            from_me = bool(m.get('isFromMe') or m.get('fromMe') or m.get('from_me'))
+            is_internal = bool(m.get('isInternal') or m.get('internal'))
+            has_attendant = bool(m.get('attendant') or m.get('attendantId') or m.get('attendant_id'))
             if from_me and has_attendant and not is_internal:
                 role = 'humano'
             elif from_me and not has_attendant:
@@ -5786,9 +5778,13 @@ def _openai_supervisor_get_window(conv_id, max_msgs=10):
                 role = 'nota_interna'
             else:
                 role = 'aluno'
-            out.append((role, body[:600], m.get('createdAt') or '', is_internal))
+            out.append((role, body[:600], m.get('createdAt') or m.get('created_at') or '', is_internal))
         return list(reversed(out))  # cronologico ascendente
-    except Exception:
+    except Exception as e:
+        try:
+            p(f"  [OPENAI-SUP] erro get_window conv={conv_id[:12]}: {e}")
+        except Exception:
+            pass
         return []
 
 
