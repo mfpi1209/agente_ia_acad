@@ -6599,6 +6599,109 @@ def _audit_recheck_assignment_findings(max_age_minutes=240):
         p(f"  [AUDIT-RECHECK] {resolved} findings auto-resolvidos (estado ja consistente)")
 
 
+# ACAO D (2026-05-21): cutoff temporal para auto-fix de assignment_mismatch.
+# Apenas findings criados DEPOIS de NOW - AUDIT_AUTOFIX_CUTOFF_MIN sao
+# elegiveis para PATCH automatico. Findings antigos (anteriores ao deploy
+# desta logica) NUNCA serao tocados — exigem correcao manual via Cockpit.
+# Isso protege o historico de DataCrazy contra mudancas em massa retroativas.
+AUDIT_AUTOFIX_CUTOFF_MIN = 60
+
+
+def _audit_autofix_assignment_findings(max_age_minutes=AUDIT_AUTOFIX_CUTOFF_MIN,
+                                       max_to_fix_per_cycle=5):
+    """Auto-corrige findings de assignment_mismatch APENAS recentes (<cutoff).
+
+    Para cada finding aberto criado nos ultimos max_age_minutes minutos:
+      1) le estado atual de lead/business/chat
+      2) se ainda inconsistente, faz PATCH para expected_crm_id/expected_chat_id
+      3) aguarda 5s, re-le, e marca resolved se OK
+
+    CUTOFF TEMPORAL: findings antigos (>= max_age_minutes) NUNCA sao tocados.
+    Isso garante que casos historicos no DataCrazy nao sao re-atribuidos por
+    engano apos o deploy desta logica.
+    """
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, conv_id, phone, detail
+              FROM agent_audit_findings
+             WHERE problem_type = 'assignment_mismatch'
+               AND resolved_at IS NULL
+               AND created_at > NOW() - %s::interval
+             ORDER BY created_at DESC
+             LIMIT %s
+        """, (f'{int(max_age_minutes)} minutes', int(max_to_fix_per_cycle)))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        p(f"  [AUDIT-AUTOFIX] erro listar: {e}")
+        return
+
+    if not rows:
+        return
+
+    fixed = 0
+    for fid, conv_id, phone, detail in rows:
+        try:
+            if isinstance(detail, str):
+                d = json.loads(detail or '{}')
+            else:
+                d = detail or {}
+            expected_name = d.get('expected_name') or ''
+            expected_crm_id = d.get('expected_crm_id') or ''
+            expected_chat_id = d.get('expected_chat_id') or ''
+            lead_id = d.get('lead_id') or ''
+            biz_id = d.get('biz_id') or ''
+
+            if not (expected_crm_id or expected_chat_id):
+                continue
+
+            patched = False
+
+            if expected_crm_id and lead_id:
+                try:
+                    r = requests.patch(f'{DCZ_CRM}/leads/{lead_id}', headers=H,
+                                       json={'attendant': {'id': expected_crm_id}},
+                                       timeout=10)
+                    if r.status_code in (200, 201, 204):
+                        patched = True
+                        p(f"  [AUDIT-AUTOFIX] finding {fid} PATCH lead -> {expected_name}")
+                except Exception:
+                    pass
+            if expected_crm_id and biz_id:
+                try:
+                    r = requests.patch(f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+                                       json={'attendant': {'id': expected_crm_id},
+                                             'stageId': STAGE_ATENDIMENTO_ID},
+                                       timeout=10)
+                    if r.status_code in (200, 201, 204):
+                        patched = True
+                        p(f"  [AUDIT-AUTOFIX] finding {fid} PATCH business -> {expected_name}")
+                except Exception:
+                    pass
+            if expected_chat_id and conv_id:
+                try:
+                    r = requests.post(
+                        f'{DCZ_MSG}/messaging/conversations/{conv_id}/change-attendant',
+                        headers=H, json={'attendantId': expected_chat_id}, timeout=15)
+                    if r.status_code in (200, 201, 204):
+                        patched = True
+                        p(f"  [AUDIT-AUTOFIX] finding {fid} change-attendant -> {expected_name}")
+                except Exception:
+                    pass
+
+            if patched:
+                fixed += 1
+        except Exception as e_row:
+            p(f"  [AUDIT-AUTOFIX] erro processar finding {fid}: {e_row}")
+            continue
+
+    if fixed:
+        p(f"  [AUDIT-AUTOFIX] {fixed} findings com PATCH aplicado (cutoff={max_age_minutes}min). Recheck no proximo ciclo confirma.")
+
+
 def process_openai_supervisor_loop():
     """Roda no minimo a cada OPENAI_SUPERVISOR_INTERVAL_S. Audita convs ativas
     com OpenAI, grava findings e bloqueia agente em casos graves."""
@@ -6621,6 +6724,15 @@ def process_openai_supervisor_loop():
         _audit_recheck_assignment_findings()
     except Exception as e_rc:
         p(f"  [OPENAI-SUP] erro recheck: {e_rc}")
+
+    # ACAO D (2026-05-21): auto-fix de findings RECENTES (< cutoff).
+    # Tenta PATCH no CRM/chat para findings novos onde DCZ nao propagou
+    # mesmo apos retries do distribute. CUTOFF TEMPORAL protege historico:
+    # findings antigos NUNCA sao auto-corrigidos.
+    try:
+        _audit_autofix_assignment_findings()
+    except Exception as e_af:
+        p(f"  [OPENAI-SUP] erro autofix: {e_af}")
 
     _openai_sup_stats['cycles'] = _openai_sup_stats.get('cycles', 0) + 1
     _openai_sup_stats['last_cycle_at'] = now_ts
@@ -7476,7 +7588,7 @@ def _supabase_increment_fila(consultant_id, current_fila):
 
 
 def _enforce_assignment_consistency(conv_id, lead_id, phone, expected_name,
-                                    max_retries=2):
+                                    max_retries=4):
     """Verifica e força que o atendente do lead+business+chat seja realmente
     `expected_name` (o nome que será mencionado na nota interna e na
     mensagem ao cliente). Faz até max_retries patches se divergir.
@@ -7657,11 +7769,11 @@ def _enforce_assignment_consistency(conv_id, lead_id, phone, expected_name,
                 p(f"  [VERIFY] retry change-attendant -> {expected_chat_id[:8]} status={rC.status_code}")
             except Exception as e:
                 p(f"  [VERIFY] retry chat err: {e}")
-        # change-attendant no DCZ tem propagacao assincrona (eventual consistency).
-        # Sleeps crescentes: 3s, 6s, 9s. Dao tempo do DCZ refletir antes de
-        # marcar como divergente — evita falsos positivos do tipo "Chat=False"
-        # quando o atendimento foi de fato iniciado segundos depois.
-        time.sleep(min(3 * (attempt + 1), 10))
+        # ACAO D (2026-05-21): sleeps crescentes 5s/10s/15s/20s/30s (max 30s).
+        # Antes 3s/6s/9s/9s/9s (max 10s) gerava 86 falsos positivos
+        # 'assignment_mismatch' porque o DCZ ainda nao tinha propagado
+        # change-attendant. Agora aguardamos mais tempo entre rechecks.
+        time.sleep(min(5 * (attempt + 1), 30))
 
     # ---- pos-retries: ainda divergente ----
     p(f"  [VERIFY] FALHA persistente apos {result['attempts']} tentativas — registrando audit")
@@ -7878,7 +7990,7 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
     try:
         verify_result = _enforce_assignment_consistency(
             conv_id=conv_id, lead_id=lead_id, phone=phone, expected_name=nome,
-            max_retries=2,
+            max_retries=4,
         )
         # se chat divergiu definitivo, atualiza chat_ok local com a realidade
         if verify_result.get('ok_chat') is False:
