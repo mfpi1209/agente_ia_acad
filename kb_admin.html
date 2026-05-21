@@ -723,6 +723,7 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
       <option value="pending">Só pendentes</option>
       <option value="in_progress">Em atendimento</option>
       <option value="resolved">Resolvidos</option>
+      <option value="closed_no_engagement">Encerrados sem atendimento</option>
       <option value="all">Todos</option>
     </select>
     <select id="aoh-filter-tier" class="inp btn-sm" style="width:auto;" onchange="loadAfterHours()">
@@ -2388,11 +2389,11 @@ async function loadAfterHours(){
       empty.classList.remove('hidden');
     }else{
       empty.classList.add('hidden');
-      const statusLbl={pending:'Pendente',in_progress:'Em atendimento',resolved:'Resolvido',dismissed:'Dispensado'};
+      const statusLbl={pending:'Pendente',in_progress:'Em atendimento',resolved:'Resolvido',dismissed:'Dispensado',closed_no_engagement:'Encerrado sem atendimento'};
       tbody.innerHTML=items.map(r=>{
         const dcz=dczLink({phone:r.phone||''});
         const tierBadge=r.tier==='insist'?'<span class="badge b-red">Insistência</span>':'<span class="badge b-yellow">1º pedido</span>';
-        const stCls=r.status==='pending'?'b-yellow':r.status==='in_progress'?'b-blue':'b-green';
+        const stCls=r.status==='pending'?'b-yellow':r.status==='in_progress'?'b-blue':r.status==='closed_no_engagement'?'b-gray':'b-green';
         return `<tr class="${r.tier==='insist'?'bg-amber-50/50':''}">
           <td class="p-3 whitespace-nowrap text-xs">${r.created_at?new Date(r.created_at).toLocaleString('pt-BR'):'—'}</td>
           <td class="p-3"><strong>${esc(r.student_name||'—')}</strong><br><span class="text-xs text-gray-400">${esc(r.phone||'')}</span></td>

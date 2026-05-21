@@ -2328,7 +2328,7 @@ async def after_hours_pending(
     limit: int = Query(100, ge=1, le=500),
 ):
     """Lista fila de retornos fora do horário."""
-    allowed_status = {'pending', 'in_progress', 'resolved', 'all', 'active'}
+    allowed_status = {'pending', 'in_progress', 'resolved', 'closed_no_engagement', 'all', 'active'}
     if status not in allowed_status:
         status = 'pending'
     with get_db() as conn:
@@ -2338,6 +2338,9 @@ async def after_hours_pending(
         where = ["status != 'superseded'"]
         params = []
         if status == 'active':
+            # NaO inclui closed_no_engagement em 'ativos' — esses sao encerrados
+            # sem atendimento (nao precisam mais de acao, mas tampouco sao
+            # 'resolvidos').
             where.append("status IN ('pending', 'in_progress')")
         elif status != 'all':
             where.append("status = %s")
@@ -2385,12 +2388,12 @@ async def after_hours_pending_update(item_id: int, request: Request):
     """Atualiza status da fila (pending → in_progress → resolved)."""
     data = await request.json()
     new_status = (data.get('status') or '').strip()
-    if new_status not in ('pending', 'in_progress', 'resolved', 'dismissed'):
+    if new_status not in ('pending', 'in_progress', 'resolved', 'dismissed', 'closed_no_engagement'):
         raise HTTPException(400, 'status inválido')
     with get_db() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         _ensure_pending_escalation_table(cur)
-        resolved_clause = ", resolved_at = NOW()" if new_status == 'resolved' else ", resolved_at = NULL"
+        resolved_clause = ", resolved_at = NOW()" if new_status in ('resolved', 'closed_no_engagement') else ", resolved_at = NULL"
         cur.execute(
             f"UPDATE pending_escalation SET status = %s, updated_at = NOW(){resolved_clause} WHERE id = %s RETURNING id",
             (new_status, item_id),

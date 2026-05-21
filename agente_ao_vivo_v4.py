@@ -3982,17 +3982,54 @@ def record_pending_escalation(conv_id, reason, tier='insist', retorno_label=None
 
 
 def update_pending_escalation_status(conv_id, status, note=''):
-    """Atualiza status da fila Cockpit (pending / in_progress / resolved / failed)."""
+    """Atualiza status da fila Cockpit (pending / in_progress / resolved /
+    closed_no_engagement / failed).
+
+    REGRA IMPORTANTE: quando o status pedido eh 'resolved' (tipicamente vindo
+    de close_conversation_crm em auto-close por inatividade) mas o registro
+    atual em pending_escalation ainda esta em 'pending' (nunca foi
+    'in_progress', ou seja, nenhum consultor humano realmente atendeu),
+    NaO marcamos como 'resolved' — usamos 'closed_no_engagement' para sinalizar
+    que o aluno enviou mensagem fora do horario, o agente respondeu apenas com
+    a msg padrao, o aluno nao retornou, e a conversa foi encerrada por
+    inatividade sem atendimento humano real.
+
+    Isso evita o ruido em "Resolvido" no Cockpit/Auditoria IA quando o agente
+    nao realizou atendimento de fato.
+    """
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
-        resolved_clause = ", resolved_at = NOW()" if status == 'resolved' else ""
+
+        effective_status = status
+        if status == 'resolved':
+            # Verifica o status atual ANTES de mudar — se ja esta 'pending'
+            # significa que nunca foi distribuido (nunca virou 'in_progress'),
+            # entao na pratica o atendimento humano nao ocorreu.
+            try:
+                cur.execute(
+                    "SELECT status FROM pending_escalation "
+                    "WHERE conv_id = %s ORDER BY id DESC LIMIT 1",
+                    (conv_id,),
+                )
+                row = cur.fetchone()
+                current = (row[0] if row else '') or ''
+                if current == 'pending':
+                    effective_status = 'closed_no_engagement'
+                    p(f"  [FILA] {conv_id[:12]} auto-close sem engagement: marcando closed_no_engagement em vez de resolved")
+            except Exception as e_check:
+                p(f"  [FILA] erro check current status: {e_check}")
+
+        resolved_clause = ", resolved_at = NOW()" if effective_status in ('resolved', 'closed_no_engagement') else ""
         cur.execute(
             f"""UPDATE pending_escalation SET status = %s, updated_at = NOW(){resolved_clause}
                 WHERE conv_id = %s AND status IN ('pending', 'in_progress', 'failed')""",
-            (status, conv_id),
+            (effective_status, conv_id),
         )
-        if note and cur.rowcount:
+        # Só envia nota interna no DCZ se o status for 'resolved' propriamente.
+        # Em 'closed_no_engagement' nao queremos poluir a conv com mensagem
+        # "marcado como Resolvido", pois o atendimento NAO foi feito.
+        if note and cur.rowcount and effective_status == 'resolved':
             try:
                 requests.post(
                     f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
