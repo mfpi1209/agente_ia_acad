@@ -4284,11 +4284,84 @@ _agent_log_file = None
 _agent_test_phone = '11970617878'
 _AGENT_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'agent_live.log')
 
+def _read_runtime_flag():
+    """Le agent_config.agent_runtime_enabled. Default: True (ligado)."""
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT value FROM agent_config WHERE key = 'agent_runtime_enabled'")
+            row = cur.fetchone()
+            cur.close()
+        if row and row[0] is not None:
+            v = str(row[0]).strip().lower()
+            return v not in ('false', '0', 'off', 'disabled', 'no')
+        return True
+    except Exception:
+        return True
+
+
+def _set_runtime_flag(enabled: bool):
+    """Atualiza agent_config.agent_runtime_enabled."""
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO agent_config (key, value, updated_at)
+                VALUES ('agent_runtime_enabled', %s, NOW())
+                ON CONFLICT (key) DO UPDATE
+                SET value = EXCLUDED.value, updated_at = NOW()
+            """, ('true' if enabled else 'false',))
+            conn.commit()
+            cur.close()
+        return True
+    except Exception as e:
+        print(f'[FLAG] erro set: {e}', flush=True)
+        return False
+
+
+def _read_heartbeat_status():
+    """Le heartbeat para saber se o processo do agente esta vivo (independente da flag)."""
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT status, pid, EXTRACT(EPOCH FROM (NOW() - last_beat)) as seconds_ago
+                FROM agent_heartbeat WHERE id = 1
+            """)
+            row = cur.fetchone()
+            cur.close()
+        if not row:
+            return {'process_alive': False, 'pid': None, 'seconds_ago': None, 'hb_status': 'offline'}
+        secs = float(row[2] or 9999)
+        return {
+            'process_alive': secs < 120,
+            'pid': row[1],
+            'seconds_ago': round(secs),
+            'hb_status': row[0],
+        }
+    except Exception:
+        return {'process_alive': False, 'pid': None, 'seconds_ago': None, 'hb_status': 'offline'}
+
+
 @app.get("/api/agent/live/status")
 async def agent_live_status():
-    global _agent_process
-    running = _agent_process is not None and _agent_process.poll() is None
-    return {"running": running, "phone": _agent_test_phone if running else None, "pid": _agent_process.pid if running else None}
+    """Status do agente PRINCIPAL (start.sh) baseado em flag de runtime + heartbeat.
+    Antes esse endpoint refletia o subprocess de teste, o que enganava o usuario:
+    o agente real do start.sh continuava atendendo mesmo com 'Desligado' no dashboard.
+    Agora: running = enabled flag E heartbeat recente."""
+    flag = _read_runtime_flag()
+    hb = _read_heartbeat_status()
+    process_alive = hb['process_alive']
+    running = bool(flag and process_alive)
+    return {
+        "running": running,
+        "enabled": flag,
+        "process_alive": process_alive,
+        "pid": hb.get('pid'),
+        "heartbeat_seconds_ago": hb.get('seconds_ago'),
+        "heartbeat_status": hb.get('hb_status'),
+    }
+
 
 @app.get("/api/agent/live/logs")
 async def agent_live_logs(lines: int = 80):
@@ -4299,53 +4372,34 @@ async def agent_live_logs(lines: int = 80):
     except FileNotFoundError:
         return {"lines": []}
 
+
 @app.post("/api/agent/live/start")
 async def agent_live_start():
-    global _agent_process, _agent_log_file
-    if _agent_process is not None and _agent_process.poll() is None:
-        return {"ok": False, "msg": "Agente já está rodando", "pid": _agent_process.pid}
-    try:
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute("DELETE FROM msg_dedup WHERE processed_at > NOW() - INTERVAL '2 hours'")
-            conn.commit()
-            cur.close()
-    except Exception:
-        pass
-    env = os.environ.copy()
-    env['PHONE_TO_MONITOR'] = _agent_test_phone
-    env['PYTHONUNBUFFERED'] = '1'
-    _agent_log_file = open(_AGENT_LOG_PATH, 'w', encoding='utf-8', errors='replace')
-    creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-    _agent_process = subprocess.Popen(
-        [sys.executable, '-u', 'agente_ao_vivo_v4.py'],
-        cwd=os.path.dirname(os.path.abspath(__file__)),
-        env=env,
-        stdout=_agent_log_file, stderr=subprocess.STDOUT,
-        creationflags=creation_flags,
-    )
-    return {"ok": True, "msg": f"Agente iniciado (phone={_agent_test_phone})", "pid": _agent_process.pid}
+    """Liga o agente PRINCIPAL via flag. Nao inicia subprocess novo —
+    o agente do start.sh ja esta vivo e respeita essa flag automaticamente."""
+    ok = _set_runtime_flag(True)
+    if not ok:
+        return {"ok": False, "msg": "Erro ao atualizar flag no banco"}
+    hb = _read_heartbeat_status()
+    return {
+        "ok": True,
+        "msg": "Agente ligado (processamento ativado).",
+        "process_alive": hb['process_alive'],
+        "pid": hb.get('pid'),
+    }
+
 
 @app.post("/api/agent/live/stop")
 async def agent_live_stop():
-    global _agent_process, _agent_log_file
-    if _agent_process is None or _agent_process.poll() is not None:
-        _agent_process = None
-        if _agent_log_file:
-            _agent_log_file.close()
-            _agent_log_file = None
-        return {"ok": True, "msg": "Agente não estava rodando"}
-    pid = _agent_process.pid
-    _agent_process.terminate()
-    try:
-        _agent_process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        _agent_process.kill()
-    _agent_process = None
-    if _agent_log_file:
-        _agent_log_file.close()
-        _agent_log_file = None
-    return {"ok": True, "msg": f"Agente parado (pid={pid})"}
+    """Desliga o agente PRINCIPAL via flag. NAO mata o processo — apenas
+    pausa o processamento. Em ate ~5s o agente para de responder."""
+    ok = _set_runtime_flag(False)
+    if not ok:
+        return {"ok": False, "msg": "Erro ao atualizar flag no banco"}
+    return {
+        "ok": True,
+        "msg": "Agente desligado (processamento pausado em ate 5s).",
+    }
 
 @app.post("/api/agent/restart")
 async def agent_restart():

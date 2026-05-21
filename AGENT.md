@@ -7,6 +7,81 @@
 
 ---
 
+### [2026-05-21] - Ligar/Desligar real do agente via flag em `agent_config`
+
+**Decisão**
+- Criar flag `agent_runtime_enabled` em `agent_config` (default `true`).
+- O agente principal lê a flag a cada iteração do loop (cache 5s). Se `false`,
+  pula TODO o processamento (rescue, fila, auto-dispatch, novas convs) e
+  registra heartbeat com status `paused`. Reativação é instantânea.
+- Endpoints `/api/agent/live/start` e `/api/agent/live/stop` viram set/unset
+  dessa flag (NÃO matam mais subprocess). `/api/agent/live/status` agora
+  reporta `running = enabled flag AND heartbeat recente`.
+- O agente continua sendo iniciado pelo `start.sh` no container — flag não
+  controla o ciclo de vida do processo, só se ele processa.
+
+**Contexto**
+Dashboard mostrava "Agente Desligado" mas o agente continuava atendendo e
+distribuindo. Causa: existiam dois mecanismos em paralelo — (1) agente
+principal subido pelo `start.sh` e (2) subprocess de teste com `PHONE_TO_MONITOR`
+controlado pelo botão "Ligar/Desligar". O botão controlava só o (2), que
+quase nunca estava em uso. Isso impedia o operador de pausar o agente real
+durante deploys ou em caso de comportamento errático.
+
+**Alternativas descartadas**
+- *Remover agente do `start.sh` e só subir via botão Ligar*: risco operacional
+  alto — se container reinicia sozinho (crash, restart automático), agente
+  fica parado até alguém notar. Inaceitável fora do expediente.
+- *Híbrido (start.sh + flag controla subprocess separado)*: combinaria a
+  complexidade das duas abordagens sem ganho real.
+- *Matar/reiniciar processo via SIGTERM do cockpit*: depende de IPC entre
+  processos dentro do container, frágil em ambientes containerizados.
+
+**Impacto**
+- Botão "Ligar/Desligar" do cockpit volta a refletir a realidade
+  (`running: true/false` corresponde ao que o operador vê acontecendo).
+- Deploy passa a ter procedimento seguro: clicar Desligar → fazer commit →
+  rebuild → clicar Ligar.
+- Após rebuild, o agente respeita o último estado da flag (não fica
+  ligado/desligado por acidente).
+- Em caso de bug crítico em produção, operador pode parar o agente
+  instantaneamente sem desligar o container inteiro (mantém o dashboard
+  operacional, supervisor OpenAI ativo, etc.).
+
+**Telemetria de validação**
+- `GET /api/agent/live/status` retorna `{enabled, process_alive, heartbeat_seconds_ago}`.
+- Heartbeat do agente passa a registrar status `paused` quando flag=false.
+
+---
+
+### [2026-05-21] - Resgate ignora despedidas ("Obrigado") e fecha conversa
+
+**Decisão**
+- `process_in_hours_rescue` passa a buscar a última mensagem do aluno antes
+  de distribuir. Se for despedida/agradecimento (`_is_farewell_message`),
+  pula o resgate, fecha a conversa via `close_conversation_crm` e marca
+  `pending_escalation.status = 'closed_no_engagement'`.
+
+**Contexto**
+Caso reportado: Gilflan respondeu apenas "Obrigado" após atendimento já
+concluído pela Beatriz. Após 10min sem nova mensagem, `process_in_hours_rescue`
+distribuiu a conversa para Danubia desnecessariamente. A função
+`_is_farewell_message` já existia e era usada em `process_post_close_rescue`,
+mas não em `process_in_hours_rescue`.
+
+**Alternativas descartadas**
+- *Apenas pular sem fechar*: deixaria a conversa órfã em "Em aberto" para
+  sempre, eventualmente seria recapturada pelo próximo ciclo de rescue.
+- *Filtrar antes na listagem*: a info de despedida só é confiável buscando
+  histórico, não tem como filtrar via query do DCZ.
+
+**Impacto**
+- Não há mais distribuição reflexa de "Obrigado".
+- Conversas com despedida real são fechadas no CRM e marcadas como
+  `closed_no_engagement` (mesma marcação usada para auto-close sem engajamento).
+
+---
+
 ### [2026-05-20] - Auto-correção de findings + upgrade para GPT-5.1
 
 **Decisão**

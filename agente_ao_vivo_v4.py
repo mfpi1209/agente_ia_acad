@@ -2034,6 +2034,73 @@ def _heartbeat(status='online', extra=''):
             pass
 
 
+# ===================== FLAG DE LIGAR/DESLIGAR (controle do cockpit) =====================
+# Flag em agent_config (key='agent_runtime_enabled') controla se o agente
+# DEVE processar conversas ou ficar em pausa. Default: enabled.
+# Cache em memoria com TTL curto para evitar consulta a cada msg.
+_AGENT_RUNTIME_FLAG_CACHE = {'value': True, 'last_check_ts': 0}
+_AGENT_RUNTIME_FLAG_TTL_S = 5  # checa banco a cada 5s no maximo
+
+
+def _agent_runtime_enabled():
+    """Le a flag agent_runtime_enabled do banco. Default True (ligado).
+    Cache de 5s para nao sobrecarregar o DB."""
+    now_ts = time.time()
+    if (now_ts - _AGENT_RUNTIME_FLAG_CACHE['last_check_ts']) < _AGENT_RUNTIME_FLAG_TTL_S:
+        return _AGENT_RUNTIME_FLAG_CACHE['value']
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM agent_config WHERE key = 'agent_runtime_enabled'")
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and row[0] is not None:
+            v = str(row[0]).strip().lower()
+            enabled = v not in ('false', '0', 'off', 'disabled', 'no')
+        else:
+            enabled = True  # default: ligado
+        _AGENT_RUNTIME_FLAG_CACHE['value'] = enabled
+        _AGENT_RUNTIME_FLAG_CACHE['last_check_ts'] = now_ts
+        return enabled
+    except Exception as e:
+        try:
+            p(f"  [RUNTIME-FLAG] erro leitura: {e}")
+        except Exception:
+            pass
+        # falha de DB: assume ligado para nao deixar alunos sem resposta
+        return True
+
+
+def set_agent_runtime_enabled(enabled: bool, source: str = ''):
+    """Atualiza a flag agent_runtime_enabled no banco."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO agent_config (key, value, updated_at)
+            VALUES ('agent_runtime_enabled', %s, NOW())
+            ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value, updated_at = NOW()
+        """, ('true' if enabled else 'false',))
+        conn.commit()
+        cur.close()
+        conn.close()
+        _AGENT_RUNTIME_FLAG_CACHE['value'] = bool(enabled)
+        _AGENT_RUNTIME_FLAG_CACHE['last_check_ts'] = time.time()
+        try:
+            p(f"  [RUNTIME-FLAG] set={enabled} source={source}")
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        try:
+            p(f"  [RUNTIME-FLAG] erro set: {e}")
+        except Exception:
+            pass
+        return False
+
+
 def ensure_memory_tables():
     """Cria tabelas se necessário (chamada uma vez no startup)."""
     conn = get_db()
@@ -4482,6 +4549,34 @@ def process_in_hours_rescue():
                 phone = phone[2:]
             name = (ct.get('name', '') or '').strip()
             first = name.split()[0] if name else ''
+
+            # === PULA RESGATE SE ULTIMA MSG DO ALUNO FOR DESPEDIDA/AGRADECIMENTO ===
+            # Caso reportado: aluno mandou so "Obrigado" apos atendimento ja
+            # concluido — nao precisa de novo atendente, so fecha o ciclo.
+            try:
+                _msgs = get_conversation_messages_api(cid, limit=6)
+                _last_aluno_body = ''
+                for _m in (_msgs or []):
+                    if _m.get('received', False):
+                        _last_aluno_body = (_m.get('body') or _m.get('text') or '').strip()
+                        break
+                if _last_aluno_body and _is_farewell_message(_last_aluno_body):
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} ultima msg do aluno e despedida ('{_last_aluno_body[:30]}') — pulando resgate e fechando")
+                    try:
+                        close_conversation_crm(cid, phone=phone)
+                    except Exception as e_cc:
+                        p(f"  [IN-HOURS-RESCUE] erro close: {e_cc}")
+                    try:
+                        update_pending_escalation_status(
+                            cid, 'closed_no_engagement',
+                            note='Aluno encerrou com agradecimento/despedida — sem necessidade de atendente',
+                        )
+                    except Exception:
+                        pass
+                    _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                    continue
+            except Exception as e_far:
+                p(f"  [IN-HOURS-RESCUE] erro check farewell {cid[:12]}: {e_far}")
 
             consultant = get_available_consultant()
             if not consultant:
@@ -9570,12 +9665,32 @@ def main():
     except Exception as e_one:
         p(f"  [ONESHOT-VANESSA] erro: {e_one}")
 
+    _paused_logged_at = 0
     while True:
         try:
             time.sleep(POLL_INTERVAL)
             cycle += 1
             _cached_msgs.clear()
             maybe_reload()
+
+            # === CHECAGEM DE FLAG: agente DESLIGADO via cockpit ===
+            # Quando agent_runtime_enabled=false no banco, mantemos o processo
+            # vivo (heartbeat) mas pulamos TODO o processamento: rescue, fila,
+            # auto-dispatch, novas conversas. Reativacao e instantanea.
+            if not _agent_runtime_enabled():
+                try:
+                    _heartbeat('paused', f'cycle={cycle} (DESLIGADO via cockpit)')
+                except Exception:
+                    pass
+                # log uma vez por minuto para nao poluir
+                if (time.time() - _paused_logged_at) > 60:
+                    p(f"  [PAUSED] Agente desligado via cockpit (cycle={cycle}). Aguardando reativacao...")
+                    _paused_logged_at = time.time()
+                continue
+            else:
+                if _paused_logged_at:
+                    p(f"  [RESUMED] Agente reativado via cockpit (cycle={cycle}).")
+                    _paused_logged_at = 0
 
             try:
                 _heartbeat('online', f'cycle={cycle} (loop start)')
