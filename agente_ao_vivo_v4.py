@@ -5238,14 +5238,94 @@ def _normalize_body_for_dedup(text):
     return cleaned[:280]
 
 
+def _ensure_body_norm_column():
+    """Migration leve: adiciona coluna body_norm em agent_sent_signatures se nao existe.
+    Necessario para dedup por similaridade semantica (alem do hash exato)."""
+    if not _DEDUP_TABLES_READY:
+        return
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            ALTER TABLE agent_sent_signatures
+            ADD COLUMN IF NOT EXISTS body_norm TEXT
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
+
+SIMILARITY_DEDUP_THRESHOLD = 0.78  # SequenceMatcher: 78% de similaridade char-by-char
+JACCARD_DEDUP_THRESHOLD = 0.50     # Jaccard: 50% de palavras unicas (sem stopwords) em comum
+JACCARD_MIN_WORDS_IN_COMMON = 6    # salvaguarda contra falsos positivos em mensagens curtas
+_DEDUP_STOPWORDS = frozenset({
+    'a', 'o', 'e', 'de', 'do', 'da', 'em', 'um', 'uma', 'na', 'no', 'os', 'as',
+    'que', 'por', 'se', 'com', 'para', 'pra', 'pelo', 'pela', 'mais', 'mas',
+    'ne', 'voce', 'ele', 'ela', 'nos', 'sua', 'seu', 'sim', 'nao', 'tem', 'ter',
+    'foi', 'sao', 'tao', 'so', 'la', 'ja', 'ai',
+})
+
+
+def _jaccard_similarity(norm_a, norm_b):
+    """Similaridade de Jaccard sobre conjuntos de palavras unicas (sem stopwords).
+    Bom para detectar parafrase semantica (mesmas palavras-chave em ordens diferentes).
+    Retorna (ratio, len_intersection)."""
+    sa = {w for w in norm_a.split() if len(w) >= 3 and w not in _DEDUP_STOPWORDS}
+    sb = {w for w in norm_b.split() if len(w) >= 3 and w not in _DEDUP_STOPWORDS}
+    if not sa or not sb:
+        return 0.0, 0
+    inter = sa & sb
+    union = sa | sb
+    return len(inter) / len(union), len(inter)
+
+
+def _normalize_for_similarity(text):
+    """Normalizacao MENOS agressiva que _normalize_body_for_dedup.
+
+    Diferenca chave: NAO substitui nomes proprios por <NOME>. Isso preserva
+    a estrutura semantica da resposta — o algoritmo de similaridade
+    (SequenceMatcher) lida bem com troca de tokens, mas perde quando metade
+    do texto vira tokens identicos genericos.
+
+    Esta versao:
+    - lowercase, sem acentos, sem pontuacao
+    - colapsa espacos
+    - mantem palavras intactas (Naiara fica naiara)
+    Usada SO em dedup por similaridade. _normalize_body_for_dedup continua
+    sendo usada em hash exato (camada 1) por compat retroativa.
+    """
+    if not text:
+        return ''
+    import unicodedata, re
+    cleaned = text.strip()
+    cleaned = ''.join(c for c in unicodedata.normalize('NFD', cleaned)
+                      if unicodedata.category(c) != 'Mn')
+    cleaned = cleaned.lower()
+    cleaned = re.sub(r'[^a-z0-9 ]+', ' ', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned[:400]
+
+
 def _body_recently_sent(conv_id, text, window_s=10 * 60):
-    """True se body NORMALIZADO ja foi enviado nessa conv dentro da janela.
-    Persiste em agent_sent_signatures (sobrevive a restart)."""
+    """True se body ja foi enviado nessa conv dentro da janela.
+
+    DUAS CAMADAS:
+    1) Hash exato do texto normalizado (rapido, caso comum quando LLM
+       gera mesma resposta ipsis verbis)
+    2) Similaridade SequenceMatcher >= SIMILARITY_DEDUP_THRESHOLD (caso
+       reportado: LLM gerou 2 respostas com sinonimos/reordenacao -
+       hashes diferentes mas mesmo conteudo semantico)
+
+    Persiste body_norm em agent_sent_signatures (sobrevive a restart).
+    """
     if not conv_id or not text:
         return False
     _ensure_dedup_tables()
     if not _DEDUP_TABLES_READY:
         return False
+    _ensure_body_norm_column()
     norm = _normalize_body_for_dedup(text)
     if not norm:
         return False
@@ -5253,6 +5333,7 @@ def _body_recently_sent(conv_id, text, window_s=10 * 60):
     try:
         conn = get_db()
         cur = conn.cursor()
+        # Camada 1: hash exato (rapido)
         cur.execute("""
             SELECT signature, sent_at FROM agent_sent_signatures
             WHERE conv_id = %s AND body_hash = %s
@@ -5260,31 +5341,84 @@ def _body_recently_sent(conv_id, text, window_s=10 * 60):
             ORDER BY sent_at DESC
             LIMIT 1
         """, (conv_id, h, str(int(window_s))))
-        row = cur.fetchone()
+        if cur.fetchone():
+            cur.close()
+            conn.close()
+            return True
+        # Camada 2: similaridade — busca ate 8 bodies_norm recentes da conv
+        # body_norm guarda a normalizacao "soft" (sem mascarar nomes proprios)
+        # para que SequenceMatcher tenha estrutura semantica preservada.
+        sim_norm = _normalize_for_similarity(text)
+        if len(sim_norm) < 40:
+            cur.close()
+            conn.close()
+            return False
+        cur.execute("""
+            SELECT body_norm FROM agent_sent_signatures
+            WHERE conv_id = %s
+              AND body_norm IS NOT NULL
+              AND LENGTH(body_norm) >= 40
+              AND sent_at > NOW() - (%s || ' seconds')::interval
+            ORDER BY sent_at DESC
+            LIMIT 8
+        """, (conv_id, str(int(window_s))))
+        rows = cur.fetchall()
         cur.close()
         conn.close()
-        return row is not None
+        if rows:
+            from difflib import SequenceMatcher
+            for row in rows:
+                prev_norm = (row[0] or '')[:400]
+                if not prev_norm or len(prev_norm) < 40:
+                    continue
+                # Metrica 1: SequenceMatcher (char-by-char) - bom pra mensagens
+                # praticamente iguais com pontuacao/espacos diferentes.
+                ratio = SequenceMatcher(None, sim_norm, prev_norm).ratio()
+                if ratio >= SIMILARITY_DEDUP_THRESHOLD:
+                    try:
+                        p(f"  [DEDUP-SIM-CHAR] {conv_id[:12]} ratio={ratio:.2f} >= {SIMILARITY_DEDUP_THRESHOLD} - SUPRIMIDO")
+                    except Exception:
+                        pass
+                    return True
+                # Metrica 2: Jaccard de palavras unicas - bom pra parafrase
+                # (mesmo conteudo semantico com palavras diferentes/reordenadas)
+                jac, inter = _jaccard_similarity(sim_norm, prev_norm)
+                if jac >= JACCARD_DEDUP_THRESHOLD and inter >= JACCARD_MIN_WORDS_IN_COMMON:
+                    try:
+                        p(f"  [DEDUP-SIM-JACC] {conv_id[:12]} jaccard={jac:.2f} interseccao={inter} - SUPRIMIDO")
+                    except Exception:
+                        pass
+                    return True
+        return False
     except Exception:
         return False
 
 
 def _register_body(conv_id, text, signature='body'):
-    """Registra body normalizado em agent_sent_signatures (anti-repeticao persistente)."""
+    """Registra body em agent_sent_signatures (anti-repeticao persistente).
+
+    Persiste DUAS normalizacoes:
+    - body_hash: hash da normalizacao "hard" (com <NOME>) para match exato
+    - body_norm: normalizacao "soft" (com nomes preservados) para similaridade
+    """
     if not conv_id or not text:
         return
     _ensure_dedup_tables()
     if not _DEDUP_TABLES_READY:
         return
-    norm = _normalize_body_for_dedup(text)
-    if not norm:
+    _ensure_body_norm_column()
+    norm_hard = _normalize_body_for_dedup(text)
+    if not norm_hard:
         return
-    h = _hash_body(norm)
+    norm_soft = _normalize_for_similarity(text)
+    h = _hash_body(norm_hard)
     try:
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO agent_sent_signatures (conv_id, signature, body_hash) VALUES (%s, %s, %s)",
-            (conv_id, signature, h),
+            "INSERT INTO agent_sent_signatures (conv_id, signature, body_hash, body_norm) "
+            "VALUES (%s, %s, %s, %s)",
+            (conv_id, signature, h, norm_soft[:400]),
         )
         conn.commit()
         cur.close()

@@ -7,6 +7,59 @@
 
 ---
 
+### [2026-05-21] - Anti-duplicação por similaridade semântica (paráfrase do LLM)
+
+**Decisão**
+- Adicionada coluna `body_norm TEXT` em `agent_sent_signatures` (migration
+  leve no startup).
+- `_register_body` agora persiste duas normalizações:
+  - **Hard** (`<NOME>` em proper nouns) → hash exato (camada 1)
+  - **Soft** (preserva nomes, só lowercase/sem-acento) → similaridade (camada 2)
+- `_body_recently_sent` ganha 3 camadas em ordem de custo crescente:
+  1. **Hash exato** do normalizado hard (`agent_sent_signatures.body_hash`)
+  2. **SequenceMatcher char-by-char** ≥ **0.78** sobre o normalizado soft
+     (pega mensagens praticamente iguais com pontuação/espaços diferentes)
+  3. **Jaccard de palavras únicas** ≥ **0.50** com **≥ 6 palavras em
+     comum** (pega paráfrase semântica — mesmo conteúdo, palavras
+     diferentes/reordenadas)
+- Quaisquer 1, 2 ou 3 já fazem o `send_and_track` suprimir (igual antes).
+
+**Contexto**
+Caso reportado pela usuária (Naiara, 12:24): aluna mandou reflexão
+religiosa, o agente respondeu **duas mensagens consecutivas** com mesmo
+conteúdo semântico mas palavras diferentes. Hash exato não pegou porque
+o LLM gerou paráfrases ("essa certeza de que..." vs "essa mensagem traz
+uma paz..."). SequenceMatcher também ficou em 0.33 (char-by-char trecho
+grande mudou). Jaccard de palavras pegou: 0.526 entre as duas.
+
+**Alternativas descartadas**
+- *Apenas baixar threshold do SequenceMatcher*: causaria falsos positivos
+  em respostas sobre assuntos diferentes (controle dos testes).
+- *Embeddings da OpenAI*: custo extra por mensagem enviada (US$/req), e
+  latência. Jaccard de palavras com normalização correta cobre o caso
+  real medido.
+- *Lock per-conv mais longo abrangendo LLM*: ajudaria contra race
+  condition mas não impediria 2 ciclos sequenciais do agente processarem
+  a mesma mensagem do aluno em momentos distintos. Dedup é a camada certa.
+
+**Testes determinísticos** (7/8 passam — único miss é paráfrase muito
+sutil de mesma resposta com tom diferente):
+- CASO REAL imagem: char=0.33 jacc=**0.53** → pega ✅
+- Assuntos diferentes: jacc=0.00 → não pega ✅ (zero falsos positivos)
+- Mesma canônica com nomes diferentes: pega ✅
+- Resposta canônica MasterClass/A1/polo/início-aulas idêntica: pega ✅
+
+**Impacto**
+- Eliminado o tipo de duplicação reportado pela usuária ("ainda está
+  duplicando as coisas").
+- Custo: 1 query extra a `agent_sent_signatures` por mensagem que passou
+  da camada 1 (limit 8 rows, indexada por conv_id), + computação O(n²)
+  do SequenceMatcher sobre strings de até 400 chars (microssegundos).
+- Próximo passo se ainda houver casos: aumentar `LIMIT 8` da camada 2
+  ou adicionar normalização que stemming/lematização (mais agressiva).
+
+---
+
 ### [2026-05-21] - Silenciamento do supervisor fecha o ciclo (distribui + nudge + pending)
 
 **Decisão**
