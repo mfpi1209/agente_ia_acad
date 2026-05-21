@@ -6376,12 +6376,17 @@ def _openai_supervisor_fetch_convs():
         return []
 
 
-def _openai_supervisor_get_window(conv_id, max_msgs=10):
+def _openai_supervisor_get_window(conv_id, max_msgs=10, max_age_min=60):
     """Retorna lista [(role, text, ts, is_internal)] das ultimas mensagens.
 
     Usa get_conversation_messages_api (que ja eh validado e funciona) em
     vez de chamar o DCZ diretamente. O caminho proprio anterior estava
     retornando lista vazia para todas as 75 convs (caso reportado).
+
+    FILTRO TEMPORAL (2026-05-21): mensagens com idade > max_age_min sao
+    descartadas. Antes, o supervisor via violacoes historicas nas ultimas
+    10 msgs e re-flagrava infinitamente o mesmo erro do bot. Agora so
+    analisa o que aconteceu nos ultimos 60min.
     """
     try:
         msgs = get_conversation_messages_api(conv_id, limit=max_msgs * 2)
@@ -6394,6 +6399,14 @@ def _openai_supervisor_get_window(conv_id, max_msgs=10):
             body = (m.get('body') or m.get('text') or m.get('content') or '').strip()
             if not body:
                 continue
+            # FILTRO TEMPORAL: idade da msg em minutos
+            _msg_ts = m.get('createdAt') or m.get('created_at') or ''
+            try:
+                _age_s = _iso_age_seconds(_msg_ts)
+                if _age_s is not None and _age_s > max_age_min * 60:
+                    continue  # mensagem antiga - ignora
+            except Exception:
+                pass
             # Campo CANONICO do DCZ: received=True => aluno; False => saida (bot/humano/nota)
             received = bool(m.get('received', False))
             is_internal = bool(m.get('isInternal') or m.get('internal'))
@@ -6409,7 +6422,7 @@ def _openai_supervisor_get_window(conv_id, max_msgs=10):
             else:
                 # saida sem attendant + sem fingerprint = provavelmente bot
                 role = 'bot'
-            out.append((role, body[:600], m.get('createdAt') or m.get('created_at') or '', is_internal))
+            out.append((role, body[:600], _msg_ts, is_internal))
         return list(reversed(out))  # cronologico ascendente
     except Exception as e:
         try:
@@ -6820,10 +6833,46 @@ def process_openai_supervisor_loop():
 
         action = ''
         if sev == 'alta' and ptype in ('repeticao_resposta', 'sobre_resposta', 'duplicado_distribuicao'):
-            # === Silenciar bot + FECHAR O CICLO (gap detectado pelo usuario) ===
-            # Antes: so silenciava e finding ficava no dashboard. Gap: se a conv
-            # nao tinha atendente, aluno ficava ate 10min sem resposta ate o
-            # in_hours_rescue pegar. Agora distribui IMEDIATAMENTE + nudge.
+            # === IDEMPOTENCIA (2026-05-21): nao re-disparar acao supervisor em
+            # conv ja redistribuida recentemente. Bug reportado (imagem
+            # Daniella Ferraz): conv distribuida para Beatriz com violacao
+            # historica "bot respondeu apos handoff". Supervisor re-detectava
+            # a MESMA violacao a cada ciclo e redistribuia: Beatriz -> Mariana
+            # -> Debora -> ... Cada ciclo gera nova nota e nova redistribuicao.
+            # Fix: se ja existe finding de tipo similar com action != audit_only
+            # nas ultimas 6h pra ESTA conv, so registra audit_only (visivel no
+            # dash) e nao toma acao automatica.
+            try:
+                conn_id = get_db()
+                cur_id = conn_id.cursor()
+                cur_id.execute(
+                    """
+                    SELECT 1
+                      FROM agent_audit_findings
+                     WHERE conv_id = %s
+                       AND severity = 'high'
+                       AND action_taken IN ('agent_silenced', 'distributed')
+                       AND created_at > NOW() - INTERVAL '6 hours'
+                     LIMIT 1
+                    """,
+                    (cid,),
+                )
+                _already_acted = cur_id.fetchone() is not None
+                cur_id.close()
+                conn_id.close()
+            except Exception:
+                _already_acted = False
+            if _already_acted:
+                action = 'audit_only_idempotent'
+                p(f"  [OPENAI-SUP] {cid[:12]} {sev}/{ptype} - SKIP acao (ja agiu nas ultimas 6h) | {resumo[:80]}")
+                _record_audit_finding(
+                    cid, severity=sev, problem_type=ptype, summary=resumo,
+                    detail={'trecho': trecho, 'idempotent': True,
+                            'window': [{'role': r, 'body': b[:200]}
+                                       for r, b, _, _ in window[-6:]]},
+                    action_taken=action, phone=phone, model=OPENAI_SUPERVISOR_MODEL,
+                )
+                continue
             try:
                 conv_attendants = c.get('attendants', []) or []
                 tem_humano = bool(conv_attendants)
