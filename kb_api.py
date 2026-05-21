@@ -2576,6 +2576,76 @@ async def audit_findings_resolve(finding_id: int, request: Request):
     return {'ok': True, 'id': finding_id, 'conv_id': conv_id, 'unblocked': unblock}
 
 
+@app.get("/api/diag/time")
+async def diag_time():
+    """Endpoint diagnostico — retorna a percepcao do servidor sobre o
+    horario atual e regras de janela. Util para confirmar se _in_pre_opening_window()
+    esta funcionando (caso Jaqueline 08:49: deveria ter retornado True)."""
+    from datetime import datetime, timezone, timedelta
+    import time as _t
+    utc_now = datetime.now(timezone.utc)
+    sp_now = utc_now + timedelta(hours=-3)
+    dow = sp_now.weekday()
+    hour = sp_now.hour
+    minute = sp_now.minute
+    BUSINESS_HOURS_WEEKDAY_START = 9
+    BUSINESS_HOURS_WEEKDAY_END = 20
+    BUSINESS_HOURS_SATURDAY_START = 9
+    BUSINESS_HOURS_SATURDAY_END = 13
+    PRE_OPENING_MARGIN_MIN = 60
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT key, value FROM agent_config WHERE key IN "
+                        "('business_hours_weekday_start','business_hours_weekday_end',"
+                        "'business_hours_saturday_start','business_hours_saturday_end',"
+                        "'pre_opening_enabled','pre_opening_margin_min')")
+            for k, v in cur.fetchall():
+                try:
+                    if k == 'business_hours_weekday_start': BUSINESS_HOURS_WEEKDAY_START = int(v)
+                    elif k == 'business_hours_weekday_end': BUSINESS_HOURS_WEEKDAY_END = int(v)
+                    elif k == 'business_hours_saturday_start': BUSINESS_HOURS_SATURDAY_START = int(v)
+                    elif k == 'business_hours_saturday_end': BUSINESS_HOURS_SATURDAY_END = int(v)
+                    elif k == 'pre_opening_margin_min': PRE_OPENING_MARGIN_MIN = int(v)
+                except Exception:
+                    pass
+            cur.close()
+    except Exception:
+        pass
+    if dow <= 4:
+        within = BUSINESS_HOURS_WEEKDAY_START <= hour < BUSINESS_HOURS_WEEKDAY_END
+        target_start_hour = BUSINESS_HOURS_WEEKDAY_START
+    elif dow == 5:
+        within = BUSINESS_HOURS_SATURDAY_START <= hour < BUSINESS_HOURS_SATURDAY_END
+        target_start_hour = BUSINESS_HOURS_SATURDAY_START
+    else:
+        within = False
+        target_start_hour = BUSINESS_HOURS_WEEKDAY_START
+    mins_until = 9999
+    if not within and dow <= 5 and hour < target_start_hour:
+        mins_until = (target_start_hour * 60) - (hour * 60 + minute)
+    in_pre = (not within) and (mins_until <= PRE_OPENING_MARGIN_MIN)
+    return {
+        'ok': True,
+        'utc_now': utc_now.isoformat(),
+        'sp_now': sp_now.isoformat(),
+        'unix_ts': _t.time(),
+        'system_tz_offset_min': _t.timezone // 60 * -1,
+        'dow': dow,
+        'dow_label': ['seg','ter','qua','qui','sex','sab','dom'][dow],
+        'hour': hour,
+        'minute': minute,
+        'business_hours_weekday_start': BUSINESS_HOURS_WEEKDAY_START,
+        'business_hours_weekday_end': BUSINESS_HOURS_WEEKDAY_END,
+        'business_hours_saturday_start': BUSINESS_HOURS_SATURDAY_START,
+        'business_hours_saturday_end': BUSINESS_HOURS_SATURDAY_END,
+        'pre_opening_margin_min': PRE_OPENING_MARGIN_MIN,
+        'is_within_business_hours': within,
+        'minutes_until_business_hours_start': mins_until,
+        'in_pre_opening_window': in_pre,
+    }
+
+
 @app.get("/api/audit/supervisor-status")
 async def audit_supervisor_status():
     """Retorna o estado atual do supervisor OpenAI (telemetria gravada pelo

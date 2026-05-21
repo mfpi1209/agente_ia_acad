@@ -3793,7 +3793,17 @@ def send_after_hours_response(conv_id, *, allow_continue=False, reason='escalate
     OFERECE entrar na fila ao inves de mandar mensagem padrao after_hours.
     """
     # Janela pre-abertura: oferece fila antecipada
-    if _in_pre_opening_window():
+    # Logging instrumentado para rastrear quando esse caminho NaO eh tomado
+    # mesmo proximo do horario (ex: caso Jaqueline as 08:49 que recebeu
+    # mensagem padrao em vez da oferta de fila).
+    try:
+        mins_left = _minutes_until_business_hours_start()
+        in_pre = _in_pre_opening_window()
+        within = is_within_business_hours()
+        p(f"  [AFTER-HOURS] entrada reason={reason} within={within} mins_to_open={mins_left} in_pre_opening={in_pre}")
+    except Exception:
+        in_pre = False
+    if in_pre:
         send_pre_opening_offer(conv_id, reason=reason, question=question)
         return 'pre_opening'
 
@@ -3804,15 +3814,28 @@ def send_after_hours_response(conv_id, *, allow_continue=False, reason='escalate
     preferred = detect_preferred_attendant(question or '')
     if preferred:
         p(f"  [AFTER-HOURS] Aluno citou consultor: {preferred} -> registrar preferred_attendant")
+    # Lista de razoes que indicam intencao de escalada — para essas, SEMPRE
+    # registrar pending_escalation (mesmo que a msg seja deduplicada), pois
+    # o aluno DEVE ser distribuido quando o expediente abrir. Sem isso, o
+    # caso da Tauana/Gustavo (clicou "Falar com atendente" apos encerramento
+    # fora do horario e o sig de after_hours_first estava no cooldown de 8h
+    # — pending_escalation nao era registrado e o aluno ficava esquecido).
+    _is_escalation_reason = any(t in (reason or '').lower() for t in (
+        'escalate', 'falar com atendente', 'human_unavailable',
+        'after_hours_rescue', 'media_only', 'polo', 'retention',
+    ))
     if tier == 'first':
         msg = AFTER_HOURS_FIRST_MSG.format(name=name_prefix)
         sig = 'after_hours_first'
+        msg_was_sent = False
         if _signature_recently_sent(conv_id, sig, window_s=8 * 3600):
-            p(f"  [AFTER-HOURS] dedup: {sig} ja enviado nas ultimas 8h - suprimindo")
+            p(f"  [AFTER-HOURS] dedup: {sig} ja enviado nas ultimas 8h - suprimindo msg (mas pending_escalation segue se for escalada)")
         else:
             send_and_track(conv_id, msg)
             log_to_db(conv_id, question or '', msg, 1.0, sig)
             _register_signature(conv_id, sig, msg)
+            msg_was_sent = True
+        if msg_was_sent or _is_escalation_reason:
             record_pending_escalation(conv_id, reason, tier='first', retorno_label=retorno,
                                       question=question, preferred_attendant=preferred)
         if not allow_continue:
@@ -3823,14 +3846,17 @@ def send_after_hours_response(conv_id, *, allow_continue=False, reason='escalate
     else:
         msg = AFTER_HOURS_INSIST_MSG.format(name=name_prefix, retorno_label=retorno)
         sig = 'after_hours_insist'
+        msg_was_sent = False
         if _signature_recently_sent(conv_id, sig, window_s=8 * 3600):
-            p(f"  [AFTER-HOURS] dedup: {sig} ja enviado nas ultimas 8h - suprimindo")
+            p(f"  [AFTER-HOURS] dedup: {sig} ja enviado nas ultimas 8h - suprimindo msg (mas pending_escalation segue se for escalada)")
         else:
             send_and_track(conv_id, msg)
             log_to_db(conv_id, question or '', msg, 1.0, sig)
             _register_signature(conv_id, sig, msg)
             _mark_handoff_active(conv_id, 'after_hours_insist',
                                  target=preferred or '', ttl_s=14 * 3600, body=msg)
+            msg_was_sent = True
+        if msg_was_sent or _is_escalation_reason:
             record_pending_escalation(conv_id, reason, tier='insist', retorno_label=retorno,
                                       question=question, preferred_attendant=preferred)
         st = _conv_states.setdefault(conv_id, _default_conv_state())
@@ -7071,42 +7097,81 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
         p(f"  [DIST] erro _enforce_assignment_consistency: {e_v}")
         verify_result = {'ok_lead': lead_ok, 'ok_biz': biz_ok, 'ok_chat': chat_ok}
 
-    note = (f"🔔 *Distribuição automática pelo agente IA*\n"
-            f"Atendente: *{nome}*\n"
-            f"Motivo: {reason}" if reason else
-            f"🔔 *Distribuição automática pelo agente IA*\n"
-            f"Atendente: *{nome}*")
+    # === DETECCAO DE REDISTRIBUICAO ===
+    # Se ja houve QUALQUER distribuicao para esta conv nos ultimos 30min
+    # (independente do nome do atendente), tratar como redistribuicao:
+    # suprimir mensagem ao cliente (evita "Vou te transferir para X" seguido
+    # de "Vou te transferir para Y" — caso Jessica: Camila->Marilia) e
+    # suprimir a nota verbose (substituida por nota curta sinalizando troca).
+    is_redistribution = _signature_recently_sent(conv_id, 'dist_any_attendant', window_s=30 * 60)
+    prev_target = ''
+    try:
+        prev_target = (_conv_states.get(conv_id, {}) or {}).get('_last_distributed_to') or ''
+    except Exception:
+        pass
+    if is_redistribution:
+        p(f"  [DIST] [REDIST] {conv_id[:12]} redistribuicao detectada (prev={prev_target or '?'} -> {nome}) - suprimindo msg cliente + nota verbose")
 
-    # Dedup da NOTA interna: nao passa por send_and_track entao precisa de
-    # check explicito. Bloqueia segunda nota identica dentro de 4h.
-    note_sig = f'dist_note:{nome.lower()}'
-    if _signature_recently_sent(conv_id, note_sig, window_s=4 * 3600):
-        p(f"  [DIST] dedup: nota interna p/ {nome} ja enviada nas ultimas 4h - suprimindo")
+    if is_redistribution:
+        # Nota CURTA de redistribuicao, so pra equipe ter rastro no historico.
+        short_note = (f"♻️ Redistribuicao automatica — atendente trocado "
+                      f"de *{prev_target or '?'}* para *{nome}*.")
+        short_sig = f'dist_redist:{nome.lower()}'
+        if _signature_recently_sent(conv_id, short_sig, window_s=4 * 3600):
+            p(f"  [DIST] dedup: nota curta redist p/ {nome} ja enviada - suprimindo")
+        else:
+            try:
+                r_note = requests.post(
+                    f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                    headers=H, json={'body': short_note, 'isInternal': True}, timeout=10
+                )
+                if r_note.status_code in (200, 201, 204):
+                    _register_signature(conv_id, short_sig, short_note)
+            except Exception:
+                pass
+        # NAO envia mensagem ao cliente — aluno ja recebeu uma anteriormente
+        # ("Vou te transferir para X"); evita confusao visual com duas trocas
+        # consecutivas. O atendente recebe via fila normal.
     else:
-        try:
-            r_note = requests.post(
-                f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
-                headers=H, json={'body': note, 'isInternal': True}, timeout=10
-            )
-            if r_note.status_code in (200, 201, 204):
-                _register_signature(conv_id, note_sig, note)
-        except Exception:
-            pass
+        note = (f"🔔 *Distribuição automática pelo agente IA*\n"
+                f"Atendente: *{nome}*\n"
+                f"Motivo: {reason}" if reason else
+                f"🔔 *Distribuição automática pelo agente IA*\n"
+                f"Atendente: *{nome}*")
 
-    client_msg = (
-        f"Vou te transferir para *{nome}*, que vai dar continuidade ao seu atendimento. "
-        f"Um momento, por favor! 😊"
-    )
-    # Dedup explicito tambem na mensagem ao cliente (alem do dedup por
-    # conteudo do send_and_track), por seguranca extra.
-    client_sig = f'dist_client:{nome.lower()}'
-    if _signature_recently_sent(conv_id, client_sig, window_s=4 * 3600):
-        p(f"  [DIST] dedup: mensagem cliente p/ {nome} ja enviada nas ultimas 4h - suprimindo")
-    else:
-        meta_typing_on()
-        sent_ok = send_and_track(conv_id, client_msg)
-        if sent_ok:
-            _register_signature(conv_id, client_sig, client_msg)
+        # Dedup da NOTA interna: nao passa por send_and_track entao precisa de
+        # check explicito. Bloqueia segunda nota identica dentro de 4h.
+        note_sig = f'dist_note:{nome.lower()}'
+        if _signature_recently_sent(conv_id, note_sig, window_s=4 * 3600):
+            p(f"  [DIST] dedup: nota interna p/ {nome} ja enviada nas ultimas 4h - suprimindo")
+        else:
+            try:
+                r_note = requests.post(
+                    f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                    headers=H, json={'body': note, 'isInternal': True}, timeout=10
+                )
+                if r_note.status_code in (200, 201, 204):
+                    _register_signature(conv_id, note_sig, note)
+            except Exception:
+                pass
+
+        client_msg = (
+            f"Vou te transferir para *{nome}*, que vai dar continuidade ao seu atendimento. "
+            f"Um momento, por favor! 😊"
+        )
+        # Dedup explicito tambem na mensagem ao cliente (alem do dedup por
+        # conteudo do send_and_track), por seguranca extra.
+        client_sig = f'dist_client:{nome.lower()}'
+        if _signature_recently_sent(conv_id, client_sig, window_s=4 * 3600):
+            p(f"  [DIST] dedup: mensagem cliente p/ {nome} ja enviada nas ultimas 4h - suprimindo")
+        else:
+            meta_typing_on()
+            sent_ok = send_and_track(conv_id, client_msg)
+            if sent_ok:
+                _register_signature(conv_id, client_sig, client_msg)
+
+    # Marca esta distribuicao para detectar redistribuicao na proxima.
+    _register_signature(conv_id, 'dist_any_attendant', f'distribuido_para:{nome.lower()}')
 
     p(f"  [DIST] ✅ Distribuição concluída para {nome} (lead={lead_ok} biz={biz_ok} chat={chat_ok})")
     _conv_states.setdefault(conv_id, _default_conv_state())['_last_distributed_to'] = nome
