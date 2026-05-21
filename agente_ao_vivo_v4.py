@@ -7147,28 +7147,38 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
     except Exception:
         pass
     if is_redistribution:
-        p(f"  [DIST] [REDIST] {conv_id[:12]} redistribuicao detectada (prev={prev_target or '?'} -> {nome}) - suprimindo msg cliente + nota verbose")
+        same_attendant = (prev_target or '').strip().lower() == nome.strip().lower()
+        p(f"  [DIST] [REDIST] {conv_id[:12]} redistribuicao detectada "
+          f"(prev={prev_target or '?'} -> {nome}, same={same_attendant}) "
+          f"- suprimindo msg cliente + nota verbose")
 
     if is_redistribution:
-        # Nota CURTA de redistribuicao, so pra equipe ter rastro no historico.
-        short_note = (f"♻️ Redistribuicao automatica — atendente trocado "
-                      f"de *{prev_target or '?'}* para *{nome}*.")
-        short_sig = f'dist_redist:{nome.lower()}'
-        if _signature_recently_sent(conv_id, short_sig, window_s=4 * 3600):
-            p(f"  [DIST] dedup: nota curta redist p/ {nome} ja enviada - suprimindo")
+        same_attendant = (prev_target or '').strip().lower() == nome.strip().lower()
+        if same_attendant:
+            # Mesma pessoa redistribuindo dentro da janela: SUPRIMIR completamente.
+            # Nao ha sentido em enviar "Vou te transferir para Danubia" duas vezes,
+            # nem nota nova "Distribuicao automatica Atendente Danubia" — o
+            # atendente ja esta atribuido. So registra no log do agente.
+            p(f"  [DIST] [REDIST-SAME] {conv_id[:12]} mesma atendente {nome} ja recente — suprimindo TUDO (nota e msg cliente)")
         else:
-            try:
-                r_note = requests.post(
-                    f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
-                    headers=H, json={'body': short_note, 'isInternal': True}, timeout=10
-                )
-                if r_note.status_code in (200, 201, 204):
-                    _register_signature(conv_id, short_sig, short_note)
-            except Exception:
-                pass
-        # NAO envia mensagem ao cliente — aluno ja recebeu uma anteriormente
-        # ("Vou te transferir para X"); evita confusao visual com duas trocas
-        # consecutivas. O atendente recebe via fila normal.
+            # Atendente diferente: nota CURTA pra equipe ter rastro no historico.
+            short_note = (f"♻️ Redistribuicao automatica — atendente trocado "
+                          f"de *{prev_target or '?'}* para *{nome}*.")
+            short_sig = f'dist_redist:{prev_target.lower() if prev_target else "x"}->{nome.lower()}'
+            if _signature_recently_sent(conv_id, short_sig, window_s=4 * 3600):
+                p(f"  [DIST] dedup: nota curta redist {prev_target}->{nome} ja enviada - suprimindo")
+            else:
+                try:
+                    r_note = requests.post(
+                        f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                        headers=H, json={'body': short_note, 'isInternal': True}, timeout=10
+                    )
+                    if r_note.status_code in (200, 201, 204):
+                        _register_signature(conv_id, short_sig, short_note)
+                except Exception:
+                    pass
+        # Em ambos os casos NaO envia mensagem ao cliente — ja recebeu
+        # "Vou te transferir para X" da primeira distribuicao.
     else:
         note = (f"🔔 *Distribuição automática pelo agente IA*\n"
                 f"Atendente: *{nome}*\n"
