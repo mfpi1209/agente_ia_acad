@@ -5788,11 +5788,15 @@ def _openai_supervisor_audit_conv(conv_id, msgs_window):
         return None
     if not msgs_window:
         return None
-    # Filtro minimo: precisa ter pelo menos 1 msg do bot E 1 do aluno para
-    # ter algo significativo para auditar (era >=2 do bot, muito restritivo).
+    # Filtro minimo: precisa ter pelo menos 1 do aluno E pelo menos 1 da
+    # equipe (bot OU humano) — depois que detectamos que o DCZ as vezes
+    # classifica msgs do Agente IA como tendo attendant (porque o agente eh
+    # uma "conta automacao"), o filtro restritivo a bot_count rejeitava
+    # 100% das convs.
     bot_count = sum(1 for r, _, _, _ in msgs_window if r == 'bot')
+    humano_count = sum(1 for r, _, _, _ in msgs_window if r == 'humano')
     aluno_count = sum(1 for r, _, _, _ in msgs_window if r == 'aluno')
-    if bot_count < 1 or aluno_count < 1:
+    if aluno_count < 1 or (bot_count + humano_count) < 1:
         return None
     convo_str = []
     for role, body, _, _ in msgs_window[-10:]:
@@ -5995,26 +5999,46 @@ def process_openai_supervisor_loop():
     flagged_high = 0
     flagged_med = 0
     cycle_problems = 0
+    # Contadores granulares de PULOS pra entender por que 0 auditadas mesmo
+    # com 75 convs listadas (caso reportado).
+    skip_no_cid = 0
+    skip_recent_audit = 0
+    skip_supervisor_block = 0
+    skip_empty_window = 0
+    skip_audit_returned_none = 0  # filtro bot/aluno em _openai_supervisor_audit_conv
+    role_dist = {'aluno': 0, 'bot': 0, 'humano': 0, 'nota_interna': 0}
     for c in convs:
         if audited >= OPENAI_SUPERVISOR_MAX_CONVS:
             break
         cid = c.get('id') or ''
         if not cid:
+            skip_no_cid += 1
             continue
         last_audit_ts = _openai_supervisor_audited.get(cid, 0)
         # nao re-auditar mesma conv mais que 1x a cada 10min (era 15)
         if now_ts - last_audit_ts < 10 * 60:
+            skip_recent_audit += 1
             continue
         # ignorar convs ja com handoff supervisor_block ativo
         try:
             ho_motivo, _ = _is_handoff_active(cid)
             if ho_motivo == 'supervisor_block':
+                skip_supervisor_block += 1
                 continue
         except Exception:
             pass
         window = _openai_supervisor_get_window(cid, max_msgs=10)
+        if not window:
+            skip_empty_window += 1
+            continue
+        # Atualiza distribuicao de roles vista (acumulada no ciclo)
+        for r, _, _, _ in window:
+            if r in role_dist:
+                role_dist[r] += 1
         result = _openai_supervisor_audit_conv(cid, window)
         if result is None:
+            # ou erro OpenAI (incrementa errors) ou rejeicao do filtro bot/aluno
+            skip_audit_returned_none += 1
             continue
         audited += 1
         _openai_supervisor_audited[cid] = now_ts
@@ -6063,6 +6087,14 @@ def process_openai_supervisor_loop():
 
     _openai_sup_stats['last_cycle_audited'] = audited
     _openai_sup_stats['last_cycle_problems'] = cycle_problems
+    _openai_sup_stats['last_cycle_skips'] = {
+        'no_cid': skip_no_cid,
+        'recent_audit': skip_recent_audit,
+        'supervisor_block': skip_supervisor_block,
+        'empty_window': skip_empty_window,
+        'audit_returned_none': skip_audit_returned_none,
+    }
+    _openai_sup_stats['last_cycle_role_dist'] = role_dist
     # Persiste stats em agent_config para o Cockpit/API ler.
     try:
         snap = dict(_openai_sup_stats)
