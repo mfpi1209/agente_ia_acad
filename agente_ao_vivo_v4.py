@@ -5840,17 +5840,21 @@ def _openai_supervisor_get_window(conv_id, max_msgs=10):
             body = (m.get('body') or m.get('text') or m.get('content') or '').strip()
             if not body:
                 continue
-            from_me = bool(m.get('isFromMe') or m.get('fromMe') or m.get('from_me'))
+            # Campo CANONICO do DCZ: received=True => aluno; False => saida (bot/humano/nota)
+            received = bool(m.get('received', False))
             is_internal = bool(m.get('isInternal') or m.get('internal'))
             has_attendant = bool(m.get('attendant') or m.get('attendantId') or m.get('attendant_id'))
-            if from_me and has_attendant and not is_internal:
-                role = 'humano'
-            elif from_me and not has_attendant:
-                role = 'bot'
-            elif from_me and is_internal:
-                role = 'nota_interna'
-            else:
+            if received:
                 role = 'aluno'
+            elif is_internal:
+                role = 'nota_interna'
+            elif is_bot_message(body):
+                role = 'bot'
+            elif has_attendant:
+                role = 'humano'
+            else:
+                # saida sem attendant + sem fingerprint = provavelmente bot
+                role = 'bot'
             out.append((role, body[:600], m.get('createdAt') or m.get('created_at') or '', is_internal))
         return list(reversed(out))  # cronologico ascendente
     except Exception as e:
