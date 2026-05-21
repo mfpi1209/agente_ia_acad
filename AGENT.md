@@ -7,6 +7,70 @@
 
 ---
 
+### [2026-05-21] - Guards de ação + handoff stale + dispatch race condition
+
+**Decisão**
+Três fixes para o caso "aluno foi distribuído duas vezes" e similares:
+
+1. **`_handle_outro_polo` ganha guard de ação** (signature
+   `outro_polo_handled` por 24h). Marca ANTES de enviar, evita que duas
+   execuções (linha 8741 valida CPF + linha 8984 carrega perfil) gerem
+   4 mensagens duplicadas + 2 chamadas de `_move_business_to_perdido` +
+   2 chamadas de finish.
+2. **`_had_attendant_left_after_handoff`**: nova função que detecta no
+   histórico mensagens tipo "Débora finalizou o atendimento" /
+   "Atendente Débora removido" criadas DEPOIS do `handoff_active`
+   registrado. Se o nome bate com `target_attendant`, **limpa o
+   handoff_active stale**. Chamada no início do `process_in_hours_rescue`.
+3. **`process_in_hours_rescue` respeita handoff_active** antes de
+   distribuir: se há `dispatch` ativo para X e X está ativo agora,
+   re-atribui sticky (mesma pessoa) em vez de distribuir para outro
+   consultor (evita "Débora vai continuar" + "Vou te conectar com Julia").
+   Se X está offline, limpa o handoff e segue fluxo normal.
+4. **`send_and_track` recheca handoff dispatch < 90s**: se outro processo
+   acabou de distribuir essa conv, suprime a resposta órfã (race
+   condition entre LLM gerando resposta + rescue distribuindo). Chamadas
+   internas do `distribute_to_attendant` passam `force=True` para escapar
+   desse recheck.
+5. **`handle_polo_visit_intent` e `handle_polo_address_only` ganham
+   guards de ação** (signatures `polo_visit_handled` 4h e
+   `polo_address_handled:<nome>` 30min). Antes só `handle_masterclass_intent`,
+   `handle_inicio_aulas_intent` e `handle_a1_intent` tinham.
+
+**Contexto**
+Usuária reportou caso (10:02-10:03): aluno mandou CPF, agente respondeu
+com **OUTRO_POLO_MSG_1 + OUTRO_POLO_MSG_2 duplicadas** (4 mensagens
+idênticas). E caso anterior (12:35): bot prometeu Débora às 12:14 ("vai
+dar continuidade") mas 21min depois o `process_in_hours_rescue` distribuiu
+para Julia, gerando duas promessas conflitantes.
+
+Causa raiz por caso:
+- Polo duplicado: 2 caminhos do `handle_message` chamavam `_handle_outro_polo`
+  em ciclos sucessivos. `send_and_track` tem dedup mas a função tem
+  side effects (envio + pipeline + finish) — guard precisa ser **antes**
+  de iniciar a sequência.
+- Promessa conflitante: `handoff_active` não é limpo quando atendente
+  finaliza e ninguém checava se atendente prometido ainda estava lá
+  antes de redistribuir.
+
+**Alternativas descartadas**
+- *Só confiar em `send_and_track`*: já provou-se insuficiente para
+  funções com side effects (pipeline, finish, distribute).
+- *Polling mais espaçado*: tratamento sintomático; não resolve o root
+  cause.
+- *TTL menor em `handoff_active`*: 4h é razoável para promessas reais;
+  reduzir teria efeitos colaterais em handoffs longos legítimos.
+
+**Impacto**
+- Funções de ação idempotentes por signature (acompanha o padrão das
+  outras intents canônicas).
+- `process_in_hours_rescue` agora respeita promessas vigentes (sticky
+  re-atribuição) → aluno não recebe 2 promessas diferentes.
+- Race condition do dispatch eliminada para mensagens que ainda estão
+  no buffer do LLM quando outra thread distribui.
+
+---
+
 ### [2026-05-21] - Anti-duplicação por similaridade semântica (paráfrase do LLM)
 
 **Decisão**

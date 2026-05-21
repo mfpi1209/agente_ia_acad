@@ -260,7 +260,20 @@ def handle_polo_visit_intent(conv_id, polo_entry, question=''):
        - endereco oficial se polo conhecido (do contexto ou questao)
        - aviso que vai transferir
     2) Transfere para consultor humano (distribuicao normal).
+
+    GUARD: signature 'polo_visit_handled' 4h. Evita duas chamadas concorrentes
+    enviarem 2 mensagens E executarem 2 distribute_to_attendant.
     """
+    try:
+        if _signature_recently_sent(conv_id, 'polo_visit_handled', window_s=4 * 3600):
+            p(f"  [POLO-VISIT] {conv_id[:12]} dedup: ja tratado nas ultimas 4h - SKIP")
+            return False
+    except Exception:
+        pass
+    try:
+        _register_signature(conv_id, 'polo_visit_handled', f'polo:{(polo_entry or {}).get("nome", "?")}')
+    except Exception:
+        pass
     name_prefix = _student_first_name_prefix(conv_id)
     profile_polo = None
     try:
@@ -353,7 +366,22 @@ def handle_masterclass_intent(conv_id, question=''):
 
 def handle_polo_address_only(conv_id, polo_entry, question=''):
     """Aluno pediu so o endereco de um polo — responde com endereco oficial.
-    Se polo nao foi identificado, pergunta qual polo."""
+    Se polo nao foi identificado, pergunta qual polo.
+
+    GUARD: signature 'polo_address_handled' 30min. Aluno pode reperguntar
+    apos 30min sem problema, mas evita duplicacao por ciclos concorrentes.
+    """
+    try:
+        sig_addr = f'polo_address_handled:{(polo_entry or {}).get("nome", "_unk")}'
+        if _signature_recently_sent(conv_id, sig_addr, window_s=30 * 60):
+            p(f"  [POLO-ADDR] {conv_id[:12]} dedup: ja enviado nos ultimos 30min - SKIP")
+            return False
+    except Exception:
+        pass
+    try:
+        _register_signature(conv_id, sig_addr, str((polo_entry or {}).get('nome', '')))
+    except Exception:
+        pass
     name_prefix = _student_first_name_prefix(conv_id)
     if polo_entry:
         msg = (
@@ -3365,6 +3393,32 @@ def send_and_track(conv_id, text, buttons=None, force=False):
     if lock is not None:
         lock.acquire()
     try:
+        # === RECHECK: dispatch MUITO recente -> race condition ===
+        # Caso reportado: in_hours_rescue distribuiu, mas LLM ja estava
+        # gerando outra resposta em paralelo. Quando o send chega, a
+        # distribuicao acabou de marcar handoff_active. Suprime para nao
+        # mandar mensagem orfa depois da transferencia.
+        if not force and conv_id:
+            try:
+                _ensure_dedup_tables()
+                if _DEDUP_TABLES_READY:
+                    conn = get_db()
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT motivo, target_attendant,
+                               EXTRACT(EPOCH FROM (NOW() - created_at)) as age_s
+                        FROM handoff_active
+                        WHERE conv_id = %s AND expires_at > NOW()
+                        LIMIT 1
+                    """, (conv_id,))
+                    _ho = cur.fetchone()
+                    cur.close()
+                    conn.close()
+                    if _ho and _ho[0] == 'dispatch' and (_ho[2] or 999) < 90:
+                        p(f"  [DEDUP-DISPATCH] {conv_id[:12]} dispatch p/ {_ho[1]} ha {_ho[2]:.0f}s - SUPRIMIDO (race condition)")
+                        return 'suppressed'
+            except Exception:
+                pass
         if not force and conv_id and _body_recently_sent(conv_id, text, SEND_BODY_DEDUP_WINDOW_S):
             p(f"  [DEDUP-BODY] {conv_id[:12]} SUPRIMIDO - hash de body ja enviado em <{SEND_BODY_DEDUP_WINDOW_S}s")
             try:
@@ -3589,8 +3643,31 @@ def _move_business_to_perdido(phone):
 
 
 def _handle_outro_polo(conv_id, phone, student_profile, polo_real):
-    """Envia mensagens de outro polo, move para Perdido e finaliza a conversa."""
+    """Envia mensagens de outro polo, move para Perdido e finaliza a conversa.
+
+    GUARD DE ACAO (dedup IDEMPOTENTE):
+    Caso reportado: a funcao foi chamada 2x em ciclos sucessivos do agente
+    (validacao de CPF + carga de perfil) e o dedup de body falhou em pegar
+    a segunda execucao por timing. Resultado: 4 mensagens duplicadas + 2
+    chamadas de finish/move pipeline.
+
+    Agora: signature 'outro_polo_handled' por 24h. Segunda chamada SKIP
+    independente do estado das tabelas de body dedup.
+    """
+    # Guard ao nivel da acao (nao so do envio de mensagem)
+    try:
+        if _signature_recently_sent(conv_id, 'outro_polo_handled', window_s=24 * 3600):
+            p(f"  [OUTRO-POLO] {conv_id[:12]} dedup: ja tratado outro_polo nas ultimas 24h - SKIP")
+            return
+    except Exception:
+        pass
     p(f"  [OUTRO-POLO] Polo '{polo_real}' não atendido -> redirecionando")
+    # Marca IMEDIATAMENTE para evitar race com chamadas concorrentes/ciclos
+    # sucessivos (linha 8741 vs 8984 do handle_message).
+    try:
+        _register_signature(conv_id, 'outro_polo_handled', f'polo:{polo_real}')
+    except Exception:
+        pass
     meta_typing_on()
     send_and_track(conv_id, OUTRO_POLO_MSG_1)
     time.sleep(2)
@@ -4553,10 +4630,11 @@ def process_in_hours_rescue():
             # === PULA RESGATE SE ULTIMA MSG DO ALUNO FOR DESPEDIDA/AGRADECIMENTO ===
             # Caso reportado: aluno mandou so "Obrigado" apos atendimento ja
             # concluido — nao precisa de novo atendente, so fecha o ciclo.
+            _conv_msgs = []
             try:
-                _msgs = get_conversation_messages_api(cid, limit=6)
+                _conv_msgs = get_conversation_messages_api(cid, limit=15) or []
                 _last_aluno_body = ''
-                for _m in (_msgs or []):
+                for _m in _conv_msgs:
                     if _m.get('received', False):
                         _last_aluno_body = (_m.get('body') or _m.get('text') or '').strip()
                         break
@@ -4577,6 +4655,57 @@ def process_in_hours_rescue():
                     continue
             except Exception as e_far:
                 p(f"  [IN-HOURS-RESCUE] erro check farewell {cid[:12]}: {e_far}")
+
+            # === FIX-1: limpa handoff_active STALE se atendente prometido ja saiu ===
+            # Caso Debora: handoff(dispatch, Debora) ficou no banco depois que
+            # ela finalizou. Aluno volta 2h depois e bot promete Debora errado.
+            try:
+                cleared, leaver = _had_attendant_left_after_handoff(cid, _conv_msgs)
+                if cleared:
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} handoff_active stale removido (atendente {leaver} saiu)")
+            except Exception as e_clr:
+                p(f"  [IN-HOURS-RESCUE] erro clear stale: {e_clr}")
+
+            # === FIX-2: respeita handoff_active(dispatch) ja ativo (sticky) ===
+            # Se ainda ha promessa valida para X e X esta ativo, tenta re-atribuir
+            # a X em vez de distribuir para outro consultor (evita prometer 2 nomes diferentes).
+            try:
+                ho_motivo_pre, ho_target_pre = _is_handoff_active(cid)
+                if ho_motivo_pre == 'dispatch' and ho_target_pre:
+                    target_first_pre = ho_target_pre.split()[0].lower()
+                    if is_attendant_active_now(target_first_pre):
+                        # sticky: re-atribui ao mesmo prometido
+                        target_full = ho_target_pre
+                        p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} handoff(dispatch) ativo p/ {target_full} - sticky re-atribuicao")
+                        try:
+                            lead_id, _biz, _created = _ensure_lead_for_rescue(phone, name)
+                            if lead_id:
+                                _dcz_transfer_business(phone, target_full, lead_id=lead_id)
+                                _dcz_transfer_lead(lead_id, target_full)
+                            _dcz_transfer_chat(cid, target_full)
+                        except Exception as e_st:
+                            p(f"  [IN-HOURS-RESCUE] erro sticky transfer: {e_st}")
+                        # NAO envia nova msg de transferencia ao aluno — handoff_active ja teve
+                        # nudge entregue anteriormente. Apenas registra no Cockpit:
+                        try:
+                            update_pending_escalation_status(
+                                cid, 'in_progress',
+                                note=f'Sticky re-atribuicao a {target_full} (handoff ativo)',
+                            )
+                        except Exception:
+                            pass
+                        _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                        continue
+                    else:
+                        # atendente prometido nao esta ativo agora — limpa handoff stale
+                        # e segue fluxo normal de distribuicao.
+                        p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} handoff prometia {ho_target_pre} mas atendente off - limpando")
+                        try:
+                            _clear_handoff_active(cid, reason='attendant_offline')
+                        except Exception:
+                            pass
+            except Exception as e_ho:
+                p(f"  [IN-HOURS-RESCUE] erro check handoff: {e_ho}")
 
             consultant = get_available_consultant()
             if not consultant:
@@ -4734,6 +4863,81 @@ def _extract_last_attendant_from_history(msgs):
         if match:
             return match.group(1).strip().lower()
     return None
+
+
+def _had_attendant_left_after_handoff(conv_id, msgs):
+    """Detecta se o atendente que estava no handoff_active dessa conv SAIU
+    (finalizou/foi removido) depois do handoff_active ser registrado.
+
+    Caso reportado: Debora foi atribuida, marcou handoff_active(dispatch, Debora).
+    Debora finalizou e foi removida. Mas handoff_active continuou na tabela
+    com TTL 4h. Aluno voltou 2h depois -> bot prometeu 'Debora vai continuar'
+    sendo que Debora ja nao estava mais na conv.
+
+    Retorna (limpou, target_que_saiu) — limpou=True se removeu handoff stale.
+    """
+    if not msgs:
+        return False, None
+    _ensure_dedup_tables()
+    if not _DEDUP_TABLES_READY:
+        return False, None
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT motivo, target_attendant, created_at FROM handoff_active
+            WHERE conv_id = %s AND expires_at > NOW()
+            LIMIT 1
+        """, (conv_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+    except Exception:
+        return False, None
+    if not row:
+        return False, None
+    motivo, target, ho_created_at = row
+    # So aplica em handoffs de dispatch — outros tipos (supervisor_block,
+    # escalate) tem semantica diferente.
+    if motivo != 'dispatch' or not target:
+        return False, None
+    # procura no historico se "<target> finalizou" ou "Atendente <target> removido"
+    # apareceu DEPOIS do handoff_created_at
+    import re
+    target_first = target.split()[0].lower()
+    from datetime import datetime as _dt
+    try:
+        ho_ts = ho_created_at.timestamp() if hasattr(ho_created_at, 'timestamp') else 0
+    except Exception:
+        ho_ts = 0
+    for m in msgs:
+        body = (m.get('body') or m.get('text') or '').strip()
+        if not body:
+            continue
+        body_lower = body.lower()
+        match_close = ('finalizou o atendimento' in body_lower or
+                       'atendente' in body_lower and 'removido' in body_lower)
+        if not match_close:
+            continue
+        # confere se o nome do atendente que saiu bate com target
+        # (regex para 'Beatriz Andrade removido' ou 'Beatriz Andrade finalizou')
+        m_name = re.search(r'(?:atendente\s+)?([A-Z][a-zA-ZÀ-ÿ]+)', body)
+        leaver = m_name.group(1).lower() if m_name else ''
+        if leaver != target_first:
+            continue
+        # tem que ter sido APOS o handoff_active ser criado
+        ts_str = m.get('createdAt') or m.get('timestamp') or ''
+        try:
+            if ts_str and ho_ts:
+                msg_ts = _dt.fromisoformat(str(ts_str).replace('Z', '+00:00')).timestamp()
+                if msg_ts < ho_ts:
+                    continue
+        except Exception:
+            pass
+        # bingo: o atendente do handoff saiu -> limpa handoff_active stale
+        _clear_handoff_active(conv_id, reason=f'attendant_left:{target_first}')
+        return True, target_first
+    return False, None
 
 
 def _had_close_event_recently(msgs, max_hours=2):
@@ -7652,7 +7856,9 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
             p(f"  [DIST] dedup: mensagem cliente p/ {nome} ja enviada nas ultimas 4h - suprimindo")
         else:
             meta_typing_on()
-            sent_ok = send_and_track(conv_id, client_msg)
+            # force=True: garante que a propria msg de distribuicao nao seja
+            # suprimida pelo dispatch-recent recheck que send_and_track agora faz.
+            sent_ok = send_and_track(conv_id, client_msg, force=True)
             if sent_ok:
                 _register_signature(conv_id, client_sig, client_msg)
 
