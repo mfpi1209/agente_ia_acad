@@ -6211,6 +6211,15 @@ def process_supervisor_loop():
                 if ho_motivo_cl:
                     p(f"  [SUPERVISOR-CLOSE] skip ...{phone[-4:] if phone else '????'} handoff_active={ho_motivo_cl}")
                     continue
+                # ACAO E (2026-05-21): NAO encerrar se aluno respondeu APOS o
+                # ultimo envio do bot. silence_s eh baseado em sent_ts e nao
+                # detecta resposta nova do aluno depois dela. Bug: bot fechava
+                # conv com pergunta nova do aluno aberta. 35 casos perdido_conversa.
+                _recv_ts_sup = c.get('lastReceivedMessageDate', '') or ''
+                _sent_ts_sup = c.get('lastSendedMessageDate', '') or ''
+                if _recv_ts_sup and _sent_ts_sup and _recv_ts_sup > _sent_ts_sup:
+                    p(f"  [SUPERVISOR-CLOSE] skip ...{phone[-4:] if phone else '????'} aluno respondeu apos ultimo envio - NAO encerra")
+                    continue
                 close_msg = CLOSE_INACTIVITY_MSG.format(name=name_fmt)
                 tag = 'pos-follow-up' if close_after_followup else 'orfa-handoff'
                 # DEDUP: nao reenvia close se ja registrado pelo supervisor (mesmo apos restart)
@@ -10927,33 +10936,34 @@ def main():
 
                     elif st.get('followup_stage', 0) == 1 and elapsed >= CLOSE_DELAY:
                         _safe_to_close = False
-                        if elapsed >= 3600:
-                            _safe_to_close = True
-                        else:
-                            try:
-                                r_check = requests.get(
-                                    f'{DCZ_MSG}/messaging/conversations/{cid}',
-                                    headers=H, timeout=10)
-                                if r_check.status_code == 200:
-                                    conv_data = r_check.json()
-                                    if conv_data.get('attendants', []):
-                                        p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Atendente presente -> cancelando close")
-                                        st['_human_took_over'] = True
-                                        st['waiting_for_client'] = False
-                                        continue
-                                    recv_ts = conv_data.get('lastReceivedMessageDate', '') or ''
-                                    sent_ts = conv_data.get('lastSendedMessageDate', '') or ''
-                                    if recv_ts and sent_ts and recv_ts > sent_ts:
-                                        p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Aluno respondeu depois do follow-up -> cancelando close")
-                                        st['waiting_for_client'] = False
-                                        st['inactivity_start'] = 0
-                                        st['followup_stage'] = 0
-                                        continue
-                                    _safe_to_close = True
-                                else:
-                                    p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] API retornou {r_check.status_code} -> adiando close")
-                            except Exception as e_check:
-                                p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Erro ao verificar API: {e_check} -> adiando close")
+                        # ACAO E (2026-05-21): SEMPRE verificar recv_ts > sent_ts
+                        # antes de fechar (mesmo apos 1h). Bug: 35 casos de
+                        # 'perdido_conversa' porque shortcut de >=3600s pulava
+                        # esse check e fechava conv com pergunta nova do aluno.
+                        try:
+                            r_check = requests.get(
+                                f'{DCZ_MSG}/messaging/conversations/{cid}',
+                                headers=H, timeout=10)
+                            if r_check.status_code == 200:
+                                conv_data = r_check.json()
+                                if conv_data.get('attendants', []):
+                                    p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Atendente presente -> cancelando close")
+                                    st['_human_took_over'] = True
+                                    st['waiting_for_client'] = False
+                                    continue
+                                recv_ts = conv_data.get('lastReceivedMessageDate', '') or ''
+                                sent_ts = conv_data.get('lastSendedMessageDate', '') or ''
+                                if recv_ts and sent_ts and recv_ts > sent_ts:
+                                    p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Aluno respondeu depois do follow-up -> cancelando close (reset stage)")
+                                    st['waiting_for_client'] = False
+                                    st['inactivity_start'] = 0
+                                    st['followup_stage'] = 0
+                                    continue
+                                _safe_to_close = True
+                            else:
+                                p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] API retornou {r_check.status_code} -> adiando close")
+                        except Exception as e_check:
+                            p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Erro ao verificar API: {e_check} -> adiando close")
                         if not _safe_to_close and elapsed >= 2700:
                             _safe_to_close = True
                             p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] fallback 45min+ pós-follow-up (API incerta)")
