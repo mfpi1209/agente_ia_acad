@@ -2108,6 +2108,52 @@ def _get_relevant_calendar_events(student_profile=None, user_message=None,
         return []
 
 
+# Registro em memoria das conversas onde o calendario foi injetado nas
+# ultimas N segundos. Usado pelo tabulador para forcar tema='CALENDARIO'
+# sem depender do LLM classificador acertar sozinho.
+_calendar_marked_convs = {}
+_CALENDAR_MARK_TTL = 1800  # 30 min — janela razoavel ate a tabulacao rodar
+
+
+def _mark_calendar_used(conv_id):
+    if conv_id is None:
+        return
+    try:
+        _calendar_marked_convs[str(conv_id)] = time.time()
+    except Exception:
+        pass
+
+
+def _consume_calendar_mark(conv_id):
+    """Retorna True se o calendario foi injetado para conv_id na janela TTL.
+
+    A marca eh REMOVIDA apos consumo para nao 'colar' tema CALENDARIO em
+    tabulacoes subsequentes que ja nao envolvem datas. Se o aluno fizer
+    nova pergunta sobre datas, _mark_calendar_used reescreve a marca.
+    """
+    if conv_id is None:
+        return False
+    key = str(conv_id)
+    ts = _calendar_marked_convs.pop(key, None)
+    if not ts:
+        return False
+    if (time.time() - ts) > _CALENDAR_MARK_TTL:
+        return False
+    return True
+
+
+def _cleanup_calendar_marks():
+    """Remove marcas antigas (>TTL) periodicamente para nao crescer indefinido."""
+    try:
+        now = time.time()
+        stale = [k for k, ts in _calendar_marked_convs.items()
+                 if (now - ts) > _CALENDAR_MARK_TTL]
+        for k in stale:
+            _calendar_marked_convs.pop(k, None)
+    except Exception:
+        pass
+
+
 def _format_calendar_block(events, header="CALENDARIO ACADEMICO GRADUACAO 2026"):
     """Formata eventos como bloco de texto para injetar no contexto do LLM."""
     if not events:
@@ -2712,7 +2758,16 @@ def tabulate_interaction(messages, profile, phone, conv_id=''):
             messages=[{
                 'role': 'user',
                 'content': f"""Classifique este atendimento. Responda EXATAMENTE neste formato JSON:
-{{"tema":"ACESSO_PORTAL|FINANCEIRO|ACADEMICO|MATRICULA|DOCUMENTOS|OUTRO","subtema":"descricao curta","sentimento":"satisfeito|neutro|frustrado|irritado","resolvido":"sim|nao|parcial|escalado","nps":7}}
+{{"tema":"ACESSO_PORTAL|FINANCEIRO|ACADEMICO|MATRICULA|DOCUMENTOS|CALENDARIO|OUTRO","subtema":"descricao curta","sentimento":"satisfeito|neutro|frustrado|irritado","resolvido":"sim|nao|parcial|escalado","nps":7}}
+
+Regras para o campo "tema":
+- Use "CALENDARIO" quando o atendimento envolver perguntas sobre DATAS academicas: prova A1 ou AF, liberacao de notas, inicio das aulas, fim do semestre, prazo de matricula ou rematricula, transferencia, retorno ao curso, dispensa de disciplina, atividades complementares (AC), estagio (TCE), ENADE ou feriados academicos.
+- Use "MATRICULA" para duvidas administrativas de matricula sem foco em data.
+- Use "ACADEMICO" para duvidas pedagogicas que NAO envolvam datas (conteudo, disciplina, professor, AVA).
+- Use "ACESSO_PORTAL" para login, senha, AVA, app.
+- Use "FINANCEIRO" para boleto, mensalidade, desconto, bolsa.
+- Use "DOCUMENTOS" para historico, declaracao, diploma.
+- Use "OUTRO" apenas se nenhum dos anteriores se aplicar.
 
 Regras para o campo "resolvido":
 - Use "sim" APENAS se o aluno indicou claramente que o problema foi resolvido ou agradeceu/fechou satisfeito.
@@ -2731,6 +2786,14 @@ Conversa:
             return
 
         tab = json.loads(match.group())
+
+        # Override determinitico: se o calendario foi injetado para essa
+        # conversa nos ultimos 30 min, FORCA tema='CALENDARIO'. Isso evita
+        # depender do GPT classificador acertar sozinho.
+        if _consume_calendar_mark(conv_id):
+            tab['tema'] = 'CALENDARIO'
+
+        _cleanup_calendar_marks()
 
         from datetime import datetime, timezone, timedelta
         now_sp = datetime.now(timezone(timedelta(hours=-3))).replace(tzinfo=None)
@@ -10427,6 +10490,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             if _cal_block:
                 references = (references or '') + "\n\n" + _cal_block + "\n"
                 p(f"    [CAL] Injetado {len(_cal_events)} evento(s) no contexto")
+                _mark_calendar_used(conv_id)
     except Exception as _e_cal:
         p(f"    [CAL] Falha ao injetar calendario: {_e_cal}")
 

@@ -912,6 +912,7 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
     <button onclick="loadCalendar()" class="btn btn-g btn-sm"><i class="fas fa-rotate mr-1"></i>Atualizar</button>
     <button onclick="openCalendarForm(null)" class="btn btn-p btn-sm"><i class="fas fa-plus mr-1"></i>Novo evento</button>
     <button onclick="calendarReseed()" class="btn btn-s btn-sm" title="Recarrega os eventos canônicos (não sobrescreve nem reativa)"><i class="fas fa-arrows-rotate mr-1"></i>Recarregar seed</button>
+    <button onclick="openAgentIACalendar()" class="btn btn-b btn-sm" title="Abre a aba Agente IA filtrada pelas interações que usaram o calendário"><i class="fas fa-eye mr-1"></i>Ver interações</button>
   </div>
   <div class="overflow-x-auto">
     <table class="w-full text-sm">
@@ -2854,6 +2855,29 @@ async function calendarReseed(){
     await loadCalendarSummary();
     await loadCalendar();
   }catch(e){toast('Erro: '+e,'error');}
+}
+
+function openAgentIACalendar(){
+  // Troca para a aba Agente IA e pre-filtra por tema CALENDARIO
+  sw('agentia');
+  setTimeout(()=>{
+    try{
+      const sel=document.getElementById('aia-ftema');
+      if(!sel){return;}
+      // Se o dropdown ainda nao foi populado (carrega via stats), insere
+      // CALENDARIO manualmente para garantir que o filtro seja aplicado.
+      let has=false;
+      for(const o of sel.options){if(o.value==='CALENDARIO'){has=true;break;}}
+      if(!has){
+        const opt=document.createElement('option');
+        opt.value='CALENDARIO';opt.textContent='CALENDARIO';opt.selected=true;
+        sel.appendChild(opt);
+      }
+      sel.value='CALENDARIO';
+      if(typeof aiaPage!=='undefined'){aiaPage=1;}
+      if(typeof aiaLoadTbl==='function'){aiaLoadTbl();}
+    }catch(e){console.error('openAgentIACalendar',e);}
+  },300);
 }
 
 // ==== LOGS ====
