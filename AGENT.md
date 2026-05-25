@@ -7,6 +7,82 @@
 
 ---
 
+### [2026-05-25] - Fix: agente expulsava consultor de retenção (Camadas A+B+C)
+
+**Decisão**
+
+3 camadas defensivas para impedir que o supervisor IA / fila noturna
+substituam o atendente humano que já está cuidando da conversa
+(caso reportado: Alessandra Prado Franco — Wesley em retenção → Julia →
+Camila).
+
+1. **Camada A** (`process_openai_supervisor_loop`, path `tem_humano=True`):
+   - Removido `record_pending_escalation(reason='supervisor_block_with_human',
+     tier='priority')`.
+   - Removido `_mark_handoff_active('supervisor_block', ...)` sobreposto.
+   - Removido nudge "Já registrei aqui sua conversa..." nesse path.
+   - Substituído por `_record_audit_finding(action_taken='audit_only_human_present')`
+     + `continue`. Supervisor só audita, não move conversa.
+
+2. **Camada B** (`process_pending_escalation_auto_dispatch`): antes de
+   chamar `distribute_to_attendant`, faz `_dcz_conv_has_human(conv_id)`
+   (nova função, GET `/messaging/conversations/{id}` no DCZ). Se já tem
+   humano, marca pending como `in_progress` com nota explicativa e pula.
+
+3. **Camada C** (`_mark_handoff_active`): novo parâmetro `protect_human=True`
+   (default). Se já existe handoff ATIVO com motivo em
+   `{retention, preferred, dispatch, pre_opening_queue}` e `target` preenchido,
+   apenas estende TTL — NÃO sobrescreve motivo nem target. Para fazer
+   override real (ex: usuário clica "Liberar agente"), o caller passa
+   `protect_human=False` ou usa `_clear_handoff_active`.
+
+**Contexto**
+
+Cadeia de bug observada na conversa #155988 (Alessandra):
+- 12:29: Wesley em retenção
+- 12:34: Aluna responde
+- 12:38: Supervisor identifica algo "alta severidade", caminho
+  `tem_humano=True` → escreve `pending_escalation(priority)` e
+  sobrescreve `handoff_active` com `supervisor_block`.
+- 12:40: Fila noturna pega o pending recém-criado → chama
+  `distribute_to_attendant` → idempotência só checa `motivo='dispatch'`,
+  não bate, distribui pra Julia.
+- 12:41: Bot envia "Vou te transferir pra Julia".
+- Depois: bug re-disparou e moveu pra Camila.
+
+**Alternativas descartadas**
+
+- **Apenas Camada A**: deixa portas abertas se outras vias chamarem
+  `_mark_handoff_active` ou `record_pending_escalation` com humano lá.
+- **Apenas Camada B**: bot ainda envia o nudge "Já registrei aqui..."
+  desnecessário; e o handoff humano ainda é sobrescrito.
+- **Apenas Camada C**: pending_escalation continua sendo criado, e a
+  fila ainda tentaria distribuir (mesmo que `distribute_to_attendant`
+  agora respeitasse o handoff, traria ruído de log).
+- **Triplicação combinada (A+B+C)**: escolhida porque cada camada
+  cobre falha das outras (defesa em profundidade).
+
+**Impacto**
+
+- Consultor em retenção/preferred permanece como dono da conversa.
+- Supervisor continua auditando: o finding aparece em
+  `agent_audit_findings` com `action_taken='audit_only_human_present'`,
+  visível na aba Auditoria IA — operadora pode intervir manualmente se
+  achar necessário (Liberar agente / Resolver).
+- Caso Alessandra: revertida manualmente (Camila → Wesley) com nota
+  interna explicativa.
+
+**Arquivos tocados**
+
+- `agente_ao_vivo_v4.py`:
+  - `_dcz_conv_has_human` (nova função utilitária).
+  - `process_openai_supervisor_loop`: path `tem_humano=True` reescrito.
+  - `process_pending_escalation_auto_dispatch`: pré-check `_dcz_conv_has_human`.
+  - `_mark_handoff_active`: parâmetro `protect_human=True` + lógica de
+    preservação. Constante `_HUMAN_HANDOFF_MOTIVOS`.
+
+---
+
 ### [2026-05-25] - Calendário Acadêmico Graduação 2026 integrado ao agente
 
 **Decisão**

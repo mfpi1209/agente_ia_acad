@@ -4731,6 +4731,42 @@ def update_pending_escalation_status(conv_id, status, note=''):
         p(f"  [FILA] Erro ao atualizar status: {e_up}")
 
 
+def _dcz_conv_has_human(conv_id, timeout=8):
+    """Consulta DCZ se a conversa ja tem atendente humano (chat ou business).
+
+    Retorna (has_human:bool, attendant_name:str).
+    Em caso de erro/timeout retorna (False, '') para nao bloquear distribuicao
+    indevidamente — a Camada A ja eh a defesa principal.
+    """
+    if not conv_id:
+        return False, ''
+    try:
+        r = requests.get(f'{DCZ_MSG}/messaging/conversations/{conv_id}',
+                         headers=H, timeout=timeout)
+        if r.status_code != 200:
+            return False, ''
+        cd = r.json() or {}
+        att = cd.get('attendant') or {}
+        if isinstance(att, dict):
+            att_id = att.get('id') or ''
+            att_name = att.get('name') or att.get('username') or ''
+        else:
+            att_id = cd.get('attendantId') or ''
+            att_name = ''
+        if att_id:
+            return True, att_name
+        # fallback: lista attendants (formato CRM list)
+        atts = cd.get('attendants') or []
+        if isinstance(atts, list) and atts:
+            first = atts[0]
+            if isinstance(first, dict):
+                return True, first.get('name') or first.get('username') or ''
+            return True, str(first)
+        return False, ''
+    except Exception:
+        return False, ''
+
+
 def _fetch_pending_for_auto_dispatch(limit=25):
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -4832,6 +4868,7 @@ def process_pending_escalation_auto_dispatch():
     dispatched = 0
     failed = 0
     deferred = 0
+    skipped_human = 0
     for row in rows:
         conv_id = row.get('conv_id') or ''
         if not conv_id:
@@ -4850,6 +4887,28 @@ def process_pending_escalation_auto_dispatch():
         reason_tag = 'Fila pré-abertura' if tier_row == 'pre_opening' else 'Retorno automático fila noturna'
         reason = (f"{reason_tag} — {row.get('reason', '')}"
                   + (f' | {pergunta}' if pergunta else ''))
+
+        # CORRECAO (2026-05-25): defesa em profundidade contra o bug
+        # "agente expulsa consultor de retencao". Antes de distribuir, consulta
+        # DCZ se a conversa ja tem atendente humano. Se tem, marca a entrada
+        # como in_progress (consultor original assume) e pula. Combina com
+        # Camada A no supervisor — esta eh a Camada B.
+        try:
+            has_h, att_name = _dcz_conv_has_human(conv_id)
+        except Exception:
+            has_h, att_name = False, ''
+        if has_h:
+            p(f"  [FILA] {conv_id[:12]} ja tem humano ({att_name}) - PULAR distribuicao")
+            try:
+                update_pending_escalation_status(
+                    conv_id, 'in_progress',
+                    note=f"☀️ *Fila noturna* — humano ({att_name or 'atendente'}) ja presente, distribuicao automatica abortada.",
+                )
+            except Exception:
+                pass
+            skipped_human += 1
+            continue
+
         overloaded = {n for n, c in assigned_count.items() if c >= burst_max}
         p(f"  [FILA] Auto-distribuir conv={conv_id[:12]} tier={tier_row} ({label}) overload={len(overloaded)}")
         ok = distribute_to_attendant(conv_id, reason=reason, exclude_attendants=overloaded)
@@ -4879,7 +4938,7 @@ def process_pending_escalation_auto_dispatch():
     if deferred:
         p(f"  [FILA] {deferred} conv(s) adiadas por limite de burst - vao na proxima janela")
 
-    p(f"  [FILA] Lote {label}: distribuídos={dispatched} ainda_pendentes={failed}")
+    p(f"  [FILA] Lote {label}: distribuídos={dispatched} ainda_pendentes={failed} pulados_humano={skipped_human}")
     if is_morning_burst:
         _set_morning_queue_last_run(today)
     _last_pending_dispatch_ts = time.time()
@@ -6186,7 +6245,22 @@ def _is_handoff_active(conv_id):
     return None, None
 
 
-def _mark_handoff_active(conv_id, motivo, target='', ttl_s=12 * 3600, body=''):
+# Motivos onde um HUMANO especifico esta cuidando da conversa. Sobrescrever
+# handoff_active nestes casos remove a 'protecao' do humano e abre porta para
+# o bot ou o supervisor mover a conversa pra outro consultor (bug Wesley/Julia).
+_HUMAN_HANDOFF_MOTIVOS = {'retention', 'preferred', 'dispatch', 'pre_opening_queue'}
+
+
+def _mark_handoff_active(conv_id, motivo, target='', ttl_s=12 * 3600, body='',
+                         protect_human=True):
+    """Marca/atualiza handoff_active para a conversa.
+
+    protect_human (default True): se ja existe handoff ATIVO com motivo de
+    humano em _HUMAN_HANDOFF_MOTIVOS e target preenchido, NAO sobrescreve.
+    Apenas estende o TTL. Isso evita que o supervisor 'expulse' consultor de
+    retencao/preferred ao silenciar o bot. Passe protect_human=False quando
+    REALMENTE quiser substituir (ex: usuario clicar 'Liberar agente').
+    """
     _ensure_dedup_tables()
     if not _DEDUP_TABLES_READY:
         return
@@ -6194,6 +6268,39 @@ def _mark_handoff_active(conv_id, motivo, target='', ttl_s=12 * 3600, body=''):
         h = _hash_body(body)
         conn = get_db()
         cur = conn.cursor()
+
+        if protect_human and motivo not in _HUMAN_HANDOFF_MOTIVOS:
+            # Checa estado atual antes de sobrescrever.
+            try:
+                cur.execute("""
+                    SELECT motivo, target_attendant, expires_at
+                    FROM handoff_active
+                    WHERE conv_id = %s AND expires_at > NOW()
+                """, (conv_id,))
+                existing = cur.fetchone()
+            except Exception:
+                existing = None
+            if existing:
+                ex_motivo = (existing[0] or '').strip()
+                ex_target = (existing[1] or '').strip()
+                if ex_motivo in _HUMAN_HANDOFF_MOTIVOS and ex_target:
+                    # Apenas estende TTL do handoff humano existente;
+                    # NAO troca motivo nem target. Bot continua silenciado
+                    # mas o "dono" da conversa permanece o humano original.
+                    cur.execute("""
+                        UPDATE handoff_active
+                        SET expires_at = GREATEST(
+                            expires_at,
+                            NOW() + (%s || ' seconds')::interval
+                        )
+                        WHERE conv_id = %s
+                    """, (str(int(ttl_s)), conv_id))
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                    p(f"  [HANDOFF-ACTIVE] {conv_id[:12]} PROTEGIDO: humano {ex_target} ({ex_motivo}) mantido (motivo novo '{motivo}' ignorado)")
+                    return
+
         cur.execute("""
             INSERT INTO handoff_active (conv_id, motivo, target_attendant, body_hash, expires_at)
             VALUES (%s, %s, %s, %s, NOW() + (%s || ' seconds')::interval)
@@ -7279,20 +7386,30 @@ def process_openai_supervisor_loop():
                     except Exception as e_dist:
                         p(f"  [OPENAI-SUP] erro distribuicao supervisor: {e_dist}")
                 else:
-                    # Ja tem humano - registra como priority para destacar na fila.
-                    try:
-                        globals()['_current_phone'] = phone
-                        _conv_states.setdefault(cid, _default_conv_state())['phone'] = phone
-                        record_pending_escalation(
-                            cid,
-                            reason='supervisor_block_with_human',
-                            tier='priority',
-                            retorno_label='consultor ja esta na conversa',
-                            question=resumo[:200],
-                        )
-                        p(f"  [OPENAI-SUP] {cid[:12]} ja com humano({len(conv_attendants)}) - registrado priority na fila")
-                    except Exception:
-                        pass
+                    # CORRECAO (2026-05-25): NAO registrar em pending_escalation
+                    # nem sobrescrever handoff_active quando ja tem humano. Antes,
+                    # essa via causava o bug "agente expulsa consultor de retencao"
+                    # — o supervisor escrevia priority na fila, a fila noturna
+                    # pegava de volta e redistribuia pra outro consultor, e o
+                    # mark_handoff_active('supervisor_block') sobrescrevia o
+                    # retention(Wesley) existente. Agora apenas registra o finding
+                    # com audit_only_human_present e logo, sem mover a conversa.
+                    p(f"  [OPENAI-SUP] {cid[:12]} ALTA/{ptype} - humano({len(conv_attendants)}) ja presente -> audit_only_human_present (nao move conversa)")
+                    action = 'audit_only_human_present'
+                    _record_audit_finding(
+                        cid, severity=sev, problem_type=ptype, summary=resumo,
+                        detail={
+                            'trecho': trecho,
+                            'human_present': True,
+                            'attendants': [(a.get('name') if isinstance(a, dict) else str(a))
+                                           for a in conv_attendants][:5],
+                            'window': [{'role': r, 'body': b[:200]}
+                                       for r, b, _, _ in window[-6:]],
+                        },
+                        action_taken=action, phone=phone,
+                        model=OPENAI_SUPERVISOR_MODEL,
+                    )
+                    continue
 
                 # Passo 2: nudge unico ao aluno (4h ttl), so se ainda nao enviou.
                 # Antes do silenciamento porque send_and_track nao tem block.
@@ -7312,10 +7429,8 @@ def process_openai_supervisor_loop():
                 except Exception:
                     pass
 
-                # Passo 3: silenciar bot POR ULTIMO. handoff_active e 1 linha por
-                # conv (chave primaria), entao isso sobrescreve um eventual
-                # 'dispatch' deixado por distribute_to_attendant. Bot fica
-                # silenciado de fato ate humano clicar 'Liberar agente'.
+                # Passo 3: silenciar bot POR ULTIMO. Aqui ja sabemos que NAO tem
+                # humano (caso contrario teriamos feito 'continue' acima).
                 _mark_handoff_active(cid, 'supervisor_block',
                                      target='', ttl_s=6 * 3600,
                                      body=f"supervisor_block: {ptype}")
