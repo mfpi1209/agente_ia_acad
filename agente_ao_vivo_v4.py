@@ -5265,6 +5265,26 @@ def process_in_hours_rescue():
                     _IN_HOURS_RESCUE_RECENT[cid] = now_ts
                     continue
 
+                # (2026-05-25) Msg de OUTRA AUTOMACAO externa (URA, autoresponder,
+                # empresa parceira) chegou como input. NUNCA responder — apenas
+                # fechar a conv silenciosamente. Caso: 'claupiercings agradece
+                # seu contato. Como podemos ajudar?'
+                if _last_aluno_body and _is_external_bot_input(_last_aluno_body):
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} msg eh de bot externo ('{_last_aluno_body[:40]}') — fechando sem responder")
+                    try:
+                        close_conversation_crm(cid, phone=phone)
+                    except Exception as e_cc:
+                        p(f"  [IN-HOURS-RESCUE] erro close external_bot: {e_cc}")
+                    try:
+                        update_pending_escalation_status(
+                            cid, 'closed_external_bot',
+                            note=f'Mensagem identificada como bot/URA externo: "{_last_aluno_body[:80]}"',
+                        )
+                    except Exception:
+                        pass
+                    _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                    continue
+
                 # SE ALUNO MANIFESTOU CANCELAMENTO/TRANCAMENTO (retencao):
                 # nao distribui para qualquer atendente — passa para Wesley.
                 # Caso reportado: "Mas eu cancelei minha matricula" -> foi para
@@ -5537,7 +5557,70 @@ _CLOSE_EVENT_PATTERNS = (
     'este atendimento foi finalizado',
     'se quiser retornar para conversar',
     'encerrando esta conversa',
+    # (2026-05-25) Frases que NOSSO bot envia ao fechar — quando o aluno
+    # responde "Obrigada" depois disso, _had_close_event_recently precisa
+    # detectar essa frase como "evento de close" pro post_close_rescue agir.
+    'obrigado pela confirmação',
+    'obrigado pela confirmacao',
+    'tudo certo então',
+    'tudo certo entao',
+    'se surgir algo mais, pode contar comigo',
+    'fico feliz que tenha conseguido resolver',
+    'fico à disposição pro que precisar',
+    'qualquer coisa, é só me chamar',
+    'qualquer coisa, e so me chamar',
 )
+
+
+# (2026-05-25) Mensagens de OUTRAS automações/bots que chegam como input
+# (received=True) mas não são do aluno — são respostas automáticas de
+# integrações externas (URA, vCard, autoresponder de empresa parceira, etc).
+# Quando o agente recebe isso, NÃO deve tentar responder com menu/LLM —
+# deve apenas fechar a conv silenciosamente. Caso reportado: Claudenice
+# recebeu "claupiercings agradece seu contato. Como podemos ajudar?".
+_EXTERNAL_BOT_INPUT_PATTERNS = (
+    'agradece seu contato',
+    'agradece o contato',
+    'como podemos ajudar?',
+    'como podemos te ajudar?',
+    'como podemos ajudá-lo',
+    'como podemos ajuda-lo',
+    'mensagem automática',
+    'mensagem automatica',
+    'resposta automática',
+    'resposta automatica',
+    'atendimento automático',
+    'atendimento automatico',
+    'somos uma empresa',
+    'horário de atendimento das nossas lojas',
+    'horario de atendimento das nossas lojas',
+    'esta é uma resposta automatica',
+    'esta e uma resposta automatica',
+    'fora do horário comercial',
+    'fora do horario comercial',
+    'aguarde nosso retorno',
+    'em breve um de nossos atendentes',
+    'whatsapp business',
+)
+
+
+def _is_external_bot_input(text):
+    """Detecta se a 'mensagem do aluno' é, na verdade, msg de outro bot/URA
+    externo. Caso reportado (claupiercings 'agradece seu contato. Como
+    podemos ajudar?'). Quando True, agente FECHA a conv sem responder.
+    """
+    if not text:
+        return False
+    import unicodedata
+    t = (text or '').strip().lower()
+    t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
+                     if unicodedata.category(c) != 'Mn')
+    for p in _EXTERNAL_BOT_INPUT_PATTERNS:
+        p_norm = ''.join(c for c in unicodedata.normalize('NFD', p)
+                         if unicodedata.category(c) != 'Mn')
+        if p_norm in t_norm:
+            return True
+    return False
 
 # Padroes de despedida (msg do aluno apos encerramento que NAO requer atendente)
 _FAREWELL_KEYWORDS = (
@@ -10168,6 +10251,33 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     if cmd.startswith('#'):
         handle_debug_command(conv_id, cmd)
         return
+
+    # === MENSAGEM DE BOT EXTERNO (URA, autoresponder de parceiro, etc) ===
+    # (2026-05-25) Quando o "aluno" envia uma frase claramente de bot
+    # externo ("X agradece seu contato. Como podemos ajudar?"), o agente
+    # NUNCA deve responder com menu/LLM. Apenas fecha a conv silenciosamente.
+    # Caso: Claudenice — "claupiercings agradece seu contato..."
+    try:
+        if _is_external_bot_input(question):
+            p(f"  [EXTERNAL-BOT] msg identificada como bot/URA externa — fechando sem responder: \"{question[:80]}\"")
+            log_to_db(conv_id, question, '[fechada — msg de bot externo]', 1.0, 'external_bot_close')
+            try:
+                close_conversation_crm(conv_id, phone=_current_phone)
+            except Exception as e_eb:
+                p(f"  [EXTERNAL-BOT] erro close: {e_eb}")
+            try:
+                update_pending_escalation_status(
+                    conv_id, 'closed_external_bot',
+                    note=f'Bot/URA externa: "{question[:80]}"',
+                )
+            except Exception:
+                pass
+            conversation_messages.clear()
+            conversation_greeted.discard(conv_id)
+            waiting_for_client = False; followup_stage = 0; inactivity_start = 0
+            return
+    except Exception as e_eb_outer:
+        p(f"  [EXTERNAL-BOT] erro detector: {e_eb_outer}")
 
     # === RESPOSTA AO OFERECIMENTO PRE-ABERTURA ===
     # Se ha _pre_opening_pending no estado, interpreta resposta como sim/nao.
