@@ -910,6 +910,18 @@ ALMOCO_ANTE_MIN = 20
 ALMOCO_DURACAO_MIN = 60
 SAIDA_ANTE_MIN = 20
 
+# ============================================================
+# CONSULTORES EM FERIAS / AFASTADOS (2026-05-25)
+# ============================================================
+# Nomes em LOWERCASE (primeiro nome). Filtragem aplicada em:
+# - get_available_consultant (nao escolhe pra novas distribuicoes)
+# - is_attendant_active_now (retorna False -> sticky promise tambem pula)
+# - honor_preferred_attendant_promise (re-encaminha para outro consultor)
+# Para reativar: remover do set e fazer rebuild.
+_ATTENDANTS_ON_VACATION = {
+    'joyce',   # ferias a partir de 2026-05-25
+}
+
 # ===================== HORÁRIO DE ATENDIMENTO (sobrescrito por agent_config) =====================
 BUSINESS_HOURS_WEEKDAY_START = 8   # Seg-Sex início (mudado de 9 para 8 em 2026-05-21: alguns consultores entram 8h)
 BUSINESS_HOURS_WEEKDAY_END = 20    # Seg-Sex fim (exclusivo)
@@ -5151,9 +5163,18 @@ def process_in_hours_rescue():
     if not isinstance(convs, list):
         return
 
+    # (2026-05-25) Limite por execucao para nao travar o loop principal.
+    # Caso disparo: 300+ orfas faziam o rescue rodar por 10+ min em uma
+    # unica chamada, bloqueando o handle_message dos demais alunos. Com
+    # 40/execucao (~2-3min de API), o loop principal volta a respirar
+    # entre rescues consecutivos.
+    _RESCUE_MAX_PER_EXEC = 40
     now_ts = time.time()
     rescued = 0
     for c in convs:
+        if rescued >= _RESCUE_MAX_PER_EXEC:
+            p(f"  [IN-HOURS-RESCUE] limite por execucao atingido ({_RESCUE_MAX_PER_EXEC}) - continua no proximo ciclo")
+            break
         try:
             cid = c.get('id', '')
             if not cid:
@@ -7906,6 +7927,14 @@ def get_available_consultant(exclude_attendants=None):
         if exclude_set and str(nome).strip().lower() in exclude_set:
             p(f"  [DIST] {nome}: SKIP (excluido por limite burst)")
             continue
+        # Filtro de ferias/afastamento (2026-05-25)
+        try:
+            _nome_first = str(nome).strip().lower().split()[0] if nome else ''
+            if _nome_first in _ATTENDANTS_ON_VACATION:
+                p(f"  [DIST] {nome}: SKIP (em ferias/afastado)")
+                continue
+        except Exception:
+            pass
         if status_almoco != 'Ativo':
             p(f"  [DIST] {nome}: SKIP (status_almoco={status_almoco})")
             continue
@@ -8868,6 +8897,9 @@ def is_attendant_active_now(attendant_name):
         nome_norm = attendant_name.strip().lower()
         nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm)
                             if __import__('unicodedata').category(c) != 'Mn')
+        # Filtro de ferias/afastamento (2026-05-25)
+        if nome_norm.split()[0] in _ATTENDANTS_ON_VACATION:
+            return False
         url = (f'{SUPABASE_URL}/rest/v1/{DISTRIBUICAO_TABLE}'
                f'?ativo_inativo=eq.Ativo&tipo_atendimento=eq.Atendimento&select=*')
         r = requests.get(url, headers=SUPABASE_HEADERS, timeout=10)
@@ -9090,6 +9122,21 @@ OUR_MSG_FINGERPRINTS = (
     'percebi que você não respondeu',
     'nenhuma nova mensagem foi recebida',
     'vou encerrar esta conversa',
+    # Disparos/campanhas (templates HSM enviados via Cockpit). Sem estes
+    # fingerprints, _check_human_took_over confundia disparo com humano e
+    # o agente recuava da conversa. Caso 2026-05-25: disparo de mensalidade
+    # + atividade de extensao, 330 conversas ficaram sem atendimento.
+    'passando para te ajudar',
+    'passando para ajudar',
+    'organização da sua rotina',
+    'prazos importantes que vencem hoje',
+    'lembrar de dois prazos',
+    'atividade de extensão',
+    'projeto pelo blackboard',
+    'se não tiver essa disciplina em sua grade',
+    'pode desconsiderar',
+    'bons estudos',
+    'nossa equipe permanece por aqui',
     # Automação/fluxos do DataCrazy (não são humano, são bots de menu/trancamento).
     # Frases específicas o suficiente para evitar falso match em mensagens reais.
     'quer solicitar o trancamento',
@@ -11476,7 +11523,11 @@ def main():
             waiting_normal.sort(key=lambda c: c.get('lastReceivedMessageDate', '') or '')
             rest.sort(key=lambda c: c.get('lastSendedMessageDate', '') or '')
             waiting = waiting_atendente + waiting_normal
-            _MAX_WAITING_PER_CYCLE = 20
+            # (2026-05-25) Throughput por ciclo aumentado de 20 para 60.
+            # Disparos em massa (300+ alunos) deixavam a fila acumulada por
+            # 15-20 min. Com 60/ciclo (~5-8s/conv = 5-8min por ciclo),
+            # ainda eh seguro contra timeout e cobre disparos grandes.
+            _MAX_WAITING_PER_CYCLE = 60
             convs = waiting[:_MAX_WAITING_PER_CYCLE] + rest
             if waiting_atendente and (cycle <= 5 or cycle % 10 == 0):
                 p(f"  [PRIO-2] {len(waiting_atendente)} conversas 'falar com atendente' -> distribuir primeiro")
