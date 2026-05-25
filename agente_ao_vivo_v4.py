@@ -2071,12 +2071,18 @@ def _get_relevant_calendar_events(student_profile=None, user_message=None,
         from datetime import date as _date, timedelta as _td
         today = _date.today()
         topics = _detect_calendar_topic(user_message or '')
-        categorias = None
-        if topics:
-            cats = []
-            for tp in topics:
-                cats.extend(_CATEGORY_BY_TOPIC.get(tp, []))
-            categorias = list(dict.fromkeys(cats)) or None
+        # FIX (2026-05-25): se a mensagem NAO bate com nenhum topico de
+        # calendario, NAO injeta nada. Bug anterior: sem topico, o filtro
+        # nao restringia categoria -> todos os ~80 eventos dos proximos 240
+        # dias eram injetados e _mark_calendar_used forcava tema=CALENDARIO
+        # em conversas de acesso, financeiro, app DUDA, etc. Resultado: a
+        # aba CALENDARIO no Cockpit virou um catch-all errado.
+        if not topics:
+            return []
+        cats = []
+        for tp in topics:
+            cats.extend(_CATEGORY_BY_TOPIC.get(tp, []))
+        categorias = list(dict.fromkeys(cats)) or None
 
         publico_hint = None
         if student_profile:
@@ -10791,17 +10797,22 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     # semestre corrente, publico (calouro/veterano) e datas futuras (180d).
     # Bloqueia alucinacao: LLM eh orientado a usar APENAS as datas listadas.
     try:
-        _cal_events = _get_relevant_calendar_events(
-            student_profile=student_profile,
-            user_message=question,
-            max_events=10,
-        )
-        if _cal_events:
-            _cal_block = _format_calendar_block(_cal_events)
-            if _cal_block:
-                references = (references or '') + "\n\n" + _cal_block + "\n"
-                p(f"    [CAL] Injetado {len(_cal_events)} evento(s) no contexto")
-                _mark_calendar_used(conv_id)
+        # FIX (2026-05-25): so injeta + marca como CALENDARIO se a mensagem
+        # ATUAL do aluno tem pelo menos 1 keyword de topico de calendario.
+        # Defesa redundante alem do filtro em _get_relevant_calendar_events.
+        _cal_topics_now = _detect_calendar_topic(question or '')
+        if _cal_topics_now:
+            _cal_events = _get_relevant_calendar_events(
+                student_profile=student_profile,
+                user_message=question,
+                max_events=10,
+            )
+            if _cal_events:
+                _cal_block = _format_calendar_block(_cal_events)
+                if _cal_block:
+                    references = (references or '') + "\n\n" + _cal_block + "\n"
+                    p(f"    [CAL] Injetado {len(_cal_events)} evento(s) (topicos={_cal_topics_now})")
+                    _mark_calendar_used(conv_id)
     except Exception as _e_cal:
         p(f"    [CAL] Falha ao injetar calendario: {_e_cal}")
 
