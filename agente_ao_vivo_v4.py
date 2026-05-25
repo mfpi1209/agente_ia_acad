@@ -3844,6 +3844,33 @@ def send_and_track(conv_id, text, buttons=None, force=False):
     if lock is not None:
         lock.acquire()
     try:
+        # ============================================================
+        # CAMADAS D1 / D2 / D5 (2026-05-25): hard-stop humano + anti-burst
+        # ============================================================
+        # Caso Debora (11975717913): apos atendente finalizar as 12:49,
+        # bot enviou 4 mensagens (follow-up duplicado + close + resposta
+        # alucinada sobre exames veterinarios) entre 12:52 e 12:54.
+        if not force and conv_id:
+            # D5: burst lock (anti-duplicado por race condition)
+            if _send_burst_recent(conv_id):
+                p(f"  [BURST-LOCK] {conv_id[:12]} envio em <{_SEND_BURST_S}s - SUPRIMIDO")
+                return 'suppressed'
+            # D1: ultima outgoing eh atendente humano nas ultimas 6h
+            try:
+                _h1, _h1_name = _last_outgoing_is_human_attendant(conv_id)
+                if _h1:
+                    p(f"  [HUMAN-GUARD-D1] {conv_id[:12]} ultima outgoing eh {_h1_name} (humano) - SUPRIMIDO")
+                    return 'suppressed'
+            except Exception:
+                pass
+            # D2: humano encerrou (finalizou o atendimento) nas ultimas 6h
+            try:
+                _h2, _h2_who = _human_closed_conversation(conv_id)
+                if _h2:
+                    p(f"  [HUMAN-GUARD-D2] {conv_id[:12]} {_h2_who} finalizou o atendimento - SUPRIMIDO")
+                    return 'suppressed'
+            except Exception:
+                pass
         # === RECHECK: handoff_active vigente -> suprimir resposta orfa ===
         # ACAO C (2026-05-21): expandido. Antes so checava dispatch <90s.
         # Agora qualquer handoff ativo (supervisor_block, retention,
@@ -3918,6 +3945,8 @@ def send_and_track(conv_id, text, buttons=None, force=False):
         _track_sent_body(text)
         if conv_id:
             _register_body(conv_id, text, signature='body_send')
+            if status in (200, 201):
+                _mark_send_burst(conv_id)
         last_response_time = time.time()
         if buttons:
             p(f"    Enviado com {len(buttons)} botoes")
@@ -9161,6 +9190,173 @@ def _check_human_took_over(conv_id):
     return False
 
 
+# ============================================================
+# CAMADAS D1/D2 (2026-05-25): hard-stop apos atendente humano
+# ============================================================
+# D1: se a ULTIMA mensagem outgoing da conv foi enviada por um
+# attendant humano nas ultimas N horas, o agente NAO deve enviar
+# nada novo. Independe de _startup_ts, _human_took_over local ou
+# handoff_active (cobre o caso da Debora, em que startup_ts cego
+# ao historico permitiu bot responder apos despedida humana).
+#
+# D2: se nas mensagens existe "<Nome> finalizou o atendimento"
+# vindo de um attendant humano nas ultimas N horas, conv estah
+# encerrada por humano - agente nao envia follow-up nem close
+# nem resposta nova.
+_HUMAN_GUARD_WINDOW_S = 6 * 3600  # 6 horas
+
+
+def _last_outgoing_is_human_attendant(conv_id, msgs=None, window_s=_HUMAN_GUARD_WINDOW_S):
+    """Retorna (True, nome) se a ULTIMA msg outgoing tem attendant humano
+    com timestamp recente. Caso contrario (False, '')."""
+    try:
+        if msgs is None:
+            msgs = _cached_msgs.get(conv_id) or get_conversation_messages_api(conv_id, limit=15)
+            if conv_id:
+                _cached_msgs[conv_id] = msgs
+        if not msgs:
+            return False, ''
+        from datetime import datetime as _dt
+        now_ts = time.time()
+        # msgs vem do mais recente pro mais antigo (padrao da API)
+        for m in msgs:
+            if not isinstance(m, dict):
+                continue
+            if m.get('received', False):
+                # ja achou uma do aluno antes de outgoing humano -> nao tem hard-stop
+                return False, ''
+            if m.get('isInternal', False):
+                continue
+            body = (m.get('body') or '').strip()
+            header = (m.get('header') or '').strip()
+            # mensagens de sistema/header puro (ex: "iniciou o atendimento") nao contam
+            if header and not body:
+                continue
+            att = m.get('attendant') or {}
+            att_name = (att.get('name') if isinstance(att, dict) else '') or ''
+            if not att_name:
+                # outgoing sem attendant nomeado = bot. nao bloqueia.
+                return False, ''
+            # confere se eh recente
+            ts_str = m.get('createdAt') or m.get('timestamp') or ''
+            try:
+                msg_ts = _dt.fromisoformat(str(ts_str).replace('Z', '+00:00')).timestamp()
+            except Exception:
+                continue
+            if (now_ts - msg_ts) > window_s:
+                return False, ''
+            return True, att_name
+        return False, ''
+    except Exception:
+        return False, ''
+
+
+def _human_closed_conversation(conv_id, msgs=None, window_s=_HUMAN_GUARD_WINDOW_S):
+    """Retorna (True, nome) se na conv existe '<Nome> finalizou o atendimento'
+    vindo de attendant humano nas ultimas window_s segundos. Cobre o caso da
+    Debora: ela encerrou as 12:49 e o bot continuou enviando follow-up + close
+    + resposta nova depois disso."""
+    try:
+        if msgs is None:
+            msgs = _cached_msgs.get(conv_id) or get_conversation_messages_api(conv_id, limit=20)
+            if conv_id:
+                _cached_msgs[conv_id] = msgs
+        if not msgs:
+            return False, ''
+        from datetime import datetime as _dt
+        now_ts = time.time()
+        for m in msgs:
+            if not isinstance(m, dict):
+                continue
+            body = (m.get('body') or '').strip().lower()
+            header = (m.get('header') or '').strip().lower()
+            combined = (body + ' ' + header).strip()
+            if not combined:
+                continue
+            # eh um marker de encerramento humano?
+            if ('finalizou o atendimento' not in combined
+                    and 'finalizou este atendimento' not in combined
+                    and not ('atendente' in combined and 'removido' in combined)):
+                continue
+            # se o marker vier do header de sistema, tenta inferir nome do header
+            # (formato: "Debora Mani Moreira finalizou o atendimento")
+            sample = body if body else header
+            import re
+            m_name = re.search(r'^([A-ZÁÊÍÓÚÂÔÃÕ][\wÀ-ÿ]+(?:\s+[A-ZÁÊÍÓÚÂÔÃÕ][\wÀ-ÿ]+){0,3})\s+(?:finalizou|moveu)', sample)
+            who = m_name.group(1) if m_name else ''
+            # ignora se for nosso bot (sem nome proprio)
+            if not who:
+                # tenta attendant
+                att = m.get('attendant') or {}
+                who = (att.get('name') if isinstance(att, dict) else '') or ''
+            if not who:
+                continue
+            # confere janela temporal
+            ts_str = m.get('createdAt') or m.get('timestamp') or ''
+            try:
+                msg_ts = _dt.fromisoformat(str(ts_str).replace('Z', '+00:00')).timestamp()
+            except Exception:
+                continue
+            if (now_ts - msg_ts) > window_s:
+                continue
+            return True, who
+        return False, ''
+    except Exception:
+        return False, ''
+
+
+# CAMADA D3 (2026-05-25): lista de temas fora do escopo da
+# Cruzeiro do Sul EaD (academico). Caso Debora: aluno perguntou
+# "exames veterinarios" e bot respondeu como se fosse especialista.
+# Lista PROPOSITAL e RESTRITA — soh temas claramente fora (veterinaria,
+# pets, receitas, esporte, politica). NAO entram aqui temas academicos
+# legitimos mesmo que de cursos especificos (medicina, enfermagem,
+# fisioterapia, etc), pois aluno pode estudar nesses cursos.
+_OFF_SCOPE_KEYWORDS = (
+    'exame veterin', 'exames veterin', 'veterin', 'meu cachorro', 'meu gato',
+    'meu pet', 'meu cao', 'minha cadela', 'minha gata',
+    'receita de', 'como cozinhar', 'como fazer bolo',
+    'jogo do', 'futebol', 'palmeiras', 'corinthians', 'flamengo', 'sao paulo fc',
+    'politica', 'eleicao', 'presidente lula', 'presidente bolsonaro',
+    'horoscopo', 'signo de', 'tarot',
+)
+
+
+def _is_off_scope_message(text):
+    """Detecta se a mensagem do aluno eh sobre tema claramente fora do
+    escopo academico. Retorna (True, palavra_chave) ou (False, '')."""
+    if not text:
+        return False, ''
+    t = str(text).lower()
+    import unicodedata
+    t = ''.join(c for c in unicodedata.normalize('NFD', t) if unicodedata.category(c) != 'Mn')
+    for kw in _OFF_SCOPE_KEYWORDS:
+        if kw in t:
+            return True, kw
+    return False, ''
+
+
+# CAMADA D5 (2026-05-25): lock anti-burst por conv_id.
+# Caso reportado (Debora): 2 follow-ups identicos saidos em 5s
+# por race entre main_loop e supervisor_loop. Um lock simples
+# bloqueia envios concorrentes na mesma conv por _SEND_BURST_S.
+_SEND_BURST_S = 20
+_send_burst_last = {}
+
+
+def _send_burst_recent(conv_id):
+    if not conv_id:
+        return False
+    last = _send_burst_last.get(conv_id, 0)
+    return (time.time() - last) < _SEND_BURST_S
+
+
+def _mark_send_burst(conv_id):
+    if not conv_id:
+        return
+    _send_burst_last[conv_id] = time.time()
+
+
 def get_new_client_message(conv_id, force=False):
     """Retorna (msg_id, body, is_button_click, image_info).
     Processa a mensagem mais recente do aluno que ainda não foi respondida.
@@ -10609,19 +10805,53 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     except Exception as _e_cal:
         p(f"    [CAL] Falha ao injetar calendario: {_e_cal}")
 
+    # CAMADA D3 (2026-05-25): pergunta claramente fora do escopo academico
+    # (veterinaria, pets, esporte, etc) — escalar direto, NAO chamar LLM.
+    # Caso Debora (11975717913): "exames veterinarios" virou resposta
+    # alucinada do bot. Sem D3, o LLM responde de cabeca como especialista.
+    try:
+        _off, _off_kw = _is_off_scope_message(question)
+        if _off:
+            p(f"  [OFF-SCOPE-D3] pergunta fora do escopo (kw='{_off_kw}') -> escalando direto")
+            _off_msg = (
+                "Esse assunto eu não consigo te ajudar por aqui — vou te transferir "
+                "para um de nossos consultores que vai te orientar melhor, tá? "
+                "Um momentinho! 😊"
+            )
+            send_and_track(conv_id, _off_msg, force=True)
+            conversation_messages.append({'role': 'bot', 'text': _off_msg})
+            log_to_db(conv_id, question, _off_msg, 0.0, 'escalate_off_scope')
+            try:
+                if is_within_business_hours():
+                    distribute_to_attendant(conv_id, f'Pergunta fora do escopo academico ({_off_kw})')
+                else:
+                    # fora do horario: registra escalation para amanha
+                    try:
+                        record_pending_escalation(conv_id, reason=f'off_scope:{_off_kw}',
+                                                   tier='first', question=question)
+                    except Exception:
+                        pass
+            except Exception as e_off:
+                p(f"  [OFF-SCOPE-D3] erro distribute: {e_off}")
+            waiting_for_client = False; inactivity_start = 0
+            return
+    except Exception as e_off_outer:
+        p(f"  [OFF-SCOPE-D3] erro: {e_off_outer}")
+
     history = build_conversation_history(conv_id)
     clean, confidence, llm_time = call_llm(question, references, history, student_profile, memory, sentiment, is_first, image_b64=image_b64, image_mime=image_mime, image_desc=image_desc)
 
     p(f"  Resultado: conf={confidence:.2f} | top_sim={top_score:.3f}")
     p(f"  Resposta: {clean[:200]}...")
 
-    # ACAO F (2026-05-21): se confidence MUITO baixa (<0.30), escalar para
-    # consultor humano em vez de mandar resposta generica do LLM. Bug:
-    # 53 casos 'resposta_generica'/'nao_respondeu' onde bot mandava resposta
-    # vaga e nao escalava. Threshold 0.30 eh conservador — entre 0.30 e
-    # 0.40 ainda manda mas anexa botao "Falar com atendente".
-    if confidence < 0.30 and is_within_business_hours():
-        p(f"  [LOW-CONF] conf={confidence:.2f} < 0.30 -> escalando direto")
+    # ACAO F (2026-05-21) + CAMADA D4 (2026-05-25): threshold de confianca
+    # subiu de 0.30 para 0.40. Caso Debora (conf=0.30 sobre exames
+    # veterinarios) passava por POUCO no antigo limite. Faixa <0.40 sempre
+    # escala humano em vez de chutar resposta. Entre 0.40 e 0.50 ainda
+    # responde mas com cuidado (botao falar com atendente eh adicionado
+    # mais abaixo no fluxo padrao).
+    if confidence < 0.40 and is_within_business_hours():
+        p(f"  [LOW-CONF-D4] conf={confidence:.2f} < 0.40 -> escalando direto")
         _low_conf_msg = (
             "Pra eu não te passar nenhuma informação errada, vou te transferir "
             "para um de nossos consultores, tá? Um momento, por favor! 😊"
@@ -10632,7 +10862,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         try:
             distribute_to_attendant(conv_id, f'Baixa confianca da IA ({confidence:.2f})')
         except Exception as e_lc:
-            p(f"  [LOW-CONF] erro distribute: {e_lc}")
+            p(f"  [LOW-CONF-D4] erro distribute: {e_lc}")
         waiting_for_client = False; inactivity_start = 0
         return
 
