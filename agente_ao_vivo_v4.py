@@ -1209,6 +1209,7 @@ Sua personalidade: simpática, paciente, fala de um jeito leve e natural. Você 
 11. **ENDEREÇO DE POLO — REGRA CRÍTICA**: NUNCA, JAMAIS, INVENTE endereço, rua, número, bairro, ponto de referência, horário ou CEP de polo. Se o aluno perguntar endereço/local de polo e isso NÃO estiver explicitamente no bloco "ENDEREÇOS OFICIAIS DOS POLOS" (quando presente), responda APENAS: "Deixa eu confirmar essa informação com a equipe para te passar certinho, tá?". O sistema cuida da transferência automática quando o aluno expressa intenção de visita ou dificuldade. NÃO mencione metrô, linha, terminal, hospital ou referência geográfica de polo se não estiver nas referências.
 12. **INÍCIO DAS AULAS — REGRA CRÍTICA**: Quem se matricular AGORA em graduação ingressa na **turma do 2º semestre (agosto)**. NUNCA diga que as aulas começam em "fevereiro" ou "janeiro" para alunos novos/matriculados agora — isso é informação ERRADA. Se o aluno perguntar quando as aulas começam (perguntas tipo "quando começa", "quando inicia", "em que mês", "vou começar em agosto?", "fevereiro?"), responda que para quem está se matriculando agora as aulas iniciam em **agosto** (2º semestre). Se houver dúvida sobre cronograma detalhado ou calendário acadêmico, transfira para consultor.
 13. **ESQUECI MINHA SENHA — REGRA CRÍTICA**: O fluxo correto é por **SMS**, NÃO por e-mail. Procedimento oficial: o aluno clica em *Esqueci minha senha* na tela de login → digita o seu *telefone atualizado* → recebe um *código por SMS* → informa o código no campo indicado → cria a *nova senha*. NUNCA diga que ele "recebe um link no e-mail", "informa CPF e e-mail" ou "olha no spam do e-mail" — isso é informação ERRADA. Sempre lembre que o **telefone precisa estar atualizado** no cadastro pra o SMS chegar. Se o aluno disser que não recebeu o SMS, oriente que pode ser telefone desatualizado e ofereça transferir para consultor confirmar o cadastro.
+14. **CALENDÁRIO ACADÊMICO — REGRA CRÍTICA**: Quando o aluno perguntar sobre DATAS (prova A1, prova AF, liberação de notas, início das aulas, fim do semestre, prazo de matrícula, transferência, retorno ao curso, dispensa, AC, TCE, ENADE, feriados acadêmicos), use APENAS as datas que aparecem no bloco "CALENDÁRIO ACADÊMICO GRADUAÇÃO 2026" quando ele for fornecido nas referências. NUNCA invente, deduza ou aproxime datas. Se a pergunta envolve um período/data que não está listada no bloco, responda: "Deixa eu confirmar essa data certinho com a equipe pra não te passar informação errada, tá?" e a transferência acontece automaticamente. Para perguntas sobre data específica de uma matéria, oriente o aluno a consultar o Portal do Aluno (cronograma da disciplina).
 
 ## COMO CONVERSAR (REGRA MAIS IMPORTANTE):
 Você tá no WhatsApp. Ninguém manda textão no zap. Seja breve, natural e direta.
@@ -1839,6 +1840,305 @@ def fetch_caa_solicitacoes(cpf, limit=15):
         if 'caa_solicitacoes' not in msg and 'does not exist' not in msg:
             p(f"    [CAA] Erro lookup: {e}")
         return []
+
+
+# ================================================================
+# CALENDARIO ACADEMICO GRADUACAO EaD 2026
+# Fonte: PDF oficial (2026-05-25). Apenas graduacao.
+# ================================================================
+
+def _ensure_academic_calendar_table(cur):
+    """Cria tabela academic_calendar_2026 se ainda nao existir."""
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS academic_calendar_2026 (
+            id SERIAL PRIMARY KEY,
+            categoria VARCHAR(40) NOT NULL,
+            titulo VARCHAR(255) NOT NULL,
+            data_inicio DATE NOT NULL,
+            data_fim DATE,
+            mes_ref VARCHAR(40),
+            semestre VARCHAR(16),
+            publico VARCHAR(64) DEFAULT 'todos',
+            observacao TEXT,
+            ativo BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE (categoria, titulo, data_inicio)
+        )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_acad_cal_data ON academic_calendar_2026 (data_inicio)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_acad_cal_cat ON academic_calendar_2026 (categoria, ativo)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_acad_cal_sem ON academic_calendar_2026 (semestre, ativo)"
+    )
+
+
+def _seed_academic_calendar_if_empty():
+    """Popula tabela com seed canonico apenas se estiver vazia.
+
+    Roda 1x. Para atualizar/editar eventos, usar o painel admin Cockpit ou
+    INSERT manual. Reexecutar este seed nao sobrescreve registros existentes.
+    """
+    try:
+        from calendar_2026_seed import get_seed_events
+    except Exception as e:
+        p(f"    [CAL] Seed module indisponivel: {e}")
+        return
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        _ensure_academic_calendar_table(cur)
+        cur.execute("SELECT COUNT(*) FROM academic_calendar_2026")
+        n = cur.fetchone()[0] or 0
+        if n > 0:
+            cur.close()
+            conn.close()
+            return
+        events = get_seed_events()
+        inserted = 0
+        for ev in events:
+            try:
+                cur.execute("""
+                    INSERT INTO academic_calendar_2026
+                        (categoria, titulo, data_inicio, data_fim,
+                         mes_ref, semestre, publico, observacao, ativo)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                    ON CONFLICT (categoria, titulo, data_inicio) DO NOTHING
+                """, (
+                    ev.get('categoria'), ev.get('titulo'),
+                    ev.get('data_inicio'), ev.get('data_fim'),
+                    ev.get('mes_ref'), ev.get('semestre'),
+                    ev.get('publico') or 'todos',
+                    ev.get('observacao') or '',
+                ))
+                inserted += cur.rowcount or 0
+            except Exception as e:
+                p(f"    [CAL] Falha INSERT evento '{ev.get('titulo')}': {e}")
+        conn.commit()
+        cur.close()
+        conn.close()
+        p(f"    [CAL] Seed inicial concluido: {inserted} eventos inseridos.")
+    except Exception as e:
+        p(f"    [CAL] Erro no seed: {e}")
+
+
+def _fetch_calendar_events(filters=None, limit=200):
+    """Busca eventos do calendario. filters opcional para refinar query.
+
+    filters keys aceitas: categoria (str ou list), semestre, publico_contains,
+    data_min, data_max, ativo.
+    """
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        _ensure_academic_calendar_table(cur)
+        where = ["ativo = TRUE"]
+        args = []
+        f = filters or {}
+        cat = f.get('categoria')
+        if cat:
+            if isinstance(cat, (list, tuple, set)):
+                where.append("categoria = ANY(%s)")
+                args.append(list(cat))
+            else:
+                where.append("categoria = %s")
+                args.append(cat)
+        if f.get('semestre'):
+            where.append("(semestre = %s OR semestre IS NULL)")
+            args.append(f['semestre'])
+        if f.get('publico_contains'):
+            where.append("(publico ILIKE %s OR publico ILIKE 'todos')")
+            args.append(f"%{f['publico_contains']}%")
+        if f.get('data_min'):
+            where.append("(data_fim IS NULL AND data_inicio >= %s OR data_fim >= %s)")
+            args.extend([f['data_min'], f['data_min']])
+        if f.get('data_max'):
+            where.append("data_inicio <= %s")
+            args.append(f['data_max'])
+        sql = (
+            "SELECT id, categoria, titulo, data_inicio, data_fim, mes_ref, "
+            "semestre, publico, observacao FROM academic_calendar_2026 "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY data_inicio ASC LIMIT %s"
+        )
+        args.append(limit)
+        cur.execute(sql, args)
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        msg = str(e).lower()
+        if 'academic_calendar_2026' not in msg and 'does not exist' not in msg:
+            p(f"    [CAL] Erro fetch: {e}")
+        return []
+
+
+_CALENDAR_TOPIC_KEYWORDS = {
+    'prova': ['prova', 'avaliação', 'avaliacao', 'a1', 'af', 'recuperação', 'recuperacao'],
+    'nota': ['nota', 'resultado', 'gabarito', 'liberação de nota', 'liberacao de nota'],
+    'matricula': ['matrícula', 'matricula', 'rematrícula', 'rematricula', 'inscrição', 'inscricao'],
+    'inicio_aulas': ['início das aulas', 'inicio das aulas', 'começam as aulas',
+                     'comecam as aulas', 'quando começa', 'quando comeca',
+                     'quando inicia', 'inicio do curso', 'início do curso',
+                     'data de inicio', 'data de início', 'inicia as aulas',
+                     'inicia o curso', 'começa o curso', 'comeca o curso',
+                     'em que mês', 'em que mes', 'que mês começa',
+                     'que mes comeca', 'que mês inicia', 'que mes inicia',
+                     'vou começar', 'vou comecar', 'começo as aulas',
+                     'comeco as aulas'],
+    'transferencia': ['transferência', 'transferencia', 'segunda graduação',
+                      'segunda graduacao', '2a graduação', '2a graduacao'],
+    'retorno_curso': ['destrancamento', 'retorno', 'reativação', 'reativacao', 'voltar ao curso'],
+    'dispensa': ['dispensa', 'aproveitamento de disciplina'],
+    'ac': ['atividade complementar', 'atividades complementares', ' ac ', 'horas complementares'],
+    'estagio': ['estágio', 'estagio', 'tce'],
+    'feriado': ['feriado', 'recesso'],
+    'semestre': ['semestre', 'período letivo', 'periodo letivo'],
+    'disciplinas_especiais': ['disciplina especial', 'disciplinas especiais',
+                              'concluinte', 'reprovado', 'dp ', 'dependência', 'dependencia'],
+    'enade': ['enade'],
+    'evento': ['jornada acadêmica', 'jornada academica', 'semana de cursos'],
+}
+
+
+_CATEGORY_BY_TOPIC = {
+    'prova': ['prova_a1', 'prova_af', 'recurso_a1', 'recurso_af'],
+    'nota': ['liberacao_notas', 'liberacao_notas_af'],
+    'matricula': ['matricula'],
+    'inicio_aulas': ['aula_inicio', 'periodo_letivo'],
+    'transferencia': ['transferencia_externa', 'transferencia_interna'],
+    'retorno_curso': ['retorno_curso'],
+    'dispensa': ['dispensa'],
+    'ac': ['ac'],
+    'estagio': ['estagio'],
+    'feriado': ['feriado'],
+    'semestre': ['periodo_letivo'],
+    'disciplinas_especiais': ['disciplinas_especiais'],
+    'enade': ['enade'],
+    'evento': ['evento'],
+}
+
+
+def _detect_calendar_topic(text):
+    """Retorna lista de topicos de calendario detectados na mensagem (str)."""
+    if not text:
+        return []
+    t = text.lower()
+    hits = []
+    for topic, kws in _CALENDAR_TOPIC_KEYWORDS.items():
+        if any(k in t for k in kws):
+            hits.append(topic)
+    return hits
+
+
+def _student_semester_hint(student_profile):
+    """Inferir semestre relevante (2026.1, 2026.2) a partir do perfil.
+
+    Heuristica: usa o mes/data atual + indicio do tipo_matricula.
+    """
+    try:
+        from datetime import date as _date
+        today = _date.today()
+        if today.year == 2026:
+            return '2026.2' if today.month >= 7 else '2026.1'
+        if today.year == 2027 and today.month <= 7:
+            return '2027.1'
+    except Exception:
+        pass
+    return None
+
+
+def _get_relevant_calendar_events(student_profile=None, user_message=None,
+                                  max_events=10):
+    """Retorna eventos do calendario relevantes para o aluno e topico.
+
+    Estrategia:
+    - Filtra por data: somente eventos com data_inicio nas proximas 240 dias
+      ou em janela aberta (data_fim >= hoje).
+    - Filtra por categoria conforme os topicos detectados na mensagem.
+    - NAO filtra por semestre por padrao: os semestres se cruzam ao longo
+      do ano (ex: matricula de 2026.2 ja esta aberta dentro de 2026.1).
+      O filtro de data ja cuida disso ao excluir eventos passados.
+    - Aplica preferencia de publico (calouro/veterano) se identificado no
+      perfil, mas sempre inclui eventos publico='todos'.
+    """
+    try:
+        from datetime import date as _date, timedelta as _td
+        today = _date.today()
+        topics = _detect_calendar_topic(user_message or '')
+        categorias = None
+        if topics:
+            cats = []
+            for tp in topics:
+                cats.extend(_CATEGORY_BY_TOPIC.get(tp, []))
+            categorias = list(dict.fromkeys(cats)) or None
+
+        publico_hint = None
+        if student_profile:
+            acad = (student_profile or {}).get('academic') or {}
+            tipo = (acad.get('tipo_matricula') or '').lower()
+            if 'calouro' in tipo:
+                publico_hint = 'calouro'
+            elif 'veterano' in tipo or 'rematric' in tipo:
+                publico_hint = 'veterano'
+
+        filters = {
+            'data_min': today,
+            'data_max': today + _td(days=240),
+        }
+        if categorias:
+            filters['categoria'] = categorias
+
+        events = _fetch_calendar_events(filters=filters, limit=80)
+
+        if publico_hint:
+            events = [
+                e for e in events
+                if (e.get('publico') or 'todos').lower() == 'todos'
+                or publico_hint in (e.get('publico') or '').lower()
+            ]
+        return events[:max_events]
+    except Exception as e:
+        p(f"    [CAL] Erro filtro relevantes: {e}")
+        return []
+
+
+def _format_calendar_block(events, header="CALENDARIO ACADEMICO GRADUACAO 2026"):
+    """Formata eventos como bloco de texto para injetar no contexto do LLM."""
+    if not events:
+        return ''
+    lines = [header + ':']
+    for ev in events:
+        di = ev.get('data_inicio')
+        df = ev.get('data_fim')
+        if hasattr(di, 'strftime'):
+            di_s = di.strftime('%d/%m/%Y')
+        else:
+            di_s = str(di)
+        if df:
+            if hasattr(df, 'strftime'):
+                df_s = df.strftime('%d/%m/%Y')
+            else:
+                df_s = str(df)
+            data_str = f"{di_s} a {df_s}"
+        else:
+            data_str = di_s
+        titulo = ev.get('titulo') or ''
+        obs = ev.get('observacao') or ''
+        if obs:
+            lines.append(f"- {data_str}: {titulo} ({obs})")
+        else:
+            lines.append(f"- {data_str}: {titulo}")
+    lines.append(
+        "Use APENAS as datas acima. NUNCA invente datas. Se a pergunta nao "
+        "estiver coberta, oriente o aluno a consultar o Portal do Aluno."
+    )
+    return "\n".join(lines)
 
 
 def _parse_course_content(content):
@@ -10111,6 +10411,25 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         return
 
     references = build_references(results)
+
+    # CALENDARIO ACADEMICO (2026-05-25): injeta datas oficiais quando o aluno
+    # pergunta sobre prova, nota, matricula, inicio das aulas, etc. Filtra por
+    # semestre corrente, publico (calouro/veterano) e datas futuras (180d).
+    # Bloqueia alucinacao: LLM eh orientado a usar APENAS as datas listadas.
+    try:
+        _cal_events = _get_relevant_calendar_events(
+            student_profile=student_profile,
+            user_message=question,
+            max_events=10,
+        )
+        if _cal_events:
+            _cal_block = _format_calendar_block(_cal_events)
+            if _cal_block:
+                references = (references or '') + "\n\n" + _cal_block + "\n"
+                p(f"    [CAL] Injetado {len(_cal_events)} evento(s) no contexto")
+    except Exception as _e_cal:
+        p(f"    [CAL] Falha ao injetar calendario: {_e_cal}")
+
     history = build_conversation_history(conv_id)
     clean, confidence, llm_time = call_llm(question, references, history, student_profile, memory, sentiment, is_first, image_b64=image_b64, image_mime=image_mime, image_desc=image_desc)
 
@@ -10266,6 +10585,13 @@ def main():
     p("=" * 60)
 
     ensure_memory_tables()
+
+    # CALENDARIO ACADEMICO (2026-05-25): garante tabela e popula seed na 1a
+    # subida. Re-runs sao no-op (INSERT ON CONFLICT DO NOTHING).
+    try:
+        _seed_academic_calendar_if_empty()
+    except Exception as _e_cal_seed:
+        p(f"  [CAL] Falha no seed do calendario: {_e_cal_seed}")
 
     global _startup_ts
     _startup_ts = time.time()

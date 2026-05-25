@@ -7,6 +7,83 @@
 
 ---
 
+### [2026-05-25] - Calendário Acadêmico Graduação 2026 integrado ao agente
+
+**Decisão**
+
+Integração estruturada do PDF oficial do calendário acadêmico (Graduação EaD
+2026) ao agente, usando:
+
+1. **Tabela `academic_calendar_2026`** (Postgres principal) com 100 eventos
+   canônicos (provas A1/AF, liberação de notas, matrículas, transferências,
+   retorno ao curso, dispensa, ACs, TCE, ENADE, feriados, etc.). Cria com
+   `_ensure_academic_calendar_table()`; seed automático na 1ª subida via
+   `_seed_academic_calendar_if_empty()`.
+2. **Seed canônico** em `calendar_2026_seed.py` (lista Python imutável,
+   commitada). Permite recarregar via `POST /api/calendar/seed`
+   (idempotente: `ON CONFLICT DO NOTHING`).
+3. **Função de relevância** `_get_relevant_calendar_events(student_profile,
+   user_message)` filtra por:
+   - data ≥ hoje e ≤ hoje+240 dias;
+   - categoria conforme tópicos detectados em `_detect_calendar_topic()`
+     (prova, nota, matrícula, início de aulas, transferência, retorno,
+     dispensa, AC, estágio, feriado, ENADE, disciplinas especiais);
+   - preferência por público (calouro/veterano/concluinte) sem perder
+     eventos `publico='todos'`.
+4. **Injeção no contexto LLM**: bloco de texto `CALENDÁRIO ACADÊMICO
+   GRADUAÇÃO 2026` anexado a `references` antes de `call_llm()`, com
+   instrução explícita "use APENAS as datas acima, NUNCA invente".
+5. **Regra 14 no `SYSTEM_PROMPT`**: força o LLM a só usar datas do bloco
+   ou redirecionar pra consultor humano se a pergunta não estiver coberta.
+6. **API/UI**: endpoints `/api/calendar` (GET com filtros, POST, PUT,
+   DELETE soft, summary, seed) + aba **Calendário 2026** no `kb_admin.html`
+   com modal de criação/edição.
+
+**Contexto**
+
+PDF oficial 2026 (Graduação EaD, ~80 eventos) fornecido pelo usuário em
+25/05/2026. Agente alucinava datas (ex: dizia que aulas começam em
+fevereiro para quem se matricula agora, quando o correto é agosto).
+Necessidade: usar datas oficiais sem deixar o LLM "deduzir".
+
+**Alternativas descartadas**
+
+- **JSON estático embarcado no SYSTEM_PROMPT**: poluiria o prompt (~5KB de
+  datas) em TODA chamada, inflando token cost. Descartado.
+- **YAML/Markdown como documento RAG**: a similaridade cosseno do RAG não
+  filtra por data; um aluno perguntando "quando é a próxima prova"
+  pegaria provas passadas. Descartado.
+- **Hard-coded no Python**: igual ao JSON, mas pior de manter. Sem
+  edição via dashboard. Descartado.
+- **Pós-graduação no mesmo schema**: usuário pediu explicitamente apenas
+  graduação. Descartado.
+
+**Impacto**
+
+- Agente passa a responder datas oficiais com 100% de fidelidade ao PDF.
+- Operadora pode editar eventos pelo Cockpit (aba Calendário 2026) sem
+  precisar de deploy — alteração toma efeito no próximo `handle_message`.
+- Risco de alucinação reduzido por dupla camada (Regra 14 no prompt +
+  filtro programático que descarta eventos passados).
+- Eventos descartados (`ativo=FALSE`) também ficam invisíveis pro agente
+  sem deletar histórico.
+
+**Arquivos tocados**
+
+- `calendar_2026_seed.py` (novo, 100 eventos).
+- `agente_ao_vivo_v4.py`: `_ensure_academic_calendar_table`,
+  `_seed_academic_calendar_if_empty`, `_fetch_calendar_events`,
+  `_detect_calendar_topic`, `_student_semester_hint`,
+  `_get_relevant_calendar_events`, `_format_calendar_block`; chamada do
+  seed em `main()`; injeção em `handle_message`; Regra 14 no `SYSTEM_PROMPT`.
+- `kb_api.py`: 6 endpoints `/api/calendar` + função local de garantia de
+  tabela.
+- `kb_admin.html`: nova aba "Calendário 2026" com cards de resumo, tabela
+  paginada, filtros (categoria, semestre, busca textual), modal de criação
+  e botão de recarga de seed.
+
+---
+
 ### [2026-05-21] - Varredura sistêmica: Ações A-F sobre 418 findings da auditoria IA
 
 **Decisão**

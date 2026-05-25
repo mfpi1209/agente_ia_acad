@@ -275,6 +275,7 @@ body.dark-mode .wa-bubble.wa-bot .wa-meta{color:#6b7085;}
   <div class="tab" data-tab="audit" onclick="sw('audit')"><i class="fas fa-shield-halved mr-1.5"></i>Auditoria IA</div>
   <div class="tab" data-tab="afterhours" onclick="sw('afterhours')"><i class="fas fa-moon mr-1.5"></i>Fora do Horário</div>
   <div class="tab" data-tab="caa" onclick="sw('caa')"><i class="fas fa-folder-open mr-1.5"></i>Solicitações CAA</div>
+  <div class="tab" data-tab="calendar" onclick="sw('calendar')"><i class="fas fa-calendar-days mr-1.5"></i>Calendário 2026</div>
   <div class="tab" data-tab="team" onclick="sw('team')"><i class="fas fa-users-gear mr-1.5"></i>Equipe</div>
   <div class="tab" data-tab="students" onclick="sw('students')"><i class="fas fa-user-graduate mr-1.5"></i>Alunos</div>
   <div class="tab" data-tab="logs" onclick="sw('logs')"><i class="fas fa-timeline mr-1.5"></i>Interações</div>
@@ -846,6 +847,170 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
       </tr></thead>
       <tbody id="caa-history-tbody"></tbody>
     </table>
+  </div>
+</div>
+</div>
+
+<!-- ===== CALENDARIO ACADEMICO 2026 ===== -->
+<div id="tab-calendar" class="tc hidden fade">
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-5">
+  <div class="card p-5 border-l-4 border-indigo-400">
+    <div class="flex items-center justify-between mb-2">
+      <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider"><i class="fas fa-calendar-check mr-1 text-indigo-500"></i>Eventos ativos</h3>
+    </div>
+    <div class="text-3xl font-extrabold text-gray-800 tabular-nums" id="cal-total">0</div>
+    <div class="text-xs text-gray-500 mt-1">datas oficiais Graduação EaD 2026</div>
+    <div class="mt-4 pt-3 border-t border-gray-100 text-xs text-gray-500">
+      Fonte: PDF oficial. O agente injeta APENAS estas datas no contexto do LLM quando o aluno pergunta sobre prazos, provas, notas e matrícula.
+    </div>
+  </div>
+  <div class="card p-5">
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Por semestre</h3>
+    <div id="cal-by-sem" class="space-y-2 text-sm"></div>
+  </div>
+  <div class="card p-5">
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Próximos eventos</h3>
+    <div id="cal-upcoming" class="space-y-2 text-xs text-gray-600"></div>
+  </div>
+</div>
+
+<div class="card mt-4">
+  <div class="p-4 border-b flex flex-wrap items-center gap-3">
+    <h3 class="text-sm font-semibold text-gray-700"><i class="fas fa-list mr-1.5 text-indigo-500"></i>Eventos do calendário</h3>
+    <div class="flex-1 min-w-0 relative" style="min-width:180px;"><i class="fas fa-search absolute left-3 top-2.5 text-gray-400 text-xs"></i><input type="text" id="cal-search" placeholder="Buscar por título ou observação..." class="inp pl-8 btn-sm" onkeyup="deb(loadCalendar,400)()"></div>
+    <select id="cal-filter-cat" class="inp btn-sm" style="width:auto;" onchange="loadCalendar()">
+      <option value="">Todas categorias</option>
+      <option value="aula_inicio">Início de aulas</option>
+      <option value="prova_a1">Prova A1</option>
+      <option value="prova_af">Prova AF</option>
+      <option value="recurso_a1">Recurso A1</option>
+      <option value="recurso_af">Recurso AF</option>
+      <option value="liberacao_notas">Liberação de notas</option>
+      <option value="liberacao_notas_af">Notas AF</option>
+      <option value="matricula">Matrícula</option>
+      <option value="transferencia_externa">Transferência externa</option>
+      <option value="transferencia_interna">Transferência interna</option>
+      <option value="retorno_curso">Retorno ao curso</option>
+      <option value="dispensa">Dispensa</option>
+      <option value="ac">Atividades complementares</option>
+      <option value="estagio">Estágio (TCE)</option>
+      <option value="disciplinas_especiais">Disciplinas especiais</option>
+      <option value="periodo_letivo">Período letivo</option>
+      <option value="planejamento_academico">Planejamento</option>
+      <option value="recesso_docente">Recesso docente</option>
+      <option value="enade">ENADE</option>
+      <option value="evento">Eventos</option>
+      <option value="feriado">Feriados</option>
+    </select>
+    <select id="cal-filter-sem" class="inp btn-sm" style="width:auto;" onchange="loadCalendar()">
+      <option value="">Todos semestres</option>
+      <option value="2026.1">2026.1</option>
+      <option value="2026.2">2026.2</option>
+      <option value="2027.1">2027.1</option>
+      <option value="2026.1-2">Ano todo</option>
+    </select>
+    <button onclick="loadCalendar()" class="btn btn-g btn-sm"><i class="fas fa-rotate mr-1"></i>Atualizar</button>
+    <button onclick="openCalendarForm(null)" class="btn btn-p btn-sm"><i class="fas fa-plus mr-1"></i>Novo evento</button>
+    <button onclick="calendarReseed()" class="btn btn-s btn-sm" title="Recarrega os eventos canônicos (não sobrescreve nem reativa)"><i class="fas fa-arrows-rotate mr-1"></i>Recarregar seed</button>
+  </div>
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-50 text-xs text-gray-500 uppercase"><tr>
+        <th class="text-left p-3">Categoria</th>
+        <th class="text-left p-3">Título</th>
+        <th class="text-left p-3">Data início</th>
+        <th class="text-left p-3">Data fim</th>
+        <th class="text-left p-3">Semestre</th>
+        <th class="text-left p-3">Público</th>
+        <th class="text-right p-3">Ações</th>
+      </tr></thead>
+      <tbody id="cal-tbody"></tbody>
+    </table>
+  </div>
+  <div id="cal-empty" class="hidden p-8 text-center text-gray-400 text-sm">Nenhum evento encontrado neste filtro.</div>
+  <div class="p-3 border-t flex items-center justify-between text-xs text-gray-500">
+    <span id="cal-count">—</span>
+    <div id="cal-pag" class="flex gap-1.5"></div>
+  </div>
+</div>
+
+<!-- Modal Calendario -->
+<div id="cal-modal" class="hidden fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+  <div class="card p-5 w-full max-w-2xl">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-base font-semibold text-gray-800" id="cal-modal-title">Novo evento</h3>
+      <button onclick="closeCalendarForm()" class="text-gray-400 hover:text-gray-700"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+      <div class="md:col-span-2">
+        <label class="text-xs text-gray-500">Título *</label>
+        <input id="cal-f-titulo" class="inp" placeholder="Ex.: Início das aulas do mês de Agosto">
+      </div>
+      <div>
+        <label class="text-xs text-gray-500">Categoria *</label>
+        <select id="cal-f-categoria" class="inp">
+          <option value="aula_inicio">aula_inicio</option>
+          <option value="prova_a1">prova_a1</option>
+          <option value="prova_af">prova_af</option>
+          <option value="recurso_a1">recurso_a1</option>
+          <option value="recurso_af">recurso_af</option>
+          <option value="liberacao_notas">liberacao_notas</option>
+          <option value="liberacao_notas_af">liberacao_notas_af</option>
+          <option value="matricula">matricula</option>
+          <option value="transferencia_externa">transferencia_externa</option>
+          <option value="transferencia_interna">transferencia_interna</option>
+          <option value="retorno_curso">retorno_curso</option>
+          <option value="dispensa">dispensa</option>
+          <option value="ac">ac</option>
+          <option value="estagio">estagio</option>
+          <option value="disciplinas_especiais">disciplinas_especiais</option>
+          <option value="periodo_letivo">periodo_letivo</option>
+          <option value="planejamento_academico">planejamento_academico</option>
+          <option value="recesso_docente">recesso_docente</option>
+          <option value="enade">enade</option>
+          <option value="evento">evento</option>
+          <option value="feriado">feriado</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-xs text-gray-500">Semestre</label>
+        <select id="cal-f-semestre" class="inp">
+          <option value="">(sem semestre)</option>
+          <option value="2026.1">2026.1</option>
+          <option value="2026.2">2026.2</option>
+          <option value="2027.1">2027.1</option>
+          <option value="2026.1-2">2026.1-2</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-xs text-gray-500">Data início *</label>
+        <input id="cal-f-di" type="date" class="inp">
+      </div>
+      <div>
+        <label class="text-xs text-gray-500">Data fim</label>
+        <input id="cal-f-df" type="date" class="inp">
+      </div>
+      <div>
+        <label class="text-xs text-gray-500">Mês referência</label>
+        <input id="cal-f-mes" class="inp" placeholder="agosto, marco, etc">
+      </div>
+      <div>
+        <label class="text-xs text-gray-500">Público</label>
+        <input id="cal-f-publico" class="inp" placeholder="todos, calouro, veterano, concluinte">
+      </div>
+      <div class="md:col-span-2">
+        <label class="text-xs text-gray-500">Observação</label>
+        <textarea id="cal-f-obs" class="inp" rows="2" placeholder="Observação adicional opcional"></textarea>
+      </div>
+      <div class="md:col-span-2 flex items-center gap-2 text-xs">
+        <input type="checkbox" id="cal-f-ativo" checked>
+        <label for="cal-f-ativo">Ativo (visível para o agente)</label>
+      </div>
+    </div>
+    <div class="flex items-center justify-end gap-2 mt-4">
+      <button onclick="closeCalendarForm()" class="btn btn-g btn-sm">Cancelar</button>
+      <button onclick="saveCalendar()" class="btn btn-p btn-sm"><i class="fas fa-save mr-1"></i>Salvar</button>
+    </div>
   </div>
 </div>
 </div>
@@ -1769,7 +1934,7 @@ async function aiaCorrSave(){
 
 // ==== TABS ====
 function sw(t){document.querySelectorAll('.tc').forEach(e=>e.classList.add('hidden'));document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));document.getElementById('tab-'+t).classList.remove('hidden');document.querySelector(`.tab[data-tab="${t}"]`).classList.add('active');
-if(t==='dashboard')loadDash();if(t==='qa')loadQA();if(t==='logs')loadLogs();if(t==='prompts')loadPrompts();if(t==='playground')initPG();if(t==='agentia')initAgentIA();if(t==='audit')initAudit();if(t==='afterhours')initAfterHours();if(t==='team')loadTeam();if(t==='students')loadStudents();if(t==='alerts')loadAlerts();if(t==='menus')loadMenus();if(t==='agentcfg')loadAgentConfig();if(t==='conversations')loadConversations();if(t==='caa')initCaa();}
+if(t==='dashboard')loadDash();if(t==='qa')loadQA();if(t==='logs')loadLogs();if(t==='prompts')loadPrompts();if(t==='playground')initPG();if(t==='agentia')initAgentIA();if(t==='audit')initAudit();if(t==='afterhours')initAfterHours();if(t==='team')loadTeam();if(t==='students')loadStudents();if(t==='alerts')loadAlerts();if(t==='menus')loadMenus();if(t==='agentcfg')loadAgentConfig();if(t==='conversations')loadConversations();if(t==='caa')initCaa();if(t==='calendar')initCalendar();}
 
 // ==== DASHBOARD ====
 async function loadDash(){
@@ -2513,6 +2678,182 @@ async function caaUpload(){
     msg.className='text-xs text-red-600';
   }
   btn.disabled=false;btn.innerHTML='<i class="fas fa-upload mr-1"></i>Enviar';
+}
+
+// ==== CALENDARIO ACADEMICO 2026 ====
+let calPage=1;
+let calEditingId=null;
+
+async function initCalendar(){
+  await loadCalendarSummary();
+  await loadCalendar();
+}
+
+async function loadCalendarSummary(){
+  try{
+    const d=await(await fetch(A+'/api/calendar/summary')).json();
+    document.getElementById('cal-total').textContent=(d.total_ativos||0).toLocaleString();
+    const sem=document.getElementById('cal-by-sem');
+    sem.innerHTML=(d.por_semestre||[]).map(r=>`
+      <div class="flex items-center justify-between">
+        <span class="text-gray-600">${r.semestre||'-'}</span>
+        <span class="font-bold text-gray-800">${r.cnt}</span>
+      </div>
+    `).join('') || '<div class="text-xs text-gray-400">Nenhum semestre cadastrado.</div>';
+    const up=document.getElementById('cal-upcoming');
+    up.innerHTML=(d.proximos||[]).map(r=>{
+      const di=fmtDate(r.data_inicio);
+      const df=r.data_fim?(' até '+fmtDate(r.data_fim)):'';
+      return `<div class="border-l-2 border-indigo-200 pl-2"><div class="font-semibold text-indigo-700">${di}${df}</div><div class="text-gray-600 truncate">${escapeHtml(r.titulo)}</div></div>`;
+    }).join('') || '<div class="text-xs text-gray-400">Sem eventos futuros.</div>';
+  }catch(e){console.error('loadCalendarSummary',e);}
+}
+
+function fmtDate(s){
+  if(!s) return '';
+  const parts=String(s).split('T')[0].split('-');
+  if(parts.length!==3) return s;
+  return `${parts[2]}/${parts[1]}/${parts[0]}`;
+}
+
+function escapeHtml(s){
+  return String(s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadCalendar(){
+  const params=new URLSearchParams({page:calPage,per_page:50});
+  const search=document.getElementById('cal-search')?.value;if(search)params.set('search',search);
+  const cat=document.getElementById('cal-filter-cat')?.value;if(cat)params.set('categoria',cat);
+  const sem=document.getElementById('cal-filter-sem')?.value;if(sem)params.set('semestre',sem);
+  try{
+    const d=await(await fetch(A+'/api/calendar?'+params)).json();
+    const tbody=document.getElementById('cal-tbody');
+    document.getElementById('cal-count').textContent=`${d.total||0} evento(s) — página ${d.page}/${Math.max(d.pages||1,1)}`;
+    if(!d.items||!d.items.length){
+      tbody.innerHTML='';
+      document.getElementById('cal-empty').classList.remove('hidden');
+    }else{
+      document.getElementById('cal-empty').classList.add('hidden');
+      tbody.innerHTML=d.items.map(it=>`
+        <tr class="border-b hover:bg-gray-50">
+          <td class="p-3"><span class="px-2 py-0.5 rounded-full text-xs bg-indigo-50 text-indigo-700">${escapeHtml(it.categoria||'')}</span></td>
+          <td class="p-3">
+            <div class="font-medium text-gray-800">${escapeHtml(it.titulo||'')}</div>
+            ${it.observacao?`<div class="text-xs text-gray-500 mt-0.5">${escapeHtml(it.observacao)}</div>`:''}
+          </td>
+          <td class="p-3 whitespace-nowrap text-gray-700">${fmtDate(it.data_inicio)}</td>
+          <td class="p-3 whitespace-nowrap text-gray-500">${it.data_fim?fmtDate(it.data_fim):'—'}</td>
+          <td class="p-3 text-gray-700">${escapeHtml(it.semestre||'—')}</td>
+          <td class="p-3 text-gray-500 text-xs">${escapeHtml(it.publico||'todos')}</td>
+          <td class="p-3 text-right whitespace-nowrap">
+            <button onclick="openCalendarForm(${it.id})" class="text-indigo-600 hover:text-indigo-800 text-xs"><i class="fas fa-pen mr-1"></i>Editar</button>
+            <button onclick="deleteCalendar(${it.id})" class="text-red-500 hover:text-red-700 text-xs ml-2"><i class="fas fa-trash mr-1"></i>Desativar</button>
+          </td>
+        </tr>`).join('');
+    }
+    const pag=document.getElementById('cal-pag');
+    pag.innerHTML='';
+    const pages=d.pages||1;
+    if(pages>1){
+      const mkBtn=(label,target,disabled)=>{
+        const b=document.createElement('button');
+        b.textContent=label;
+        b.className='btn btn-g btn-sm '+(disabled?'opacity-50 cursor-not-allowed':'');
+        if(!disabled)b.onclick=()=>{calPage=target;loadCalendar();};
+        return b;
+      };
+      pag.appendChild(mkBtn('‹',Math.max(1,calPage-1),calPage<=1));
+      pag.appendChild(mkBtn(`${calPage} / ${pages}`,calPage,true));
+      pag.appendChild(mkBtn('›',Math.min(pages,calPage+1),calPage>=pages));
+    }
+  }catch(e){console.error('loadCalendar',e);}
+}
+
+function openCalendarForm(id){
+  calEditingId=id;
+  document.getElementById('cal-modal-title').textContent=id?'Editar evento':'Novo evento';
+  ['cal-f-titulo','cal-f-di','cal-f-df','cal-f-mes','cal-f-publico','cal-f-obs'].forEach(k=>document.getElementById(k).value='');
+  document.getElementById('cal-f-categoria').value='aula_inicio';
+  document.getElementById('cal-f-semestre').value='';
+  document.getElementById('cal-f-ativo').checked=true;
+  if(id){
+    fetch(A+'/api/calendar?per_page=200').then(r=>r.json()).then(d=>{
+      const it=(d.items||[]).find(x=>x.id===id);
+      if(!it){toast('Evento não encontrado','warn');return;}
+      document.getElementById('cal-f-titulo').value=it.titulo||'';
+      document.getElementById('cal-f-categoria').value=it.categoria||'aula_inicio';
+      document.getElementById('cal-f-semestre').value=it.semestre||'';
+      document.getElementById('cal-f-di').value=(it.data_inicio||'').split('T')[0];
+      document.getElementById('cal-f-df').value=(it.data_fim||'').split('T')[0];
+      document.getElementById('cal-f-mes').value=it.mes_ref||'';
+      document.getElementById('cal-f-publico').value=it.publico||'todos';
+      document.getElementById('cal-f-obs').value=it.observacao||'';
+      document.getElementById('cal-f-ativo').checked=!!it.ativo;
+    });
+  }
+  document.getElementById('cal-modal').classList.remove('hidden');
+}
+
+function closeCalendarForm(){
+  document.getElementById('cal-modal').classList.add('hidden');
+  calEditingId=null;
+}
+
+async function saveCalendar(){
+  const payload={
+    categoria:document.getElementById('cal-f-categoria').value,
+    titulo:document.getElementById('cal-f-titulo').value.trim(),
+    data_inicio:document.getElementById('cal-f-di').value,
+    data_fim:document.getElementById('cal-f-df').value||null,
+    mes_ref:document.getElementById('cal-f-mes').value.trim()||null,
+    semestre:document.getElementById('cal-f-semestre').value||null,
+    publico:document.getElementById('cal-f-publico').value.trim()||'todos',
+    observacao:document.getElementById('cal-f-obs').value.trim(),
+    ativo:document.getElementById('cal-f-ativo').checked,
+  };
+  if(!payload.titulo||!payload.data_inicio){
+    toast('Título e Data início são obrigatórios','warn');
+    return;
+  }
+  try{
+    const url=calEditingId?(A+'/api/calendar/'+calEditingId):(A+'/api/calendar');
+    const method=calEditingId?'PUT':'POST';
+    const r=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const d=await r.json();
+    if(!r.ok){
+      toast(d.detail||'Erro ao salvar','error');
+      return;
+    }
+    toast(calEditingId?'Evento atualizado':'Evento criado','success');
+    closeCalendarForm();
+    await loadCalendarSummary();
+    await loadCalendar();
+  }catch(e){
+    toast('Erro de conexão: '+e,'error');
+  }
+}
+
+async function deleteCalendar(id){
+  if(!confirm('Desativar este evento? Ele deixará de ser usado pelo agente.'))return;
+  try{
+    const r=await fetch(A+'/api/calendar/'+id,{method:'DELETE'});
+    if(!r.ok){toast('Erro ao desativar','error');return;}
+    toast('Evento desativado','success');
+    await loadCalendarSummary();
+    await loadCalendar();
+  }catch(e){toast('Erro: '+e,'error');}
+}
+
+async function calendarReseed(){
+  if(!confirm('Recarregar o seed canônico do PDF? Eventos já existentes não serão alterados.'))return;
+  try{
+    const r=await fetch(A+'/api/calendar/seed',{method:'POST'});
+    const d=await r.json();
+    if(!r.ok){toast(d.detail||'Erro no seed','error');return;}
+    toast(`Seed concluído (${d.inserted} novos eventos de ${d.seed_size})`,'success');
+    await loadCalendarSummary();
+    await loadCalendar();
+  }catch(e){toast('Erro: '+e,'error');}
 }
 
 // ==== LOGS ====

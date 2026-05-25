@@ -3261,6 +3261,277 @@ async def caa_list(
         }
 
 
+# ===================== CALENDARIO ACADEMICO 2026 =====================
+# Endpoints CRUD para a tabela academic_calendar_2026 (Graduacao EaD).
+# Tabela criada/seed automaticamente pelo agente no startup; aqui apenas
+# expomos leitura/edicao para o Cockpit.
+
+def _ensure_academic_calendar_table_local(cur):
+    """Espelho de agente_ao_vivo_v4._ensure_academic_calendar_table.
+
+    Garante existencia da tabela aqui no kb_api para que o admin consiga
+    listar/editar mesmo se o agente nao tiver subido ainda.
+    """
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS academic_calendar_2026 (
+            id SERIAL PRIMARY KEY,
+            categoria VARCHAR(40) NOT NULL,
+            titulo VARCHAR(255) NOT NULL,
+            data_inicio DATE NOT NULL,
+            data_fim DATE,
+            mes_ref VARCHAR(40),
+            semestre VARCHAR(16),
+            publico VARCHAR(64) DEFAULT 'todos',
+            observacao TEXT,
+            ativo BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE (categoria, titulo, data_inicio)
+        )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_acad_cal_data ON academic_calendar_2026 (data_inicio)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_acad_cal_cat ON academic_calendar_2026 (categoria, ativo)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_acad_cal_sem ON academic_calendar_2026 (semestre, ativo)"
+    )
+
+
+@app.get("/api/calendar")
+async def calendar_list(
+    categoria: str = Query('', max_length=64),
+    semestre: str = Query('', max_length=16),
+    search: str = Query('', max_length=120),
+    ativo: str = Query('1', max_length=2),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+):
+    """Lista paginada dos eventos do calendario."""
+    offset = (page - 1) * per_page
+    where = []
+    params = []
+    if ativo in ('1', 'true', 'True'):
+        where.append("ativo = TRUE")
+    elif ativo in ('0', 'false', 'False'):
+        where.append("ativo = FALSE")
+    if categoria:
+        where.append("categoria = %s")
+        params.append(categoria)
+    if semestre:
+        where.append("semestre = %s")
+        params.append(semestre)
+    if search:
+        where.append("(LOWER(titulo) LIKE %s OR LOWER(observacao) LIKE %s)")
+        like = '%' + search.lower() + '%'
+        params.extend([like, like])
+    w = ' AND '.join(where) if where else '1=1'
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        _ensure_academic_calendar_table_local(cur)
+        conn.commit()
+        cur.execute(f"SELECT COUNT(*) AS cnt FROM academic_calendar_2026 WHERE {w}", params)
+        total = cur.fetchone()['cnt']
+        cur.execute(f"""
+            SELECT id, categoria, titulo, data_inicio, data_fim,
+                   mes_ref, semestre, publico, observacao, ativo,
+                   created_at, updated_at
+            FROM academic_calendar_2026
+            WHERE {w}
+            ORDER BY data_inicio ASC, id ASC
+            LIMIT %s OFFSET %s
+        """, params + [per_page, offset])
+        items = []
+        for r in cur.fetchall():
+            item = dict(r)
+            for k in ('data_inicio', 'data_fim', 'created_at', 'updated_at'):
+                if item.get(k) is not None:
+                    item[k] = item[k].isoformat()
+            items.append(item)
+        return {
+            'items': items,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'pages': (total + per_page - 1) // per_page if total else 0,
+        }
+
+
+@app.get("/api/calendar/summary")
+async def calendar_summary():
+    """Resumo: total ativos, por categoria, por semestre."""
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        _ensure_academic_calendar_table_local(cur)
+        conn.commit()
+        cur.execute("SELECT COUNT(*) AS cnt FROM academic_calendar_2026 WHERE ativo = TRUE")
+        total = cur.fetchone()['cnt']
+        cur.execute("""
+            SELECT categoria, COUNT(*) AS cnt
+            FROM academic_calendar_2026 WHERE ativo = TRUE
+            GROUP BY categoria ORDER BY cnt DESC
+        """)
+        by_cat = [dict(r) for r in cur.fetchall()]
+        cur.execute("""
+            SELECT semestre, COUNT(*) AS cnt
+            FROM academic_calendar_2026
+            WHERE ativo = TRUE AND semestre IS NOT NULL
+            GROUP BY semestre ORDER BY semestre
+        """)
+        by_sem = [dict(r) for r in cur.fetchall()]
+        cur.execute("""
+            SELECT id, categoria, titulo, data_inicio, data_fim, semestre
+            FROM academic_calendar_2026
+            WHERE ativo = TRUE AND data_inicio >= CURRENT_DATE
+            ORDER BY data_inicio ASC LIMIT 6
+        """)
+        upcoming = []
+        for r in cur.fetchall():
+            item = dict(r)
+            for k in ('data_inicio', 'data_fim'):
+                if item.get(k):
+                    item[k] = item[k].isoformat()
+            upcoming.append(item)
+        return {
+            'total_ativos': total,
+            'por_categoria': by_cat,
+            'por_semestre': by_sem,
+            'proximos': upcoming,
+        }
+
+
+@app.post("/api/calendar")
+async def calendar_create(req: Request):
+    """Cria um novo evento."""
+    body = await req.json()
+    categoria = (body.get('categoria') or '').strip()
+    titulo = (body.get('titulo') or '').strip()
+    data_inicio = body.get('data_inicio')
+    if not categoria or not titulo or not data_inicio:
+        raise HTTPException(400, "categoria, titulo e data_inicio sao obrigatorios")
+    data_fim = body.get('data_fim') or None
+    mes_ref = (body.get('mes_ref') or '').strip() or None
+    semestre = (body.get('semestre') or '').strip() or None
+    publico = (body.get('publico') or 'todos').strip()
+    observacao = (body.get('observacao') or '').strip()
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        _ensure_academic_calendar_table_local(cur)
+        try:
+            cur.execute("""
+                INSERT INTO academic_calendar_2026
+                    (categoria, titulo, data_inicio, data_fim, mes_ref,
+                     semestre, publico, observacao, ativo)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                ON CONFLICT (categoria, titulo, data_inicio) DO UPDATE SET
+                    data_fim = EXCLUDED.data_fim,
+                    mes_ref = EXCLUDED.mes_ref,
+                    semestre = EXCLUDED.semestre,
+                    publico = EXCLUDED.publico,
+                    observacao = EXCLUDED.observacao,
+                    ativo = TRUE,
+                    updated_at = NOW()
+                RETURNING id
+            """, (categoria, titulo, data_inicio, data_fim, mes_ref,
+                  semestre, publico, observacao))
+            new_id = cur.fetchone()['id']
+            conn.commit()
+            return {'ok': True, 'id': new_id}
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(500, f"Erro ao criar evento: {e}")
+
+
+@app.put("/api/calendar/{event_id}")
+async def calendar_update(event_id: int, req: Request):
+    """Edita um evento existente."""
+    body = await req.json()
+    fields = []
+    params = []
+    for k in ('categoria', 'titulo', 'data_inicio', 'data_fim',
+              'mes_ref', 'semestre', 'publico', 'observacao', 'ativo'):
+        if k in body:
+            fields.append(f"{k} = %s")
+            params.append(body[k])
+    if not fields:
+        raise HTTPException(400, "Nenhum campo para atualizar")
+    fields.append("updated_at = NOW()")
+    params.append(event_id)
+    with get_db() as conn:
+        cur = conn.cursor()
+        _ensure_academic_calendar_table_local(cur)
+        try:
+            cur.execute(
+                f"UPDATE academic_calendar_2026 SET {', '.join(fields)} WHERE id = %s",
+                params,
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(404, "Evento nao encontrado")
+            conn.commit()
+            return {'ok': True}
+        except HTTPException:
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(500, f"Erro ao atualizar evento: {e}")
+
+
+@app.delete("/api/calendar/{event_id}")
+async def calendar_delete(event_id: int):
+    """Soft-delete: marca ativo=FALSE."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        _ensure_academic_calendar_table_local(cur)
+        cur.execute(
+            "UPDATE academic_calendar_2026 SET ativo = FALSE, updated_at = NOW() WHERE id = %s",
+            (event_id,),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Evento nao encontrado")
+        conn.commit()
+        return {'ok': True}
+
+
+@app.post("/api/calendar/seed")
+async def calendar_seed():
+    """Forca recarga do seed canonico (INSERT ON CONFLICT DO NOTHING).
+
+    Util quando se quer garantir presenca dos eventos oficiais. Nao
+    sobrescreve eventos ja existentes nem reativa os desativados.
+    """
+    try:
+        from calendar_2026_seed import get_seed_events
+    except Exception as e:
+        raise HTTPException(500, f"Seed module indisponivel: {e}")
+    events = get_seed_events()
+    inserted = 0
+    with get_db() as conn:
+        cur = conn.cursor()
+        _ensure_academic_calendar_table_local(cur)
+        for ev in events:
+            try:
+                cur.execute("""
+                    INSERT INTO academic_calendar_2026
+                        (categoria, titulo, data_inicio, data_fim,
+                         mes_ref, semestre, publico, observacao, ativo)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                    ON CONFLICT (categoria, titulo, data_inicio) DO NOTHING
+                """, (
+                    ev.get('categoria'), ev.get('titulo'),
+                    ev.get('data_inicio'), ev.get('data_fim'),
+                    ev.get('mes_ref'), ev.get('semestre'),
+                    ev.get('publico') or 'todos',
+                    ev.get('observacao') or '',
+                ))
+                inserted += cur.rowcount or 0
+            except Exception:
+                pass
+        conn.commit()
+    return {'ok': True, 'seed_size': len(events), 'inserted': inserted}
+
+
 @app.get("/api/memory/list")
 async def list_memories(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=50)):
     """Lista memórias de alunos."""
