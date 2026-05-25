@@ -1015,7 +1015,19 @@ GREETINGS = {
     'oie', 'oiee', 'oláa', 'oiii!', 'opa!', 'bom diaa', 'boa tardee',
 }
 
-RESOLVED_WORDS = {'sim resolveu', 'resolveu', 'resolveu!', 'sim obrigado', 'sim obrigada', 'resolvido', 'era isso', 'ajudou', 'ajudou!'}
+RESOLVED_WORDS = {
+    'sim resolveu', 'resolveu', 'resolveu!', 'sim obrigado', 'sim obrigada',
+    'resolvido', 'era isso', 'ajudou', 'ajudou!',
+    # Variantes de "ja resolvi / consegui" (caso reportado: aluno diz "Ja resolvi"
+    # e agente caia em escalate_low_conf por nao reconhecer — distribui errado)
+    'resolvi', 'ja resolvi', 'já resolvi', 'eu resolvi', 'consegui resolver',
+    'consegui aqui', 'consegui sim', 'consegui resolver aqui', 'consegui resolver agora',
+    'ja consegui', 'já consegui',
+    'deu certo', 'tudo certo agora', 'deu certo aqui', 'deu certo agora',
+    'funcionou', 'ja funcionou', 'já funcionou', 'agora funcionou',
+    'ja deu', 'já deu', 'ja foi', 'já foi',
+    'consigo agora', 'consigo sim', 'consigo aqui',
+}
 ESCALATE_WORDS = {'falar com atendente', 'falar com atendimento', 'atendente', 'atendimento', 'humano', 'falar com alguem', 'transferir'}
 CLOSING_WORDS = {'obrigado', 'obrigada', 'valeu', 'vlw', 'tchau', 'até mais', 'ate mais', 'brigado', 'brigada'}
 
@@ -1060,6 +1072,18 @@ RETENTION_PHRASES = [
     'quero realizar o cancelamento', 'quero fazer o cancelamento',
     'quero realizar o trancamento', 'quero fazer o trancamento',
     'cancelar matrícula', 'cancelar matricula', 'trancar matrícula', 'trancar matricula',
+    # Formas no passado / ja realizado (aluno comunicando que cancelou/trancou)
+    # Necessario para casos como "Mas eu cancelei minha matricula" cairem em retencao -> Wesley
+    'cancelei minha matrícula', 'cancelei minha matricula',
+    'cancelei meu curso', 'cancelei o curso', 'cancelei a matricula', 'cancelei a matrícula',
+    'eu cancelei', 'já cancelei', 'ja cancelei',
+    'tinha cancelado', 'havia cancelado',
+    'tranquei minha matrícula', 'tranquei minha matricula',
+    'tranquei meu curso', 'tranquei o curso',
+    'eu tranquei', 'já tranquei', 'ja tranquei',
+    'desisti do curso', 'eu desisti', 'já desisti', 'ja desisti',
+    'fui cancelado', 'foi cancelado', 'minha matrícula foi cancelada', 'minha matricula foi cancelada',
+    'foi cancelada', 'matricula cancelada', 'matrícula cancelada',
 ]
 RETENTION_QUESTION_WORDS = []
 RETENTION_MSG = "Entendi sua situação. Vou te encaminhar para nosso consultor especializado que poderá te ajudar. Um momento, por favor!"
@@ -1221,7 +1245,7 @@ Sua personalidade: simpática, paciente, fala de um jeito leve e natural. Você 
 11. **ENDEREÇO DE POLO — REGRA CRÍTICA**: NUNCA, JAMAIS, INVENTE endereço, rua, número, bairro, ponto de referência, horário ou CEP de polo. Se o aluno perguntar endereço/local de polo e isso NÃO estiver explicitamente no bloco "ENDEREÇOS OFICIAIS DOS POLOS" (quando presente), responda APENAS: "Deixa eu confirmar essa informação com a equipe para te passar certinho, tá?". O sistema cuida da transferência automática quando o aluno expressa intenção de visita ou dificuldade. NÃO mencione metrô, linha, terminal, hospital ou referência geográfica de polo se não estiver nas referências.
 12. **INÍCIO DAS AULAS — REGRA CRÍTICA**: Quem se matricular AGORA em graduação ingressa na **turma do 2º semestre (agosto)**. NUNCA diga que as aulas começam em "fevereiro" ou "janeiro" para alunos novos/matriculados agora — isso é informação ERRADA. Se o aluno perguntar quando as aulas começam (perguntas tipo "quando começa", "quando inicia", "em que mês", "vou começar em agosto?", "fevereiro?"), responda que para quem está se matriculando agora as aulas iniciam em **agosto** (2º semestre). Se houver dúvida sobre cronograma detalhado ou calendário acadêmico, transfira para consultor.
 13. **ESQUECI MINHA SENHA — REGRA CRÍTICA**: O fluxo correto é por **SMS**, NÃO por e-mail. Procedimento oficial: o aluno clica em *Esqueci minha senha* na tela de login → digita o seu *telefone atualizado* → recebe um *código por SMS* → informa o código no campo indicado → cria a *nova senha*. NUNCA diga que ele "recebe um link no e-mail", "informa CPF e e-mail" ou "olha no spam do e-mail" — isso é informação ERRADA. Sempre lembre que o **telefone precisa estar atualizado** no cadastro pra o SMS chegar. Se o aluno disser que não recebeu o SMS, oriente que pode ser telefone desatualizado e ofereça transferir para consultor confirmar o cadastro.
-14. **CALENDÁRIO ACADÊMICO — REGRA CRÍTICA**: Quando o aluno perguntar sobre DATAS (prova A1, prova AF, liberação de notas, início das aulas, fim do semestre, prazo de matrícula, transferência, retorno ao curso, dispensa, AC, TCE, ENADE, feriados acadêmicos), use APENAS as datas que aparecem no bloco "CALENDÁRIO ACADÊMICO GRADUAÇÃO 2026" quando ele for fornecido nas referências. NUNCA invente, deduza ou aproxime datas. Se a pergunta envolve um período/data que não está listada no bloco, responda: "Deixa eu confirmar essa data certinho com a equipe pra não te passar informação errada, tá?" e a transferência acontece automaticamente. Para perguntas sobre data específica de uma matéria, oriente o aluno a consultar o Portal do Aluno (cronograma da disciplina).
+14. **CALENDÁRIO ACADÊMICO — REGRA CRÍTICA**: Quando o aluno perguntar sobre DATAS (prova A1, prova AF, liberação de notas, início das aulas, fim do semestre, prazo de matrícula, transferência, retorno ao curso, dispensa, AC, TCE, ENADE, feriados acadêmicos), use APENAS as datas que aparecem no bloco "CALENDÁRIO ACADÊMICO GRADUAÇÃO 2026" quando ele for fornecido nas referências. NUNCA invente, deduza ou aproxime datas. Se a pergunta envolve um período/data que não está listada no bloco, responda: "Deixa eu confirmar essa data certinho com a equipe, tá? Já vou te conectar com um(a) consultor(a)." e a transferência acontece automaticamente. Para perguntas sobre data específica de uma matéria, oriente o aluno a consultar o Portal do Aluno (cronograma da disciplina). PROIBIDO usar a frase "para não te passar informação errada" — sempre prefira uma transição natural.
 15. **BLACKBOARD x ÁREA DO ALUNO — REGRA CRÍTICA**: Os dois ambientes existem e têm finalidades **diferentes**. NUNCA confunda os dois:
    - **Blackboard (AVA)** — é o ambiente virtual de aprendizagem. É lá que o aluno acessa: *conteúdo das disciplinas*, *aulas gravadas*, *aulas ao vivo*, *atividades*, *materiais*, *fóruns*, *módulos*, *trabalhos da disciplina*. Quando o aluno disser que não está conseguindo acessar aula, atividade, material, módulo, conteúdo ou trabalho de uma disciplina, oriente-o a entrar no **Blackboard**.
    - **Área do Aluno (Portal do Aluno)** — é onde ficam: *prova regimental A1*, *prova regimental AF/Substitutiva* (em *Vida Acadêmica → Plataforma de Prova*), *boletos / financeiro*, *documentos*, *protocolos / CAA*, *histórico*, *grade*, *dados cadastrais*.
@@ -5240,6 +5264,66 @@ def process_in_hours_rescue():
                         pass
                     _IN_HOURS_RESCUE_RECENT[cid] = now_ts
                     continue
+
+                # SE ALUNO MANIFESTOU CANCELAMENTO/TRANCAMENTO (retencao):
+                # nao distribui para qualquer atendente — passa para Wesley.
+                # Caso reportado: "Mas eu cancelei minha matricula" -> foi para
+                # Marilia em vez de Wesley.
+                if _last_aluno_body and is_retention_intent(_last_aluno_body):
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} retencao detectada ('{_last_aluno_body[:40]}') — distribuindo para Wesley")
+                    try:
+                        # Mensagem humanizada antes da transferencia
+                        _greet = (f", *{first}*" if first else '')
+                        _hum = (f"Oi{_greet}! Desculpa a demora 🙏 Entendi sua situação. "
+                                f"Vou te conectar com o *Wesley*, nosso consultor especializado, "
+                                f"que vai te ajudar com isso, tá? Um momento!")
+                        send_and_track(cid, _hum)
+                        log_to_db(cid, _last_aluno_body, _hum, 1.0, 'retention')
+                        _register_signature(cid, 'retention', _hum)
+                        _mark_handoff_active(cid, 'retention', target='Wesley',
+                                             ttl_s=8 * 3600, body=_hum)
+                        time.sleep(1.0)
+                        # Distribui ESPECIFICAMENTE para Wesley (trigger_retention
+                        # encontra o lead_id via DCZ businesses se passar None)
+                        trigger_retention(cid, None, _last_aluno_body)
+                        update_pending_escalation_status(
+                            cid, 'distributed_retention',
+                            note=f'In-hours rescue: retencao -> Wesley (msg: {_last_aluno_body[:60]})',
+                        )
+                    except Exception as e_ret:
+                        p(f"  [IN-HOURS-RESCUE] erro retencao->Wesley: {e_ret}")
+                    _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                    continue
+
+                # PULA RESGATE SE ALUNO CONFIRMOU PAGAMENTO ja realizado.
+                # Caso: aluno respondeu disparo de boleto dizendo "ja paguei".
+                # Nao precisa distribuir — agente envia "tudo bem" e fecha.
+                if _last_aluno_body and _is_payment_confirmed_message(_last_aluno_body):
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} aluno confirmou pagamento ('{_last_aluno_body[:40]}') — respondendo e fechando sem distribuir")
+                    _greet = (f", *{first}*" if first else '')
+                    _ack = f"Tudo bem{_greet}! 😊 Obrigado pela confirmação. Qualquer coisa, é só me chamar. Até mais!"
+                    try:
+                        send_and_track(cid, _ack)
+                    except Exception as e_ack:
+                        p(f"  [IN-HOURS-RESCUE] erro ack pagamento: {e_ack}")
+                    try:
+                        log_to_db(cid, _last_aluno_body, _ack, 1.0, 'payment_confirmed')
+                    except Exception:
+                        pass
+                    try:
+                        time.sleep(1.0)
+                        close_conversation_crm(cid, phone=phone)
+                    except Exception as e_cc:
+                        p(f"  [IN-HOURS-RESCUE] erro close pos-pagamento: {e_cc}")
+                    try:
+                        update_pending_escalation_status(
+                            cid, 'closed_payment_confirmed',
+                            note='Aluno confirmou pagamento — agente respondeu e fechou sem distribuir',
+                        )
+                    except Exception:
+                        pass
+                    _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                    continue
             except Exception as e_far:
                 p(f"  [IN-HOURS-RESCUE] erro check farewell {cid[:12]}: {e_far}")
 
@@ -5315,26 +5399,35 @@ def process_in_hours_rescue():
             consultant_name = consultant.get('nome', '')
             consultant_first = consultant_name.split()[0] if consultant_name else ''
             student_first_part = f" {first}" if first else ''
-            apology = (
-                f"Oii{student_first_part}! Desculpa a demora pra te responder 🙏\n\n"
-                f"Vou te conectar agora com o(a) *{consultant_first}*, que vai dar continuidade ao seu atendimento. "
-                f"Em pouquinho ele(a) assume aqui 😊"
-            )
-            try:
-                meta_typing_on()
-                send_and_track(cid, apology)
-            except Exception as e_msg:
-                p(f"  [IN-HOURS-RESCUE] falha apology: {e_msg}")
 
+            # FIX (2026-05-25): GARANTIR lead+transferencia ANTES de enviar a apology.
+            # Caso reportado: apology era enviada ANTES de _ensure_lead_for_rescue.
+            # Se a criacao de lead falhasse, a mensagem chegava ao aluno
+            # ("Vou te conectar com X") mas a conv ficava SEM atendente atribuido.
             lead_id, business_id, created_now = _ensure_lead_for_rescue(phone, name)
             if not lead_id:
-                p(f"  [IN-HOURS-RESCUE] sem lead p/ ...{phone[-4:]} - aborta atribuicao (evita orfa CRM)")
+                p(f"  [IN-HOURS-RESCUE] sem lead p/ ...{phone[-4:]} - aborta SEM enviar msg (evita orfa CRM)")
+                # registra pending pra varredura tentar mais tarde
+                try:
+                    record_pending_escalation(
+                        cid, reason='rescue_no_lead',
+                        tier='pending',
+                        retorno_label='assim que conseguirmos criar seu cadastro',
+                        question='[rescue: falha criando lead - tentara novamente]',
+                    )
+                except Exception:
+                    pass
                 _IN_HOURS_RESCUE_RECENT[cid] = now_ts
                 continue
+
+            # Transfere ANTES de enviar a apology. Se transferencia falhar,
+            # abortamos sem enviar (aluno nao recebera promessa quebrada).
+            transfer_ok = False
             try:
-                _dcz_transfer_business(phone, consultant_name, lead_id=lead_id)
-                _dcz_transfer_lead(lead_id, consultant_name)
-                _dcz_transfer_chat(cid, consultant_name)
+                _bok = _dcz_transfer_business(phone, consultant_name, lead_id=lead_id)
+                _lok = _dcz_transfer_lead(lead_id, consultant_name)
+                _cok = _dcz_transfer_chat(cid, consultant_name)
+                transfer_ok = bool(_cok)  # chat eh o mais critico
                 _supabase_increment_fila(consultant.get('id', ''), int(consultant.get('fila', 0)))
                 if created_now:
                     try:
@@ -5348,6 +5441,50 @@ def process_in_hours_rescue():
                         pass
             except Exception as e_t:
                 p(f"  [IN-HOURS-RESCUE] erro transferencia: {e_t}")
+
+            if not transfer_ok:
+                # Fallback: change-attendant direto (igual ao distribute_to_attendant)
+                try:
+                    nome_norm = consultant_name.strip().lower()
+                    nome_norm = ''.join(c for c in __import__('unicodedata').normalize('NFD', nome_norm)
+                                        if __import__('unicodedata').category(c) != 'Mn')
+                    att_id = ATTENDANT_MAP.get(nome_norm, '')
+                    if att_id:
+                        r_dir = requests.post(
+                            f'{DCZ_MSG}/messaging/conversations/{cid}/change-attendant',
+                            headers=H, json={'attendantId': att_id}, timeout=15,
+                        )
+                        p(f"  [IN-HOURS-RESCUE] change-attendant fallback (status={r_dir.status_code})")
+                        if r_dir.status_code in (200, 201, 204):
+                            transfer_ok = True
+                except Exception as e_dir:
+                    p(f"  [IN-HOURS-RESCUE] change-attendant fallback erro: {e_dir}")
+
+            if not transfer_ok:
+                p(f"  [IN-HOURS-RESCUE] ALERTA: transferencia falhou em todas tentativas — NAO envia apology")
+                try:
+                    record_pending_escalation(
+                        cid, reason='rescue_transfer_failed',
+                        tier='pending',
+                        retorno_label='estamos verificando seu atendimento',
+                        question=f'[rescue: lead {lead_id[:12]} criado mas transfer falhou]',
+                    )
+                except Exception:
+                    pass
+                _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                continue
+
+            # Agora sim envia a apology — transferencia confirmada
+            apology = (
+                f"Oii{student_first_part}! Desculpa a demora pra te responder 🙏\n\n"
+                f"Vou te conectar agora com o(a) *{consultant_first}*, que vai dar continuidade ao seu atendimento. "
+                f"Em pouquinho ele(a) assume aqui 😊"
+            )
+            try:
+                meta_typing_on()
+                send_and_track(cid, apology)
+            except Exception as e_msg:
+                p(f"  [IN-HOURS-RESCUE] falha apology: {e_msg}")
 
             try:
                 note = (
@@ -5435,6 +5572,63 @@ def _is_farewell_message(text):
             words = [w for w in remaining.split() if len(w) > 2]
             if len(words) <= 2:
                 return True
+    return False
+
+
+# Confirmacao de pagamento (resposta a disparo de boleto/mensalidade).
+# Casa quando o aluno DIZ que ja pagou — para nao distribuir, so confirmar e fechar.
+# Nao casa "vou pagar", "como pagar", "posso pagar", "esqueci de pagar", "nao paguei".
+_PAYMENT_CONFIRMED_PHRASES = (
+    'ja paguei', 'já paguei', 'ja foi pago', 'já foi pago',
+    'ja paguei o boleto', 'já paguei o boleto',
+    'ja paguei a mensalidade', 'já paguei a mensalidade',
+    'paguei o boleto', 'paguei a mensalidade', 'paguei a parcela',
+    'paguei hoje', 'paguei ontem', 'paguei agora', 'paguei essa semana',
+    'paguei essa manha', 'paguei essa manhã', 'paguei pela manha', 'paguei pela manhã',
+    'paguei a fatura', 'paguei o valor',
+    'ja foi pago', 'já foi pago', 'foi pago', 'esta pago', 'está pago',
+    'ja esta pago', 'já está pago', 'ja ta pago', 'já tá pago',
+    'realizei o pagamento', 'realizei pagamento', 'fiz o pagamento',
+    'efetuei o pagamento', 'efetuei pagamento',
+    'pix realizado', 'pix feito', 'pix enviado', 'pix ja feito', 'pix já feito',
+    'boleto pago', 'boleto ja pago', 'boleto já pago',
+    'mensalidade paga', 'mensalidade ja paga', 'mensalidade já paga',
+    'parcela paga', 'fatura paga',
+    'quitei', 'ja quitei', 'já quitei', 'quitado', 'quitada',
+    'paguei sim', 'paguei ja', 'paguei já',
+)
+_PAYMENT_NEGATIVES = (
+    'nao paguei', 'não paguei', 'ainda nao paguei', 'ainda não paguei',
+    'nao consegui pagar', 'não consegui pagar',
+    'como pagar', 'como pago', 'como faço para pagar', 'como faco para pagar',
+    'posso pagar', 'vou pagar', 'irei pagar', 'pretendo pagar',
+    'esqueci de pagar', 'tenho que pagar', 'preciso pagar',
+    'quero pagar', 'quanto pagar', 'onde pagar', 'onde pago',
+)
+
+def _is_payment_confirmed_message(text):
+    """Detecta se o aluno esta dizendo que JA pagou o boleto/mensalidade.
+    Usado para responder com confirmacao + encerrar (sem distribuir).
+    """
+    if not text:
+        return False
+    import unicodedata
+    t = text.strip().lower()
+    t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
+                     if unicodedata.category(c) != 'Mn')
+    # Primeiro, rejeitar negativos / futuro / pergunta
+    for neg in _PAYMENT_NEGATIVES:
+        if neg in t_norm:
+            return False
+    # Pergunta sobre pagamento? Nao confirma.
+    if '?' in text and any(k in t_norm for k in ('paga', 'pagar', 'pagou', 'pagamento', 'boleto', 'pix')):
+        return False
+    for phrase in _PAYMENT_CONFIRMED_PHRASES:
+        # normalizar acentos da phrase para comparar
+        phrase_norm = ''.join(c for c in unicodedata.normalize('NFD', phrase)
+                              if unicodedata.category(c) != 'Mn')
+        if phrase_norm in t_norm:
+            return True
     return False
 
 
@@ -10255,10 +10449,31 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         return
 
     # === ENCERRAMENTO EXPLÍCITO (ANTES de is_first, para sempre encerrar) ===
-    close_match = any(w in q_lower for w in CLOSING_WORDS) or q_lower in (
-        'não obrigado', 'nao obrigado', 'encerrar', 'não', 'nao',
-        'pode encerrar', 'pode fechar', 'fechar', 'encerrar atendimento',
-        'não preciso', 'nao preciso', 'não preciso de mais nada', 'nao preciso de mais nada',
+    # GUARD: se a mensagem contem pergunta ("?" ou palavras interrogativas como
+    # "onde", "como", "quando", "porque", "qual", "pra que"), NAO disparar
+    # closing automatico mesmo que tenha "obrigado"/"obrigada".
+    # Motivo: alunos costumam concatenar pergunta + agradecimento na mesma msg
+    # ("Onde esta a atividade? obrigada") e o bot encerrava sem responder.
+    _q_lower_strip = q_lower.strip()
+    _has_question_mark = '?' in question
+    _question_words_hint = ('onde ', 'como ', 'quando ', 'qual ', 'quais ',
+                            'porque', 'por que', 'porquê', 'por quê',
+                            'pra que', 'para que')
+    _has_question_word = any(w in _q_lower_strip for w in _question_words_hint)
+    _looks_like_pure_farewell = _q_lower_strip in (
+        'obrigado', 'obrigada', 'obrigado!', 'obrigada!',
+        'valeu', 'vlw', 'tchau', 'ate mais', 'até mais',
+        'brigado', 'brigada', 'muito obrigado', 'muito obrigada',
+        'obrigado pela ajuda', 'obrigada pela ajuda',
+    )
+    close_match = (
+        (any(w in q_lower for w in CLOSING_WORDS) and not (_has_question_mark or _has_question_word))
+        or _looks_like_pure_farewell
+        or q_lower in (
+            'não obrigado', 'nao obrigado', 'encerrar', 'não', 'nao',
+            'pode encerrar', 'pode fechar', 'fechar', 'encerrar atendimento',
+            'não preciso', 'nao preciso', 'não preciso de mais nada', 'nao preciso de mais nada',
+        )
     )
     if close_match:
         msg = random.choice(_CLOSING_RESPONSES).format(name_suffix=name_suffix)
@@ -10302,6 +10517,37 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             save_memory(cur_phone, student_profile, topic, summary, sentiment)
         except Exception as e_resolved:
             p(f"  [RESOLVEU] Erro na memória: {e_resolved}")
+        conversation_messages.clear()
+        conversation_greeted.discard(conv_id)
+        waiting_for_client = False
+        followup_stage = 0
+        inactivity_start = 0
+        return
+
+    # === PAGAMENTO JA CONFIRMADO (resposta a disparo de cobranca) ===
+    # Regra: se o aluno responde ao disparo de boleto/mensalidade dizendo
+    # que ja pagou, agente nao distribui — apenas confirma e encerra.
+    # Detecta padroes inequivocos. NAO casa "vou pagar"/"como pagar"/"posso pagar".
+    if _is_payment_confirmed_message(question):
+        p(f"  [PAGAMENTO-OK] Aluno confirmou pagamento: \"{question[:80]}\"")
+        _pay_msgs = [
+            f"Tudo bem{name_suffix}! 😊 Obrigado pela confirmação. Qualquer coisa, é só me chamar. Até mais!",
+            f"Perfeito{name_suffix}! 🙏 Obrigado por avisar. Se precisar de algo mais, estou por aqui. Até!",
+            f"Ótimo{name_suffix}! 👍 Obrigado pelo retorno. Qualquer dúvida, pode contar comigo. Até mais!",
+        ]
+        msg = random.choice(_pay_msgs)
+        meta_typing_on()
+        send_and_track(conv_id, msg)
+        conversation_messages.append({'role': 'bot', 'text': msg})
+        log_to_db(conv_id, question, msg, 1.0, 'payment_confirmed')
+        _register_signature(conv_id, 'payment_confirmed', msg)
+
+        close_conversation_crm(conv_id, phone=_current_phone)
+        try:
+            summary = generate_conversation_summary(conversation_messages)
+            save_memory(cur_phone, student_profile, 'financeiro', summary, sentiment)
+        except Exception as e_pay:
+            p(f"  [PAGAMENTO-OK] Erro na memória: {e_pay}")
         conversation_messages.clear()
         conversation_greeted.discard(conv_id)
         waiting_for_client = False
@@ -11006,10 +11252,88 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     # responde mas com cuidado (botao falar com atendente eh adicionado
     # mais abaixo no fluxo padrao).
     if confidence < 0.40 and is_within_business_hours():
+        # GUARD CRITICO: ANTES de escalate_low_conf, verificar se a msg eh
+        # uma intenção CLARA que tem rota propria (resolvi / agradecimento /
+        # pagamento ja feito / retencao). Se for, NUNCA usar a frase generica.
+        # Caso reportado: aluno diz "Ja resolvi" e bot mandava
+        # "Pra eu nao te passar informacao errada..." — agora cai em RESOLVED.
+        try:
+            _q_for_guard = (question or '').strip().lower()
+            # 1) Variante mais ampla de RESOLVIDO
+            if (any(w in _q_for_guard for w in RESOLVED_WORDS)
+                    or 'resolvi' in _q_for_guard
+                    or 'consegui' in _q_for_guard and 'consegui pagar' not in _q_for_guard):
+                p(f"  [LOW-CONF-D4] cancelado: msg parece RESOLVIDO -> rota resolved")
+                _msg_r = random.choice([
+                    f"Que bom{name_suffix}! Fico feliz que tenha conseguido resolver 😊 Se precisar de mais alguma coisa, é só chamar!",
+                    f"Show{name_suffix}! Qualquer coisa, é só me chamar. Até mais! 😊",
+                    f"Maravilha{name_suffix}! Estou por aqui se precisar. Até logo! 😊",
+                ])
+                send_and_track(conv_id, _msg_r, force=True)
+                conversation_messages.append({'role': 'bot', 'text': _msg_r})
+                log_to_db(conv_id, question, _msg_r, 1.0, 'resolved')
+                try:
+                    close_conversation_crm(conv_id, phone=_current_phone)
+                except Exception:
+                    pass
+                waiting_for_client = False; inactivity_start = 0
+                return
+            # 2) Despedida pura
+            if _is_farewell_message(question):
+                p(f"  [LOW-CONF-D4] cancelado: msg eh despedida -> closing")
+                _msg_f = random.choice(_CLOSING_RESPONSES).format(name_suffix=name_suffix)
+                send_and_track(conv_id, _msg_f, force=True)
+                conversation_messages.append({'role': 'bot', 'text': _msg_f})
+                log_to_db(conv_id, question, _msg_f, 1.0, 'closing')
+                try:
+                    close_conversation_crm(conv_id, phone=_current_phone)
+                except Exception:
+                    pass
+                waiting_for_client = False; inactivity_start = 0
+                return
+            # 3) Pagamento ja confirmado
+            if _is_payment_confirmed_message(question):
+                p(f"  [LOW-CONF-D4] cancelado: msg confirma pagamento -> close payment")
+                _msg_p = f"Tudo bem{name_suffix}! 😊 Obrigado pela confirmação. Qualquer coisa, é só me chamar. Até mais!"
+                send_and_track(conv_id, _msg_p, force=True)
+                conversation_messages.append({'role': 'bot', 'text': _msg_p})
+                log_to_db(conv_id, question, _msg_p, 1.0, 'payment_confirmed')
+                try:
+                    close_conversation_crm(conv_id, phone=_current_phone)
+                except Exception:
+                    pass
+                waiting_for_client = False; inactivity_start = 0
+                return
+            # 4) Retencao (cancelamento) -> Wesley humanizado
+            if is_retention_intent(question):
+                p(f"  [LOW-CONF-D4] cancelado: msg eh retencao -> Wesley")
+                _fname = (student_profile.get('first_name') or '').strip() if student_profile else ''
+                _greet = (f", *{_fname}*" if _fname else '')
+                _msg_ret = (f"Entendi sua situação{_greet}. Vou te encaminhar para o *Wesley*, "
+                            f"nosso consultor especializado, que vai te ajudar com isso. Um momento, por favor! 😊")
+                send_and_track(conv_id, _msg_ret, force=True)
+                conversation_messages.append({'role': 'bot', 'text': _msg_ret})
+                log_to_db(conv_id, question, _msg_ret, 1.0, 'retention')
+                _register_signature(conv_id, 'retention', _msg_ret)
+                _mark_handoff_active(conv_id, 'retention', target='Wesley',
+                                     ttl_s=8 * 3600, body=_msg_ret)
+                try:
+                    lead_id_loc = student_profile.get('lead_id') if student_profile else None
+                    trigger_retention(conv_id, lead_id_loc, question)
+                except Exception as e_lc_ret:
+                    p(f"  [LOW-CONF-D4] erro trigger_retention: {e_lc_ret}")
+                waiting_for_client = False; inactivity_start = 0
+                return
+        except Exception as e_guard:
+            p(f"  [LOW-CONF-D4] erro guard pre-escala: {e_guard}")
+
         p(f"  [LOW-CONF-D4] conf={confidence:.2f} < 0.40 -> escalando direto")
+        # FRASE NEUTRA — NUNCA usar "informacao errada" (decisao do time).
+        # A mensagem antiga ("Pra eu nao te passar nenhuma informacao errada...")
+        # ficava ruim e era usada em situacoes que tinham rota propria.
         _low_conf_msg = (
-            "Pra eu não te passar nenhuma informação errada, vou te transferir "
-            "para um de nossos consultores, tá? Um momento, por favor! 😊"
+            "Vou te conectar com um de nossos consultores que vai te ajudar "
+            "direitinho com isso, tá? Só um momento! 😊"
         )
         send_and_track(conv_id, _low_conf_msg, force=True)
         conversation_messages.append({'role': 'bot', 'text': _low_conf_msg})
