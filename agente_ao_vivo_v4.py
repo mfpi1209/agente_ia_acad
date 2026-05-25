@@ -2486,29 +2486,71 @@ def check_lead_exists_field(lead_id):
 
 
 def create_lead_and_business(phone, name=''):
-    """Cria lead e negócio no DataCrazy (para alunos não encontrados que dizem ser alunos)."""
-    try:
-        clean_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
-        r = requests.post(f'{DCZ_CRM}/leads', headers=H,
-                         json={'phone': clean_phone, 'name': name or clean_phone}, timeout=10)
-        if r.status_code not in (200, 201):
-            p(f"    Criar lead falhou: {r.status_code}")
-            return None, None
-        lead_data = r.json()
-        new_lead_id = lead_data.get('id', '')
-        p(f"    Lead criado: {new_lead_id}")
+    """Cria lead e negócio no DataCrazy (para alunos não encontrados que dizem ser alunos).
 
-        r_biz = requests.post(f'{DCZ_CRM}/businesses', headers=H,
-                             json={'leadId': new_lead_id, 'stageId': STAGE_BASE_ALUNOS_ID}, timeout=10)
-        biz_id = ''
-        if r_biz.status_code in (200, 201):
-            biz_data = r_biz.json()
-            biz_id = biz_data.get('id', '')
-            p(f"    Business criado: {biz_id}")
-        return new_lead_id, biz_id
-    except Exception as e:
-        p(f"    Erro criar lead/business: {e}")
+    (2026-05-25) Adicionado retry (3 tentativas) com backoff progressivo.
+    Caso reportado: alunos eram distribuidos para consultor mas o lead NAO
+    era criado no CRM (painel mostrava 'Lead nao encontrado'), porque uma
+    unica falha 5xx/timeout do DCZ matava a criacao. Com 3 tries o lead
+    persiste mesmo com instabilidade momentanea da API.
+    """
+    clean_phone = phone.replace('+', '').replace(' ', '').replace('-', '')
+    body = {'phone': clean_phone, 'name': name or clean_phone}
+    new_lead_id = ''
+    for attempt in (1, 2, 3):
+        try:
+            r = requests.post(f'{DCZ_CRM}/leads', headers=H, json=body, timeout=12)
+            if r.status_code in (200, 201):
+                try:
+                    lead_data = r.json()
+                    new_lead_id = lead_data.get('id', '') or ''
+                except Exception:
+                    new_lead_id = ''
+                if new_lead_id:
+                    p(f"    Lead criado: {new_lead_id} (try {attempt})")
+                    break
+            else:
+                p(f"    Criar lead try {attempt} falhou: status={r.status_code} body={r.text[:160]}")
+        except Exception as e:
+            p(f"    Criar lead try {attempt} excecao: {e}")
+        if attempt < 3:
+            try:
+                time.sleep(1.5 * attempt)
+            except Exception:
+                pass
+    if not new_lead_id:
+        p(f"    [LEAD-FAIL] Nao foi possivel criar lead para ...{clean_phone[-4:]} apos 3 tentativas")
         return None, None
+
+    biz_id = ''
+    for attempt in (1, 2, 3):
+        try:
+            r_biz = requests.post(
+                f'{DCZ_CRM}/businesses', headers=H,
+                json={'leadId': new_lead_id, 'stageId': STAGE_BASE_ALUNOS_ID},
+                timeout=12,
+            )
+            if r_biz.status_code in (200, 201):
+                try:
+                    biz_data = r_biz.json()
+                    biz_id = biz_data.get('id', '') or ''
+                except Exception:
+                    biz_id = ''
+                if biz_id:
+                    p(f"    Business criado: {biz_id} (try {attempt})")
+                    break
+            else:
+                p(f"    Criar business try {attempt} falhou: status={r_biz.status_code} body={r_biz.text[:160]}")
+        except Exception as e:
+            p(f"    Criar business try {attempt} excecao: {e}")
+        if attempt < 3:
+            try:
+                time.sleep(1.5 * attempt)
+            except Exception:
+                pass
+    if not biz_id:
+        p(f"    [BIZ-FAIL] Lead {new_lead_id[:12]} criado mas business NAO — atendimento pode aparecer 'sem stage'")
+    return new_lead_id, biz_id
 
 
 # ===================== FASE 2: MEMÓRIA =====================
@@ -5266,10 +5308,21 @@ def process_in_hours_rescue():
                     continue
 
                 # (2026-05-25) Msg de OUTRA AUTOMACAO externa (URA, autoresponder,
-                # empresa parceira) chegou como input. NUNCA responder — apenas
-                # fechar a conv silenciosamente. Caso: 'claupiercings agradece
-                # seu contato. Como podemos ajudar?'
-                if _last_aluno_body and _is_external_bot_input(_last_aluno_body):
+                # empresa parceira, bot DCZ) chegou como input. NUNCA responder
+                # — apenas fechar a conv silenciosamente. Caso: 'claupiercings
+                # agradece seu contato. Como podemos ajudar?'
+                # IMPORTANTE: ignora se a ultima msg recebida for template HSM
+                # (disparo), nesses casos a conv eh legitima.
+                _last_msg_obj = None
+                try:
+                    for _mm in _conv_msgs or []:
+                        if _mm.get('received', False):
+                            _last_msg_obj = _mm
+                            break
+                except Exception:
+                    pass
+                if (_last_aluno_body and _is_external_bot_input(_last_aluno_body)
+                        and not (_last_msg_obj and _is_template_message(_last_msg_obj))):
                     p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} msg eh de bot externo ('{_last_aluno_body[:40]}') — fechando sem responder")
                     try:
                         close_conversation_crm(cid, phone=phone)
@@ -5601,6 +5654,23 @@ _EXTERNAL_BOT_INPUT_PATTERNS = (
     'aguarde nosso retorno',
     'em breve um de nossos atendentes',
     'whatsapp business',
+    # (2026-05-25) Bots automáticos de outras integrações
+    'obrigado por entrar em contato',
+    'agradecemos o contato',
+    'agradecemos seu contato',
+    'retornaremos em breve',
+    'em horário comercial responderemos',
+    'em horario comercial responderemos',
+    'boas-vindas ao',
+    'nosso atendimento funciona',
+    'horário de atendimento de segunda',
+    'horario de atendimento de segunda',
+    'esta é uma mensagem automática',
+    'esta e uma mensagem automatica',
+    'mensagem encaminhada automaticamente',
+    'recebemos sua mensagem',
+    'responderemos assim que possível',
+    'responderemos assim que possivel',
 )
 
 
@@ -5620,6 +5690,22 @@ def _is_external_bot_input(text):
                          if unicodedata.category(c) != 'Mn')
         if p_norm in t_norm:
             return True
+    return False
+
+
+def _msg_is_template_hsm(conv_id, msg_id):
+    """Verifica em _cached_msgs se a msg eh template HSM (disparo via WhatsApp
+    Business API). Templates NUNCA devem ser confundidos com 'bot externo' —
+    sao disparos do nosso Cockpit.
+    """
+    if not conv_id or not msg_id:
+        return False
+    try:
+        for m in _cached_msgs.get(conv_id, []) or []:
+            if m.get('id') == msg_id:
+                return _is_template_message(m)
+    except Exception:
+        pass
     return False
 
 # Padroes de despedida (msg do aluno apos encerramento que NAO requer atendente)
@@ -8849,6 +8935,29 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
             lead_id = new_lead_id
             p(f"  [DIST] Lead criado para distribuição: {lead_id[:16]}")
 
+    # (2026-05-25) ALERTA visivel se transferimos sem lead — caso Larissa:
+    # painel DCZ mostrava 'Lead nao encontrado' mesmo apos resgate. Aqui
+    # registramos nota interna laranja na conv para o consultor saber que
+    # precisa criar lead manual ou tentar de novo.
+    if not lead_id:
+        try:
+            requests.post(
+                f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                headers=H,
+                json={
+                    'body': (
+                        '⚠️ *Atencao* — distribuicao sem lead vinculado. '
+                        'Tentei criar (3x) mas API CRM nao retornou ID. '
+                        'Cria/atribui o lead manualmente, por favor.'
+                    ),
+                    'isInternal': True,
+                },
+                timeout=10,
+            )
+        except Exception:
+            pass
+        p(f"  [DIST] {conv_id[:12]} ATENCAO: distribuindo SEM lead criado (apos 3 tentativas)")
+
     lead_ok = _dcz_transfer_lead(lead_id, nome)
     biz_ok = _dcz_transfer_business(phone, nome, lead_id=lead_id)
     chat_ok = _dcz_transfer_chat(conv_id, nome)
@@ -10252,13 +10361,18 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         handle_debug_command(conv_id, cmd)
         return
 
-    # === MENSAGEM DE BOT EXTERNO (URA, autoresponder de parceiro, etc) ===
+    # === MENSAGEM DE BOT EXTERNO (URA, autoresponder de parceiro, bot DCZ) ===
     # (2026-05-25) Quando o "aluno" envia uma frase claramente de bot
     # externo ("X agradece seu contato. Como podemos ajudar?"), o agente
     # NUNCA deve responder com menu/LLM. Apenas fecha a conv silenciosamente.
     # Caso: Claudenice — "claupiercings agradece seu contato..."
+    # IMPORTANTE: templates HSM (disparos do nosso Cockpit) sao EXCLUIDOS
+    # do detector — eles tem header/type=template e sao msgs SAIDA (sent),
+    # nao input do aluno. Mas guarda extra aqui via _msg_is_template_hsm
+    # para evitar falsos positivos caso DCZ marque algum disparo como
+    # received.
     try:
-        if _is_external_bot_input(question):
+        if _is_external_bot_input(question) and not _msg_is_template_hsm(conv_id, msg_id):
             p(f"  [EXTERNAL-BOT] msg identificada como bot/URA externa — fechando sem responder: \"{question[:80]}\"")
             log_to_db(conv_id, question, '[fechada — msg de bot externo]', 1.0, 'external_bot_close')
             try:
@@ -10314,28 +10428,104 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             p(f"  [SUPERVISOR-BLOCK] {conv_id[:12]} agente silenciado pelo auditor OpenAI - SEM resposta")
             conversation_messages.append({'role': 'user', 'text': question})
             return
-        nudge_sig = f'handoff_nudge:{ho_motivo}'
-        if not _signature_recently_sent(conv_id, nudge_sig, window_s=4 * 3600):
-            target_label = f"*{ho_target}*" if ho_target else "um consultor"
+
+        # (2026-05-25) PROMESSA-NAO-CUMPRIDA: handoff marca alguem ('Felipe')
+        # mas a conv NAO foi transferida no DCZ. Sem isso, o agente envia
+        # "Felipe vai dar continuidade" mas Felipe nunca recebe — aluno
+        # fica esperando para sempre. Aqui validamos a transferencia ANTES
+        # do nudge. Se falhar, limpamos handoff stale e caimos pro fluxo
+        # normal (distribute_to_attendant via outras vias).
+        try:
+            _conv_has_att = False
             try:
-                _fname = ''
-                st_for_name = _conv_states.get(conv_id, {})
-                if st_for_name.get('student_profile') and st_for_name['student_profile'].get('first_name'):
-                    _fname = st_for_name['student_profile']['first_name']
-                nudge = (
-                    f"Oii{', ' + _fname if _fname else ''}! Já registrei aqui e "
-                    f"{target_label} vai dar continuidade ao seu atendimento, tá? "
-                    f"Pode aguardar que em pouquinho a gente retorna. 😊"
+                r_conv = requests.get(
+                    f'{DCZ_MSG}/messaging/conversations/{conv_id}',
+                    headers=H, timeout=10,
                 )
-                send_and_track(conv_id, nudge)
-                _register_signature(conv_id, nudge_sig, nudge)
-                p(f"  [HANDOFF-ACTIVE] {conv_id[:12]} aluno persistiu - nudge unico enviado (motivo={ho_motivo})")
-            except Exception as e_n:
-                p(f"  [HANDOFF-ACTIVE] erro nudge: {e_n}")
+                if r_conv.status_code == 200:
+                    _conv_has_att = bool((r_conv.json() or {}).get('attendants') or [])
+            except Exception:
+                pass
+
+            if not _conv_has_att and ho_target and ho_motivo in ('dispatch', 'preferred', 'retention'):
+                if is_attendant_active_now(ho_target):
+                    p(f"  [HANDOFF-ACTIVE] {conv_id[:12]} promessa-nao-cumprida detectada — forcando transferencia real p/ {ho_target}")
+                    try:
+                        _phone_fix = _current_phone or PHONE_TO_MONITOR
+                        _name_fix = ''
+                        try:
+                            _st_n = _conv_states.get(conv_id, {})
+                            if _st_n.get('student_profile') and _st_n['student_profile'].get('name'):
+                                _name_fix = _st_n['student_profile']['name']
+                        except Exception:
+                            pass
+                        _lead_fix, _biz_fix, _created_fix = _ensure_lead_for_rescue(_phone_fix, _name_fix)
+                        if _lead_fix:
+                            _dcz_transfer_business(_phone_fix, ho_target, lead_id=_lead_fix)
+                            _dcz_transfer_lead(_lead_fix, ho_target)
+                        _transf_ok = _dcz_transfer_chat(conv_id, ho_target)
+                        if not _transf_ok:
+                            _nome_norm_fix = ho_target.strip().lower()
+                            _nome_norm_fix = ''.join(
+                                c for c in __import__('unicodedata').normalize('NFD', _nome_norm_fix)
+                                if __import__('unicodedata').category(c) != 'Mn'
+                            )
+                            _att_id_fix = ATTENDANT_MAP.get(_nome_norm_fix, '')
+                            if _att_id_fix:
+                                try:
+                                    requests.post(
+                                        f'{DCZ_MSG}/messaging/conversations/{conv_id}/change-attendant',
+                                        headers=H, json={'attendantId': _att_id_fix}, timeout=15,
+                                    )
+                                except Exception:
+                                    pass
+                        try:
+                            requests.post(
+                                f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                                headers=H,
+                                json={'body': f'🔧 *Fix promessa-nao-cumprida* — handoff_active({ho_motivo}) prometia {ho_target} mas conv sem atendente. Transferencia forcada pelo agente IA.', 'isInternal': True},
+                                timeout=10,
+                            )
+                        except Exception:
+                            pass
+                        p(f"  [HANDOFF-ACTIVE] {conv_id[:12]} transferencia forcada concluida (target={ho_target})")
+                    except Exception as e_force:
+                        p(f"  [HANDOFF-ACTIVE] erro transferencia forcada: {e_force}")
+                else:
+                    p(f"  [HANDOFF-ACTIVE] {conv_id[:12]} target={ho_target} inativo — limpando handoff stale e caindo pro fluxo normal")
+                    try:
+                        _clear_handoff_active(conv_id, reason='target_offline_stale')
+                    except Exception:
+                        pass
+                    ho_motivo, ho_target = None, ''
+        except Exception as e_check:
+            p(f"  [HANDOFF-ACTIVE] erro check transferencia: {e_check}")
+
+        if not ho_motivo:
+            pass  # cai pro fluxo normal abaixo
         else:
-            p(f"  [HANDOFF-ACTIVE] {conv_id[:12]} aluno persistiu - SUPRIMINDO resposta (motivo={ho_motivo}, target={ho_target})")
-        conversation_messages.append({'role': 'user', 'text': question})
-        return
+            nudge_sig = f'handoff_nudge:{ho_motivo}'
+            if not _signature_recently_sent(conv_id, nudge_sig, window_s=4 * 3600):
+                target_label = f"*{ho_target}*" if ho_target else "um consultor"
+                try:
+                    _fname = ''
+                    st_for_name = _conv_states.get(conv_id, {})
+                    if st_for_name.get('student_profile') and st_for_name['student_profile'].get('first_name'):
+                        _fname = st_for_name['student_profile']['first_name']
+                    nudge = (
+                        f"Oii{', ' + _fname if _fname else ''}! Já registrei aqui e "
+                        f"{target_label} vai dar continuidade ao seu atendimento, tá? "
+                        f"Pode aguardar que em pouquinho a gente retorna. 😊"
+                    )
+                    send_and_track(conv_id, nudge)
+                    _register_signature(conv_id, nudge_sig, nudge)
+                    p(f"  [HANDOFF-ACTIVE] {conv_id[:12]} aluno persistiu - nudge unico enviado (motivo={ho_motivo})")
+                except Exception as e_n:
+                    p(f"  [HANDOFF-ACTIVE] erro nudge: {e_n}")
+            else:
+                p(f"  [HANDOFF-ACTIVE] {conv_id[:12]} aluno persistiu - SUPRIMINDO resposta (motivo={ho_motivo}, target={ho_target})")
+            conversation_messages.append({'role': 'user', 'text': question})
+            return
 
     elapsed = time.time() - last_response_time
     if elapsed < RESPONSE_COOLDOWN:
