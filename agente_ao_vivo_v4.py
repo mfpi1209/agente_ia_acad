@@ -5382,7 +5382,12 @@ def process_in_hours_rescue():
 
 # ===================== POST-CLOSE RESCUE (reabertura apos encerramento) =====================
 _POST_CLOSE_RESCUE_RECENT = {}  # conv_id -> last_action_ts
-POST_CLOSE_RESCUE_AGE_MIN = 5
+# (2026-05-25) AGE_MIN baixado de 5 para 1 min. Caso reportado: aluno
+# respondeu "obrigado" 3min apos atendente finalizar -> agente nao
+# pegava no rescue (esperava 5min) -> conversa ficava aberta com a
+# msg automatica do DCZ "Este atendimento foi encerrado..." sem ninguem
+# fechar de fato.
+POST_CLOSE_RESCUE_AGE_MIN = 1
 POST_CLOSE_RESCUE_MAX_AGE_MIN = 60  # apos 1h, vira problema do in_hours_rescue normal
 POST_CLOSE_RESCUE_COOLDOWN_S = 30 * 60
 
@@ -11340,6 +11345,14 @@ def main():
                     process_pending_escalation_auto_dispatch()
                 except Exception as e_fila:
                     p(f"  [FILA] Erro no auto-dispatch: {e_fila}")
+                # (2026-05-25) post-close-rescue agora roda a cada 3 ciclos
+                # (era a cada 10). Caso reportado: alunos respondendo
+                # "obrigado" 1-2 min depois do encerramento ficavam ate 10
+                # ciclos sem fechar, conv ficava 'open' indefinidamente.
+                try:
+                    process_post_close_rescue()
+                except Exception as e_pcr:
+                    p(f"  [POST-CLOSE-RESCUE] Erro: {e_pcr}")
 
             if cycle % 10 == 0:
                 try:
@@ -11350,10 +11363,6 @@ def main():
                     process_in_hours_rescue()
                 except Exception as e_ihr:
                     p(f"  [IN-HOURS-RESCUE] Erro: {e_ihr}")
-                try:
-                    process_post_close_rescue()
-                except Exception as e_pcr:
-                    p(f"  [POST-CLOSE-RESCUE] Erro: {e_pcr}")
                 try:
                     process_supervisor_loop()
                 except Exception as e_sup:
