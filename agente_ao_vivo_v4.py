@@ -1210,6 +1210,10 @@ Sua personalidade: simpática, paciente, fala de um jeito leve e natural. Você 
 12. **INÍCIO DAS AULAS — REGRA CRÍTICA**: Quem se matricular AGORA em graduação ingressa na **turma do 2º semestre (agosto)**. NUNCA diga que as aulas começam em "fevereiro" ou "janeiro" para alunos novos/matriculados agora — isso é informação ERRADA. Se o aluno perguntar quando as aulas começam (perguntas tipo "quando começa", "quando inicia", "em que mês", "vou começar em agosto?", "fevereiro?"), responda que para quem está se matriculando agora as aulas iniciam em **agosto** (2º semestre). Se houver dúvida sobre cronograma detalhado ou calendário acadêmico, transfira para consultor.
 13. **ESQUECI MINHA SENHA — REGRA CRÍTICA**: O fluxo correto é por **SMS**, NÃO por e-mail. Procedimento oficial: o aluno clica em *Esqueci minha senha* na tela de login → digita o seu *telefone atualizado* → recebe um *código por SMS* → informa o código no campo indicado → cria a *nova senha*. NUNCA diga que ele "recebe um link no e-mail", "informa CPF e e-mail" ou "olha no spam do e-mail" — isso é informação ERRADA. Sempre lembre que o **telefone precisa estar atualizado** no cadastro pra o SMS chegar. Se o aluno disser que não recebeu o SMS, oriente que pode ser telefone desatualizado e ofereça transferir para consultor confirmar o cadastro.
 14. **CALENDÁRIO ACADÊMICO — REGRA CRÍTICA**: Quando o aluno perguntar sobre DATAS (prova A1, prova AF, liberação de notas, início das aulas, fim do semestre, prazo de matrícula, transferência, retorno ao curso, dispensa, AC, TCE, ENADE, feriados acadêmicos), use APENAS as datas que aparecem no bloco "CALENDÁRIO ACADÊMICO GRADUAÇÃO 2026" quando ele for fornecido nas referências. NUNCA invente, deduza ou aproxime datas. Se a pergunta envolve um período/data que não está listada no bloco, responda: "Deixa eu confirmar essa data certinho com a equipe pra não te passar informação errada, tá?" e a transferência acontece automaticamente. Para perguntas sobre data específica de uma matéria, oriente o aluno a consultar o Portal do Aluno (cronograma da disciplina).
+15. **BLACKBOARD x ÁREA DO ALUNO — REGRA CRÍTICA**: Os dois ambientes existem e têm finalidades **diferentes**. NUNCA confunda os dois:
+   - **Blackboard (AVA)** — é o ambiente virtual de aprendizagem. É lá que o aluno acessa: *conteúdo das disciplinas*, *aulas gravadas*, *aulas ao vivo*, *atividades*, *materiais*, *fóruns*, *módulos*, *trabalhos da disciplina*. Quando o aluno disser que não está conseguindo acessar aula, atividade, material, módulo, conteúdo ou trabalho de uma disciplina, oriente-o a entrar no **Blackboard**.
+   - **Área do Aluno (Portal do Aluno)** — é onde ficam: *prova regimental A1*, *prova regimental AF/Substitutiva* (em *Vida Acadêmica → Plataforma de Prova*), *boletos / financeiro*, *documentos*, *protocolos / CAA*, *histórico*, *grade*, *dados cadastrais*.
+   NUNCA oriente o aluno a buscar conteúdo de disciplina, aula gravada, atividade ou material na Área do Aluno — isso é **erro**. Se as referências mostrarem algum print do ambiente da disciplina (com nome de matéria, módulo, semana de aula), trata-se do **Blackboard**, não da Área do Aluno. Para problemas de acesso ao Blackboard que não se resolvem com orientações básicas (limpar cache, navegador alternativo, conferir e-mail acadêmico), transfira para consultor.
 
 ## COMO CONVERSAR (REGRA MAIS IMPORTANTE):
 Você tá no WhatsApp. Ninguém manda textão no zap. Seja breve, natural e direta.
@@ -6023,9 +6027,14 @@ def _ensure_body_norm_column():
         pass
 
 
-SIMILARITY_DEDUP_THRESHOLD = 0.78  # SequenceMatcher: 78% de similaridade char-by-char
-JACCARD_DEDUP_THRESHOLD = 0.50     # Jaccard: 50% de palavras unicas (sem stopwords) em comum
+SIMILARITY_DEDUP_THRESHOLD = 0.65  # SequenceMatcher: 65% de similaridade char-by-char
+JACCARD_DEDUP_THRESHOLD = 0.40     # Jaccard: 40% de palavras unicas (sem stopwords) em comum
 JACCARD_MIN_WORDS_IN_COMMON = 6    # salvaguarda contra falsos positivos em mensagens curtas
+# (2026-05-25) Bug Sandra/Ivanice: bot enviou multiplas respostas com mesmo
+# conteudo semantico mas parafraseadas (descricao de imagem da disciplina,
+# orientacao de matricula). Os thresholds antigos (0.78/0.50) deixavam
+# passar. Baixar pra 0.65/0.40 cobre parafrase mantendo seguranca contra
+# falsos positivos (>=6 palavras em comum + min 40 chars).
 _DEDUP_STOPWORDS = frozenset({
     'a', 'o', 'e', 'de', 'do', 'da', 'em', 'um', 'uma', 'na', 'no', 'os', 'as',
     'que', 'por', 'se', 'com', 'para', 'pra', 'pelo', 'pela', 'mais', 'mas',
@@ -6126,7 +6135,7 @@ def _body_recently_sent(conv_id, text, window_s=10 * 60):
               AND LENGTH(body_norm) >= 40
               AND sent_at > NOW() - (%s || ' seconds')::interval
             ORDER BY sent_at DESC
-            LIMIT 8
+            LIMIT 20
         """, (conv_id, str(int(window_s))))
         rows = cur.fetchall()
         cur.close()
@@ -9350,6 +9359,61 @@ _SEND_BURST_S = 20
 _send_burst_last = {}
 
 
+# ============================================================
+# CAMADA D6 (2026-05-25): detector de LOOP DE FRUSTRACAO
+# ============================================================
+# Caso Sandra/Ivanice: aluno enviou 3-5 mensagens com expressoes
+# "nao consegui", "nao aparece", "nao funciona" e o bot continuou
+# tentando responder com parafrase. Bot deve PARAR e ESCALAR
+# humano apos 2 sinais de frustracao em 10 min.
+_FRUSTRATION_PATTERNS = (
+    'nao consegui', 'nao aparece', 'nao funciona', 'nao vai',
+    'continua igual', 'continua a mesma', 'continua dando',
+    'mesmo problema', 'sem sucesso', 'sem solucao',
+    'nao deu certo', 'nao consigo', 'tambem nao', 'tampouco',
+    'simplesmente nao', 'so que nao', 'mas nao', 'porem nao',
+    'ja tentei', 'ja fiz isso', 'ja fiz tudo', 'fiz tudo',
+    'nao adiantou', 'sem resposta',
+)
+_FRUSTRATION_WINDOW_S = 10 * 60  # 10 min
+
+
+def _count_frustration_signals(conv_msgs, window_s=_FRUSTRATION_WINDOW_S):
+    """Conta mensagens do aluno na janela que tem expressao de frustracao."""
+    if not conv_msgs:
+        return 0
+    try:
+        from datetime import datetime as _dt
+        import unicodedata
+        now_ts = time.time()
+        count = 0
+        for m in conv_msgs:
+            if not isinstance(m, dict):
+                continue
+            if not m.get('received', False):
+                continue
+            if m.get('isInternal', False):
+                continue
+            body = (m.get('body') or '').strip()
+            if len(body) < 3:
+                continue
+            ts_str = m.get('createdAt') or m.get('timestamp') or ''
+            try:
+                msg_ts = _dt.fromisoformat(str(ts_str).replace('Z', '+00:00')).timestamp()
+            except Exception:
+                continue
+            if (now_ts - msg_ts) > window_s:
+                continue
+            # normaliza sem acentos
+            t = ''.join(c for c in unicodedata.normalize('NFD', body.lower())
+                        if unicodedata.category(c) != 'Mn')
+            if any(p in t for p in _FRUSTRATION_PATTERNS):
+                count += 1
+        return count
+    except Exception:
+        return 0
+
+
 def _send_burst_recent(conv_id):
     if not conv_id:
         return False
@@ -10815,6 +10879,34 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                     _mark_calendar_used(conv_id)
     except Exception as _e_cal:
         p(f"    [CAL] Falha ao injetar calendario: {_e_cal}")
+
+    # CAMADA D6 (2026-05-25): loop de frustracao do aluno -> escalar humano.
+    # Caso Sandra: aluno disse "nao consegui" / "nao aparece" / "nao a tarde"
+    # multiplas vezes, bot continuou tentando parafrasear orientacao em vez
+    # de chamar humano. Apos 2 sinais em 10min -> escalation com handoff.
+    try:
+        _conv_msgs_frustr = _cached_msgs.get(conv_id) or get_conversation_messages_api(conv_id, limit=20)
+        if conv_id:
+            _cached_msgs[conv_id] = _conv_msgs_frustr
+        _frustr_count = _count_frustration_signals(_conv_msgs_frustr or [])
+        if _frustr_count >= 2 and is_within_business_hours():
+            p(f"  [FRUSTRATION-D6] {conv_id[:12]} {_frustr_count} sinais de frustracao em 10min -> escalando humano")
+            _fr_msg = (
+                "Percebi que você já tentou algumas vezes — vou te transferir "
+                "agora pra um de nossos consultores resolver isso direitinho com "
+                "você, tá? Um momento! 😊"
+            )
+            send_and_track(conv_id, _fr_msg, force=True)
+            conversation_messages.append({'role': 'bot', 'text': _fr_msg})
+            log_to_db(conv_id, question, _fr_msg, 0.0, 'escalate_frustration')
+            try:
+                distribute_to_attendant(conv_id, f'Aluno frustrado: {_frustr_count} tentativas')
+            except Exception as e_fr:
+                p(f"  [FRUSTRATION-D6] erro distribute: {e_fr}")
+            waiting_for_client = False; inactivity_start = 0
+            return
+    except Exception as e_fr_outer:
+        p(f"  [FRUSTRATION-D6] erro: {e_fr_outer}")
 
     # CAMADA D3 (2026-05-25): pergunta claramente fora do escopo academico
     # (veterinaria, pets, esporte, etc) — escalar direto, NAO chamar LLM.
