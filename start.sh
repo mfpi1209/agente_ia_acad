@@ -52,6 +52,17 @@ echo "Agente iniciado (PID $AGENT_PID)"
 
 sleep 2
 
+# (2026-05-26) Iniciar dashboard_server (port 8050) em background.
+# Sem isso, a aba 'Agente IA' do Cockpit nao carrega graficos
+# (fetch para localhost:8050 falhava no navegador). O kb_api.py
+# faz proxy interno para esse servidor via rotas /api/aia/*.
+echo "Iniciando Dashboard Agente IA na porta 8050..."
+python dashboard_server.py > /tmp/dashboard_server.log 2>&1 &
+DASH_PID=$!
+echo "Dashboard iniciado (PID $DASH_PID)"
+
+sleep 2
+
 # Iniciar API em foreground para que o container fique vivo
 echo "Iniciando API Cockpit na porta 8000..."
 exec uvicorn kb_api:app --host 0.0.0.0 --port 8000 --log-level info

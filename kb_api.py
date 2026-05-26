@@ -4783,6 +4783,39 @@ async def delete_alert(alert_id: int):
         return {"deleted": cur.rowcount > 0}
 
 
+# (2026-05-26) Proxy reverso interno para dashboard_server.py (port 8050).
+# O navegador acessa /api/aia/* (mesmo dominio) e o kb_api faz o forward
+# para localhost:8050/api/*. Resolve o problema da aba 'Agente IA' que
+# tentava fetch direto em http://localhost:8050 (so funciona se o cliente
+# estivesse na mesma maquina).
+from fastapi import Request as _FAReq
+from fastapi.responses import Response as _FAResp
+_AIA_INTERNAL_BASE = 'http://127.0.0.1:8050'
+
+@app.api_route('/api/aia/{path:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
+async def _aia_proxy(path: str, request: _FAReq):
+    url = f'{_AIA_INTERNAL_BASE}/{path}'
+    try:
+        params = dict(request.query_params)
+        method = request.method
+        body = await request.body() if method in ('POST', 'PUT', 'PATCH') else None
+        headers = {k: v for k, v in request.headers.items()
+                   if k.lower() not in ('host', 'content-length')}
+        r = requests.request(method, url, params=params, data=body, headers=headers, timeout=20)
+        return _FAResp(content=r.content, status_code=r.status_code,
+                       media_type=r.headers.get('content-type', 'application/json'))
+    except requests.exceptions.ConnectionError:
+        return _FAResp(
+            content=b'{"error":"dashboard_server.py nao esta rodando em :8050"}',
+            status_code=503, media_type='application/json',
+        )
+    except Exception as e:
+        return _FAResp(
+            content=f'{{"error":"proxy_aia: {str(e)[:200]}"}}'.encode(),
+            status_code=500, media_type='application/json',
+        )
+
+
 if __name__ == '__main__':
     import uvicorn
     print("Cockpit IA rodando em http://localhost:8000")
