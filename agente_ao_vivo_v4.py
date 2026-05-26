@@ -12424,6 +12424,25 @@ def main():
                     _conv_skipped_human += 1
                     continue
 
+                # (2026-05-26) Re-check com fetch FRESCO antes de chamar
+                # handle_message. Caso reportado (Misael/Danubia 11:08):
+                # bot distribuiu pra Danubia, ela respondeu, e o bot ainda
+                # processou e enviou mais msgs. O conv['attendants'] do
+                # query inicial estava stale. Aqui pegamos o estado real
+                # das ultimas 30min via outgoing-attendant nas msgs.
+                try:
+                    _h_fresh, _h_who_fresh = _human_attendant_active_recently(conv_id, window_s=30 * 60)
+                    if _h_fresh:
+                        p(f"  [HUMAN-FRESH] [{conv_phone[-4:] if conv_phone else '????'}] {_h_who_fresh} ativo nos ultimos 30min — agente recuando")
+                        _conv_states.setdefault(conv_id, _default_conv_state())['_human_took_over'] = True
+                        if msg_id:
+                            processed_msg_ids.add(msg_id)
+                        _save_conv_state(conv_id)
+                        _conv_skipped_human += 1
+                        continue
+                except Exception as e_fresh:
+                    p(f"  [HUMAN-FRESH] erro check: {e_fresh}")
+
                 if msg_id and msg_body:
                     _lr = _conv_states.get(conv_id, {}).get('_last_responded_ts', 0)
                     if _lr and (time.time() - _lr) < 60:
