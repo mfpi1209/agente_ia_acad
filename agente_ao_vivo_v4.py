@@ -5291,8 +5291,14 @@ def process_in_hours_rescue():
                     if _m.get('received', False):
                         _last_aluno_body = (_m.get('body') or _m.get('text') or '').strip()
                         break
-                if _last_aluno_body and _is_farewell_message(_last_aluno_body):
-                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} ultima msg do aluno e despedida ('{_last_aluno_body[:30]}') — pulando resgate e fechando")
+                # (2026-05-26) Adicionado _is_resolution_confirmation —
+                # casos reportados: "Vou avaliar Muito grato", "Consegui
+                # entender", "Deu certo" ficavam aguardando atendente.
+                _is_fw = _is_farewell_message(_last_aluno_body) if _last_aluno_body else False
+                _is_rc = _is_resolution_confirmation(_last_aluno_body) if _last_aluno_body else False
+                if _last_aluno_body and (_is_fw or _is_rc):
+                    _kind_r = 'despedida' if _is_fw else 'confirmacao_resolucao'
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} ultima msg do aluno = {_kind_r} ('{_last_aluno_body[:40]}') — pulando resgate e fechando")
                     try:
                         close_conversation_crm(cid, phone=phone)
                     except Exception as e_cc:
@@ -5300,7 +5306,7 @@ def process_in_hours_rescue():
                     try:
                         update_pending_escalation_status(
                             cid, 'closed_no_engagement',
-                            note='Aluno encerrou com agradecimento/despedida — sem necessidade de atendente',
+                            note=f'Aluno encerrou com {_kind_r} — sem necessidade de atendente: "{_last_aluno_body[:80]}"',
                         )
                     except Exception:
                         pass
@@ -5709,15 +5715,26 @@ def _msg_is_template_hsm(conv_id, msg_id):
     return False
 
 # Padroes de despedida (msg do aluno apos encerramento que NAO requer atendente)
+# (2026-05-26) Expandido — casos reportados de despedidas que NAO eram pegas:
+#   "Vou avaliar Muito grato"  -> faltava 'grato'/'grata'
+#   "Para você também 😊"      -> emoji + msg curta, agora cobre
+#   "Nao, obrigado."           -> ja pegava por 'obrigad', mas check rodava
+#                                  tarde demais (so em low-conf), agora roda
+#                                  no INICIO de handle_message
 _FAREWELL_KEYWORDS = (
-    'obrigad', 'valeu', 'vlw', 'agradeco', 'agradeço',
-    'tchau', 'ate mais', 'até mais', 'ate logo', 'até logo',
-    'beleza', 'blz', 'ok', 'okay', 'okey', 'show',
-    'perfeito', 'otimo', 'ótimo', 'maravilha', 'tranquilo',
-    'entendido', 'ciente', 'bom dia', 'boa tarde', 'boa noite',
-    'nada', 'so isso', 'só isso', 'era isso',
+    'obrigad', 'valeu', 'vlw', 'agradeco', 'agradeço', 'agradecid',
+    'grato', 'grata', 'gratidao', 'gratidão',
+    'tchau', 'ate mais', 'até mais', 'ate logo', 'até logo', 'falou',
+    'beleza', 'blz', 'ok', 'okay', 'okey', 'show', 'show de bola',
+    'perfeito', 'otimo', 'ótimo', 'maravilha', 'tranquilo', 'tranquila',
+    'entendido', 'entendida', 'ciente', 'compreendido', 'compreendi',
+    'bom dia', 'boa tarde', 'boa noite',
+    'nada', 'so isso', 'só isso', 'era isso', 'so era isso', 'só era isso',
+    'pra voce tambem', 'pra você também', 'para voce tambem', 'para você também',
+    'pra ti tambem', 'pra ti também', 'igualmente',
+    'abraco', 'abraço', 'um abraco', 'um abraço',
 )
-_FAREWELL_EMOJIS = ('👍', '🙏', '❤', '❤️', '😊', '🙌', '👏', '✅', '😉', '😘')
+_FAREWELL_EMOJIS = ('👍', '🙏', '❤', '❤️', '😊', '🙌', '👏', '✅', '😉', '😘', '🤝', '🥰', '💚', '💙')
 
 
 def _is_farewell_message(text):
@@ -5741,6 +5758,54 @@ def _is_farewell_message(text):
             words = [w for w in remaining.split() if len(w) > 2]
             if len(words) <= 2:
                 return True
+    return False
+
+
+# (2026-05-26) Detector de "confirmacao de resolucao" — frases que o aluno
+# manda quando ja resolveu OU confirmou entendimento. Equivalente funcional
+# a despedida: o atendente respondeu, o aluno disse "deu certo" e a conv
+# deve ser fechada. Casos reportados na fila:
+#   "Conseguiu entender as explicacoes?"  -> confirmacao do bot
+#   "Consegui entender"                    -> aluno confirma
+#   "Deu certo"                            -> aluno confirma resolucao
+#   "Funcionou"                            -> aluno confirma resolucao
+_RESOLUTION_PHRASES = (
+    'consegui entender', 'entendi sim', 'entendi tudo', 'entendi agora',
+    'entendi obrigad', 'entendi, obrigad', 'consegui sim', 'consegui resolver',
+    'consegui acessar', 'consegui ver', 'consegui sim, obrigad',
+    'deu certo', 'deu tudo certo', 'ja deu certo', 'já deu certo',
+    'funcionou', 'funcionou sim', 'ja funcionou', 'já funcionou',
+    'resolveu', 'resolvi', 'resolvido', 'foi resolvido', 'ja resolvi', 'já resolvi',
+    'consegui acesso', 'ja consegui', 'já consegui',
+    'sucesso', 'tudo certo', 'ta tudo certo', 'tá tudo certo', 'esta tudo certo',
+    'esta tudo bem', 'está tudo bem', 'ta tudo bem', 'tá tudo bem',
+    'consegui aqui', 'foi sim', 'foi sim, obrigad',
+    'pode encerrar', 'pode finalizar', 'pode fechar',
+    'nao precisa mais', 'não precisa mais', 'nao precisa de mais nada',
+    'não precisa de mais nada', 'sem mais duvidas', 'sem mais dúvidas',
+    'esclarecid', 'sanad',
+)
+
+
+def _is_resolution_confirmation(text):
+    """Detecta confirmacao de resolucao do aluno (equivalente a despedida).
+    Caso reportado: "Consegui entender as explicacoes" na fila aguardando
+    atendimento. Como o aluno ja resolveu, deve fechar igual a uma
+    despedida — nao precisa de novo atendente.
+    """
+    if not text:
+        return False
+    import unicodedata
+    t = text.strip().lower()
+    if len(t) > 120:
+        return False
+    t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
+                     if unicodedata.category(c) != 'Mn')
+    for phrase in _RESOLUTION_PHRASES:
+        ph_norm = ''.join(c for c in unicodedata.normalize('NFD', phrase)
+                          if unicodedata.category(c) != 'Mn')
+        if ph_norm in t_norm:
+            return True
     return False
 
 
@@ -6013,12 +6078,24 @@ def process_post_close_rescue():
             first = name.split()[0] if name else ''
             first_part = f' *{first}*' if first else ''
 
-            if _is_farewell_message(user_text):
-                farewell_reply = (
-                    f"Obrigado pelo contato{first_part}! 🙏\n\n"
-                    f"Estamos sempre por aqui — se precisar de qualquer outra coisa, "
-                    f"é só me chamar de novo 😊"
-                )
+            # (2026-05-26) Inclui _is_resolution_confirmation como gatilho
+            # equivalente. Caso reportado: "Consegui entender as
+            # explicacoes" ficou na fila aguardando — o post_close_rescue
+            # nao reconhecia como motivo de fechamento.
+            _is_pc_fw = _is_farewell_message(user_text)
+            _is_pc_rc = _is_resolution_confirmation(user_text)
+            if _is_pc_fw or _is_pc_rc:
+                if _is_pc_rc:
+                    farewell_reply = (
+                        f"Que ótimo{first_part}! Fico feliz que tenha conseguido resolver 😊\n\n"
+                        f"Se precisar de mais alguma coisa, é só me chamar de novo. Até mais!"
+                    )
+                else:
+                    farewell_reply = (
+                        f"Obrigado pelo contato{first_part}! 🙏\n\n"
+                        f"Estamos sempre por aqui — se precisar de qualquer outra coisa, "
+                        f"é só me chamar de novo 😊"
+                    )
                 try:
                     meta_typing_on()
                     send_and_track(cid, farewell_reply)
@@ -6026,8 +6103,9 @@ def process_post_close_rescue():
                     p(f"  [POST-CLOSE-RESCUE] falha farewell: {e_msg}")
 
                 try:
+                    _kind_lbl = 'Confirmacao de resolucao' if _is_pc_rc else 'Despedida'
                     note = (
-                        f"🙏 *Despedida automatica* — aluno respondeu '{user_text[:50]}' "
+                        f"🙏 *{_kind_lbl} automatica* — aluno respondeu '{user_text[:50]}' "
                         f"apos encerramento. IA agradeceu e finalizou novamente."
                     )
                     requests.post(
@@ -6044,7 +6122,8 @@ def process_post_close_rescue():
 
                 _POST_CLOSE_RESCUE_RECENT[cid] = now_ts
                 rescued += 1
-                p(f"  [POST-CLOSE-RESCUE] DESPEDIDA conv={cid[:12]} ...{phone[-4:]} ({int(age_min)}min) '{user_text[:40]}' -> finalizada")
+                _lbl_log = 'DESPEDIDA' if _is_pc_fw else 'RESOLUCAO'
+                p(f"  [POST-CLOSE-RESCUE] {_lbl_log} conv={cid[:12]} ...{phone[-4:]} ({int(age_min)}min) '{user_text[:40]}' -> finalizada")
                 continue
 
             last_attendant_first = _extract_last_attendant_from_history(msgs)
@@ -10428,6 +10507,90 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             return
     except Exception as e_hh:
         p(f"  [HUMAN-HARD-STOP] erro check: {e_hh}")
+
+    # === EARLY CLOSE: DESPEDIDA / CONFIRMACAO DE RESOLUCAO ===
+    # (2026-05-26) Caso reportado em FILA: alunos com despedidas claras
+    # ("Nao, obrigado.", "Vou avaliar Muito grato", "Consegui entender as
+    # explicacoes", "Para voce tambem 😊") ficavam aguardando atendimento
+    # porque o check de despedida rodava SOMENTE dentro do LOW-CONF-D4 do
+    # handle_message — ou seja, depois da busca KB+LLM. Quando a IA tinha
+    # confianca alta, escapava do check e respondia "vou te ajudar...",
+    # mantendo a conv aberta.
+    #
+    # AGORA: detector roda LOGO no inicio, ANTES de qualquer processamento
+    # pesado. Se for despedida pura OU confirmacao de resolucao, agradece
+    # curto e fecha. Regra geral: se aluno mandou farewell/resolucao apos
+    # ja ter recebido respostas anteriores na conv (humano ou bot), fechar.
+    try:
+        _is_farewell = _is_farewell_message(question)
+        _is_resolution = _is_resolution_confirmation(question)
+        if (_is_farewell or _is_resolution) and not is_button_click:
+            # Confirma que a conv NAO é uma abertura nova — precisa ter
+            # historico previo (>=2 msgs no cache) para nao fechar conv que
+            # comeca com "ok" como primeira mensagem do aluno.
+            _hist = _cached_msgs.get(conv_id, []) or []
+            _has_prior_interaction = len(_hist) >= 2
+            # Tenta fetch fresco se cache vazio
+            if not _has_prior_interaction:
+                try:
+                    _fetched = get_conversation_messages_api(conv_id, limit=10) or []
+                    _has_prior_interaction = len(_fetched) >= 2
+                    if _fetched:
+                        _cached_msgs[conv_id] = _fetched
+                except Exception:
+                    pass
+
+            if _has_prior_interaction:
+                _kind = 'despedida' if _is_farewell else 'confirmacao_resolucao'
+                p(f"  [EARLY-CLOSE] {conv_id[:12]} msg do aluno = {_kind} ('{question[:50]}') — agradecendo e fechando")
+
+                _fname_ec = ''
+                try:
+                    if student_profile and student_profile.get('first_name'):
+                        _fname_ec = student_profile['first_name']
+                    elif _current_phone:
+                        _sp_ec = identify_student(_current_phone)
+                        if _sp_ec and _sp_ec.get('first_name'):
+                            _fname_ec = _sp_ec['first_name']
+                except Exception:
+                    pass
+                _name_suffix_ec = f' *{_fname_ec}*' if _fname_ec else ''
+
+                if _is_resolution:
+                    _ec_msg = (
+                        f"Que ótimo{_name_suffix_ec}! Fico feliz que tenha conseguido resolver 😊\n\n"
+                        f"Se surgir qualquer outra dúvida, é só chamar. Até mais!"
+                    )
+                else:
+                    _ec_msg = random.choice([
+                        f"De nada{_name_suffix_ec}! Fico à disposição pro que precisar. Até mais! 😊",
+                        f"Imagina{_name_suffix_ec}! Qualquer coisa, é só me chamar de novo. Até logo! 🙏",
+                        f"Obrigado pelo contato{_name_suffix_ec}! Tenha um ótimo dia 😊",
+                    ])
+                try:
+                    send_and_track(conv_id, _ec_msg, force=True)
+                    conversation_messages.append({'role': 'bot', 'text': _ec_msg})
+                except Exception as e_ec_send:
+                    p(f"  [EARLY-CLOSE] erro send: {e_ec_send}")
+                try:
+                    log_to_db(conv_id, question, _ec_msg, 1.0, _kind)
+                except Exception:
+                    pass
+                try:
+                    close_conversation_crm(conv_id, phone=_current_phone)
+                except Exception as e_ec_close:
+                    p(f"  [EARLY-CLOSE] erro close: {e_ec_close}")
+                try:
+                    update_pending_escalation_status(
+                        conv_id, 'resolved',
+                        note=f'EARLY-CLOSE — aluno enviou {_kind}: "{question[:80]}"',
+                    )
+                except Exception:
+                    pass
+                waiting_for_client = False; followup_stage = 0; inactivity_start = 0
+                return
+    except Exception as e_early:
+        p(f"  [EARLY-CLOSE] erro detector: {e_early}")
 
     # === MENSAGEM DE BOT EXTERNO (URA, autoresponder de parceiro, bot DCZ) ===
     # (2026-05-25) Quando o "aluno" envia uma frase claramente de bot
