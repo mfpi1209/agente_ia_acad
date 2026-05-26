@@ -7,6 +7,92 @@
 
 ---
 
+### [2026-05-26] - Fix: cegueira a `unstarted`/`opened` + follow-up bot DCZ + guarda D6
+
+**Decisão**
+
+3 mudanças sistêmicas no `agente_ao_vivo_v4.py`:
+
+1. **Helper `_fetch_active_conversations()`** — busca `open` + `unstarted` +
+   `opened` em 3 GETs paralelos ao DCZ e funde sem duplicar. Substitui os 4
+   sites que faziam `GET /messaging/conversations?status=open` puro:
+   - main loop (linha ~12577)
+   - `process_in_hours_rescue`
+   - `process_after_hours_rescue`
+   - `process_post_close_rescue`
+
+2. **Constante global `_FU_TRIGGER_PHRASES`** — frases que disparam o
+   monitoramento de inatividade (follow-up + encerramento). Inclui:
+   - Frases do agente IA (já existentes): "tudo certo por aí", "ainda está",
+     "não tive retorno", "pode mandar", "precisar de mais alguma".
+   - **Novas: frases do salesbot/automação DCZ**: "Veja as opções
+     disponíveis", "Clique em uma das opções", "Escolha uma opção", "Qual
+     plataforma você está", "Seu e-mail de acesso", "Veja o tutorial",
+     "Selecione para dar andamento", "Me conta, por favor", "Já um de
+     nossos consultores", "Como posso te ajudar".
+   - Substituída em 3 locais (PRIO-1 close, follow-up tracker, `_is_fu`
+     helper). Antes esses 3 locais tinham listas inline duplicadas.
+
+3. **Camada D6 em `send_and_track`** — bloqueia envio (não-force) se
+   `_dcz_conv_has_human(conv_id)` retorna True. Complementa D1 (humano
+   FALOU nas últimas 6h): D6 cobre o intervalo entre **atribuição** e
+   **primeira fala** do humano (caso Debora: atendente atribuída por 208min
+   sem responder, e o sistema ainda mandava follow-up/notas).
+
+**Contexto**
+
+Caso reportado em 2026-05-26 (~17:00 BRT): após disparo em massa, 10
+alunos ficaram 2h em conversas `status=unstarted` totalmente invisíveis
+ao agente. Diagnóstico via `_find_v4.py` (busca via CRM `/leads?search=`)
+encontrou todas — confirmou que o GET `?status=open` não retorna as em
+`unstarted` (apenas com status exatamente `open`). Resgate manual via
+`_rescue_image.py` processou as 10 (Caio, Jean, Daniela, Demison,
+Fernanda, Karem, Larissa, Erick, Gabriela, Beatriz).
+
+Adicionalmente, o usuário reportou que conversas com bot DCZ falando por
+último (e.g. menus "Veja as opções disponíveis") não eram encerradas
+mesmo sem retorno do aluno. Diagnóstico via `_check_emitter.py` revelou
+que as mensagens visualmente atribuídas ao agente IA eram, na verdade,
+do salesbot interno do DCZ (status da conv inclui `automation`). A
+infraestrutura de follow-up já cobria conversas com bot por último
+(`_fu_candidates` em `convs_opened`), mas as frases-gatilho não incluíam
+as do bot DCZ — daí o monitoramento nunca entrava em estágio 1/2.
+
+A nota "*Aluno esperando ha 208min — Debora ainda nao respondeu*"
+(imagem usuário) **não está no código do projeto** (verificado via grep
+exaustivo). Provavelmente vem de outro processo no servidor DCZ ou
+config do produto. D6 protege nosso envio agente contra cenário análogo
+ainda que a fonte seja externa: nenhum envio sem `force=True` ocorre
+enquanto humano está atribuído.
+
+**Alternativas descartadas**
+
+- *Paginação do GET (`offset=N`)*: o DCZ retorna o mesmo lote
+  independente do offset — paginação está quebrada do lado deles.
+  Triplicar a chamada por status é o workaround viável.
+- *Detectar "status automation" e ignorar conversa*: rejeitada pelo
+  usuário ("devem agir juntos") — agente IA deve operar follow-up das
+  mensagens do bot DCZ normalmente.
+- *Wrapper `send_internal_note(conv_id, body)` centralizado*: alto risco
+  porque há ~20 sites de chamada direta `requests.post(... isInternal=True)`.
+  Adiada — D6 cobre o caso principal (envio ao aluno) sem refatoração
+  ampla.
+
+**Impacto**
+
+- 3 chamadas ao DCZ por ciclo no main loop (antes 1). Ciclo de ~10s, ainda
+  margem para timeout. Cada GET tem `limit=300`, totalizando até 900
+  conversas/ciclo (vs 300 antes).
+- Follow-up agora dispara em qualquer mensagem do bot DCZ que contenha
+  frases típicas de menu — encerramento de conv ociosa pós-template ou
+  pós-menu funciona uniformemente.
+- D6 pode ocasionalmente suprimir uma resposta válida do agente em conv
+  recém-distribuída para humano que ainda não falou. Mitigação: mensagens
+  críticas (transferência, after-hours, distribuição) já usam
+  `force=True` e escapam de todas as guardas.
+
+---
+
 ### [2026-05-25] - Fix: agente expulsava consultor de retenção (Camadas A+B+C)
 
 **Decisão**

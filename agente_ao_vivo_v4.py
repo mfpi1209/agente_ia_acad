@@ -1345,6 +1345,32 @@ LAST_MSG_CLOSE_PHRASES = (
     'atendimento foi finalizado', 'conversa foi encerrada',
 )
 
+# (2026-05-26) Frases que indicam follow-up em andamento — qualquer fonte:
+# nosso agente IA, salesbot DCZ (Automacao), templates etc. Quando a ultima
+# msg enviada contem qualquer uma destas, a conv ENTRA no monitoramento de
+# inatividade e sera encerrada se o aluno nao responder dentro do prazo.
+# Inclui frases do bot DCZ ("Veja as opcoes", "Seu e-mail de acesso",
+# "Qual plataforma") — reportadas pelo usuario como ficando em loop sem
+# encerramento.
+_FU_TRIGGER_PHRASES = (
+    # ---- Frases do agente IA ----
+    'tudo certo por a', 'ainda est', 'não tive retorno', 'nao tive retorno',
+    'pode mandar', 'precisar de mais alguma',
+    'precisar de algo', 'precisa de algo',
+    # ---- Frases do salesbot/automacao DCZ ----
+    'veja as opções dispon', 'veja as opcoes dispon',
+    'clique em uma das opções', 'clique em uma das opcoes',
+    'escolha uma opção', 'escolha uma opcao',
+    'qual plataforma você está', 'qual plataforma voce esta',
+    'seu e-mail de acesso',
+    'veja o tutorial', 'tutorial de primeiro acesso',
+    'selecione para dar andamento', 'me conta, por favor',
+    'me conta o que você gostaria', 'me conta o que voce gostaria',
+    'já um de nossos consultores', 'ja um de nossos consultores',
+    'oi, ainda está por aí', 'oi, ainda esta por ai',
+    'como posso te ajudar', 'em que posso te ajudar',
+)
+
 # ===================== SAUDAÇÕES (defaults, sobrescritos pelo banco) =====================
 
 GREETING_RETURNING = "Olá, *{fname}*! Que bom falar com você novamente 😊\n\nNa última vez que conversamos, você estava com algumas dúvidas sobre *{topic}* — espero que tenha conseguido te ajudar naquele momento.\n\nAgora me conta: como posso te ajudar hoje?\n\nEscolha uma opção abaixo para agilizar seu atendimento 👇"
@@ -3960,6 +3986,17 @@ def send_and_track(conv_id, text, buttons=None, force=False):
                     return 'suppressed'
             except Exception:
                 pass
+            # D6 (2026-05-26): humano ATRIBUIDO atualmente (mesmo sem ter
+            # falado ainda). Caso reportado: nota '*Aluno esperando ha 208min
+            # — Debora ainda nao respondeu*' chegou ao chat enquanto Debora
+            # era atendente atribuida. D1 nao pega (so checa quem FALOU). D6
+            # cobre o intervalo entre atribuicao e primeira fala do humano.
+            try:
+                if _dcz_conv_has_human(conv_id, timeout=5):
+                    p(f"  [HUMAN-GUARD-D6] {conv_id[:12]} atendente humano atribuido - SUPRIMIDO")
+                    return 'suppressed'
+            except Exception:
+                pass
         # === RECHECK: handoff_active vigente -> suprimir resposta orfa ===
         # ACAO C (2026-05-21): expandido. Antes so checava dispatch <90s.
         # Agora qualquer handoff ativo (supervisor_block, retention,
@@ -5082,6 +5119,44 @@ def _was_after_hours_msg_recently_sent(msgs):
     return False
 
 
+# ===================== HELPER: fetch conversas ativas (3 status fundidos) =====================
+# (2026-05-26) Fix de cegueira: o endpoint DCZ /messaging/conversations com
+# status=open NAO retorna conversas em 'unstarted' nem 'opened'. Resultado:
+# pós-disparo em massa, 10+ conversas ficavam invisiveis pro agente (e
+# pos-clicks de bot DCZ que mudam status p/ 'opened' tambem). Esta helper
+# unifica os 3 estados ativos e deduplica por id.
+def _fetch_active_conversations(limit_per_status=300, timeout=30):
+    """Busca conversas ATIVAS (open + unstarted + opened) e funde sem duplicar.
+    Retorna lista de dicts (vazia em caso de erro total). Loga erros parciais
+    mas nao falha se 1 dos 3 GETs falhar.
+    """
+    seen = set()
+    out = []
+    for _status in ('open', 'unstarted', 'opened'):
+        try:
+            _r = requests.get(
+                f'{DCZ_MSG}/messaging/conversations', headers=H,
+                params={'limit': limit_per_status, 'status': _status},
+                timeout=timeout,
+            )
+            if _r.status_code != 200:
+                continue
+            _d = _r.json()
+            _convs = _d.get('data', _d) if isinstance(_d, dict) else _d
+            if not isinstance(_convs, list):
+                continue
+            for _c in _convs:
+                _cid = _c.get('id', '')
+                if not _cid or _cid in seen:
+                    continue
+                seen.add(_cid)
+                out.append(_c)
+        except Exception as _e:
+            p(f"  [FETCH-ACTIVE] erro status={_status}: {_e}")
+            continue
+    return out
+
+
 def process_after_hours_rescue():
     """Fora do expediente, garante resposta ao aluno mesmo quando há atendente
     'fantasma' atribuído à conversa (humano off, não vai responder).
@@ -5096,17 +5171,12 @@ def process_after_hours_rescue():
     if is_within_business_hours():
         return
     try:
-        r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
-                         params={'limit': 200, 'status': 'open'}, timeout=30)
-        if r.status_code != 200:
-            return
-        data = r.json()
-        convs = data.get('data', data) if isinstance(data, dict) else data
+        convs = _fetch_active_conversations(limit_per_status=200, timeout=30)
     except Exception as e:
         p(f"  [AH-RESCUE] erro lista: {e}")
         return
 
-    if not isinstance(convs, list):
+    if not convs:
         return
 
     now_ts = time.time()
@@ -5217,17 +5287,12 @@ def process_in_hours_rescue():
     if not is_within_business_hours():
         return
     try:
-        r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
-                         params={'limit': 300, 'status': 'open'}, timeout=30)
-        if r.status_code != 200:
-            return
-        data = r.json()
-        convs = data.get('data', data) if isinstance(data, dict) else data
+        convs = _fetch_active_conversations(limit_per_status=300, timeout=30)
     except Exception as e:
         p(f"  [IN-HOURS-RESCUE] erro lista: {e}")
         return
 
-    if not isinstance(convs, list):
+    if not convs:
         return
 
     # (2026-05-25) Limite por execucao para nao travar o loop principal.
@@ -6306,17 +6371,12 @@ def process_post_close_rescue():
     if not is_within_business_hours():
         return
     try:
-        r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
-                         params={'limit': 200, 'status': 'open'}, timeout=30)
-        if r.status_code != 200:
-            return
-        data = r.json()
-        convs = data.get('data', data) if isinstance(data, dict) else data
+        convs = _fetch_active_conversations(limit_per_status=200, timeout=30)
     except Exception as e:
         p(f"  [POST-CLOSE-RESCUE] erro lista: {e}")
         return
 
-    if not isinstance(convs, list):
+    if not convs:
         return
 
     now_ts = time.time()
@@ -12572,20 +12632,18 @@ def main():
                     p(f"  ...ativo ({cycle * POLL_INTERVAL}s | {len(processed_msg_ids)} msgs | {len(_conv_states)} convs | {active_count} aguardando)")
                 _heartbeat('online', f'cycle={cycle} convs={len(_conv_states)} active={active_count}')
 
-            # Busca conversas abertas recentes
+            # Busca conversas ATIVAS recentes — funde open + unstarted + opened.
+            # (2026-05-26) Antes era so 'status=open' — convs em 'unstarted'
+            # (pos-disparo) e 'opened' (em fluxo automation DCZ) ficavam
+            # invisiveis. Caso reportado: 10 alunos da imagem todos em
+            # 'unstarted' por 2h sem o agente enxergar.
             try:
-                r = requests.get(f'{DCZ_MSG}/messaging/conversations', headers=H,
-                                    params={'limit': 300, 'status': 'open'}, timeout=60)
+                convs_raw = _fetch_active_conversations(
+                    limit_per_status=300, timeout=60)
             except Exception as _e_conv:
                 p(f"  [ERRO] Falha ao buscar conversas: {_e_conv}")
                 continue
-            if r.status_code != 200:
-                p(f"  [ERRO] API retornou {r.status_code}")
-                continue
-
-            convs_data = r.json()
-            convs_raw = convs_data.get('data', convs_data) if isinstance(convs_data, dict) else convs_data
-            if not isinstance(convs_raw, list) or not convs_raw:
+            if not convs_raw:
                 continue
 
             # ============================================================
@@ -12666,10 +12724,7 @@ def main():
                     continue
                 _lm_raw = _fc.get('lastMessage', '') or ''
                 _lm_body = (_lm_raw.get('body', '') if isinstance(_lm_raw, dict) else str(_lm_raw)).lower()
-                _is_fu = any(fp in _lm_body for fp in [
-                    'tudo certo por a', 'ainda est', 'não tive retorno',
-                    'pode mandar', 'precisar de mais alguma',
-                ])
+                _is_fu = any(fp in _lm_body for fp in _FU_TRIGGER_PHRASES)
                 _is_close = any(fp in _lm_body for fp in LAST_MSG_CLOSE_PHRASES)
                 if not _is_fu and not _is_close:
                     continue
@@ -12807,10 +12862,7 @@ def main():
                 # Sempre alinhar ao último envio da API (re-sync a cada ciclo — evita estado preso)
                 _conv_states[_oc_id]['inactivity_start'] = _oc_start
                 _last_msg = (_lm_raw.get('body', '') if isinstance(_lm_raw, dict) else str(_lm_raw)).lower()
-                _is_followup_msg = any(fp in _last_msg for fp in [
-                    'tudo certo por a', 'ainda est', 'não tive retorno',
-                    'pode mandar', 'precisar de mais alguma',
-                ])
+                _is_followup_msg = any(fp in _last_msg for fp in _FU_TRIGGER_PHRASES)
                 _is_close_msg = any(fp in _last_msg for fp in LAST_MSG_CLOSE_PHRASES)
                 _prev_stage = int(_conv_states[_oc_id].get('followup_stage', 0) or 0)
                 if _is_close_msg:
@@ -12827,7 +12879,7 @@ def main():
                 return (lm.get('body', '') if isinstance(lm, dict) else str(lm)).lower()
             def _is_fu(c):
                 b = _get_last_msg_body(c)
-                return any(fp in b for fp in ['tudo certo por a', 'ainda est', 'não tive retorno', 'pode mandar', 'precisar de mais alguma'])
+                return any(fp in b for fp in _FU_TRIGGER_PHRASES)
             _fu_with_followup = sum(1 for c in _fu_candidates if _is_fu(c))
             if cycle <= 3 and _fu_tracked > 0:
                 p(f"  [FOLLOW-UP] {_fu_tracked} monitoradas | {_fu_with_followup} ja com follow-up (auto-close direto)")
