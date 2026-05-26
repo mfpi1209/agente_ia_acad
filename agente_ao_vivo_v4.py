@@ -9661,28 +9661,37 @@ _HUMAN_GUARD_WINDOW_S = 6 * 3600  # 6 horas
 
 def _last_outgoing_is_human_attendant(conv_id, msgs=None, window_s=_HUMAN_GUARD_WINDOW_S):
     """Retorna (True, nome) se a ULTIMA msg outgoing tem attendant humano
-    com timestamp recente. Caso contrario (False, '')."""
+    com timestamp recente. Caso contrario (False, '').
+
+    (2026-05-26) BUG FIX: a versao anterior fazia `return False` ao
+    encontrar a 1a msg received. Como a API DCZ retorna do mais recente
+    pro mais antigo, isso fazia o guard FALHAR quando o aluno respondia
+    DEPOIS do humano. Caso: Julia respondeu, aluno disse 'Estou bem,
+    obrigada', bot processou e nao detectou Julia porque parou na 1a
+    received. AGORA: msgs received sao IGNORADAS (continue) e o loop
+    continua ate encontrar uma outgoing. So decide ali."""
     try:
         if msgs is None:
-            msgs = _cached_msgs.get(conv_id) or get_conversation_messages_api(conv_id, limit=15)
-            if conv_id:
+            # (2026-05-26) sempre fetch fresco aqui — o cache pode estar
+            # desatualizado e nao refletir msgs recentes do humano.
+            msgs = get_conversation_messages_api(conv_id, limit=20)
+            if conv_id and msgs:
                 _cached_msgs[conv_id] = msgs
         if not msgs:
             return False, ''
         from datetime import datetime as _dt
         now_ts = time.time()
-        # msgs vem do mais recente pro mais antigo (padrao da API)
+        # msgs vem do mais recente pro mais antigo (padrao da API).
+        # Procura a primeira OUTGOING (skip received).
         for m in msgs:
             if not isinstance(m, dict):
                 continue
             if m.get('received', False):
-                # ja achou uma do aluno antes de outgoing humano -> nao tem hard-stop
-                return False, ''
+                continue  # FIX: era return False — ignora msg do aluno e segue procurando outgoing
             if m.get('isInternal', False):
                 continue
             body = (m.get('body') or '').strip()
             header = (m.get('header') or '').strip()
-            # mensagens de sistema/header puro (ex: "iniciou o atendimento") nao contam
             if header and not body:
                 continue
             att = m.get('attendant') or {}
@@ -9690,7 +9699,6 @@ def _last_outgoing_is_human_attendant(conv_id, msgs=None, window_s=_HUMAN_GUARD_
             if not att_name:
                 # outgoing sem attendant nomeado = bot. nao bloqueia.
                 return False, ''
-            # confere se eh recente
             ts_str = m.get('createdAt') or m.get('timestamp') or ''
             try:
                 msg_ts = _dt.fromisoformat(str(ts_str).replace('Z', '+00:00')).timestamp()
@@ -9699,6 +9707,45 @@ def _last_outgoing_is_human_attendant(conv_id, msgs=None, window_s=_HUMAN_GUARD_
             if (now_ts - msg_ts) > window_s:
                 return False, ''
             return True, att_name
+        return False, ''
+    except Exception:
+        return False, ''
+
+
+def _human_attendant_active_recently(conv_id, window_s=30 * 60):
+    """(2026-05-26) Guard reforcado: True se QUALQUER outgoing humana
+    aconteceu nos ultimos window_s segundos, independente da ordem com
+    msgs do aluno. Mais robusto que _last_outgoing_is_human_attendant
+    porque varre TODAS as msgs ao inves de parar na 1a outgoing.
+    Usado no handle_message como hard-stop antes de qualquer
+    processamento.
+    """
+    try:
+        msgs = get_conversation_messages_api(conv_id, limit=20)
+        if not msgs:
+            return False, ''
+        if conv_id:
+            _cached_msgs[conv_id] = msgs
+        from datetime import datetime as _dt
+        now_ts = time.time()
+        for m in msgs:
+            if not isinstance(m, dict):
+                continue
+            if m.get('received', False):
+                continue
+            if m.get('isInternal', False):
+                continue
+            att = m.get('attendant') or {}
+            att_name = (att.get('name') if isinstance(att, dict) else '') or ''
+            if not att_name:
+                continue  # bot — skip
+            ts_str = m.get('createdAt') or m.get('timestamp') or ''
+            try:
+                msg_ts = _dt.fromisoformat(str(ts_str).replace('Z', '+00:00')).timestamp()
+            except Exception:
+                continue
+            if (now_ts - msg_ts) <= window_s:
+                return True, att_name
         return False, ''
     except Exception:
         return False, ''
@@ -10360,6 +10407,27 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     if cmd.startswith('#'):
         handle_debug_command(conv_id, cmd)
         return
+
+    # === HARD-STOP: ATENDENTE HUMANO ATIVO ===
+    # (2026-05-26) Caso reportado: Julia (humana) respondeu "Bom dia! Me
+    # chamo Julia..." na conv, aluno disse "Estou bem, obrigada", e bot
+    # ainda enviou "Vou te transferir para Julia". Bug: o guard antigo
+    # parava na 1a msg do aluno e nao via Julia anterior. Agora usamos
+    # _human_attendant_active_recently que varre TODO o historico recente
+    # (30min) procurando QUALQUER outgoing humana. Se achar, bot recua.
+    try:
+        _h_active, _h_name = _human_attendant_active_recently(conv_id, window_s=30 * 60)
+        if _h_active:
+            p(f"  [HUMAN-HARD-STOP] {conv_id[:12]} {_h_name} ja respondeu na ultima 30min — agente recua sem enviar")
+            try:
+                _conv_states.setdefault(conv_id, _default_conv_state())['_human_took_over'] = True
+                _save_conv_state(conv_id)
+            except Exception:
+                pass
+            conversation_messages.append({'role': 'user', 'text': question})
+            return
+    except Exception as e_hh:
+        p(f"  [HUMAN-HARD-STOP] erro check: {e_hh}")
 
     # === MENSAGEM DE BOT EXTERNO (URA, autoresponder de parceiro, bot DCZ) ===
     # (2026-05-25) Quando o "aluno" envia uma frase claramente de bot
