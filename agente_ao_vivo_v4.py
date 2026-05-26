@@ -1084,6 +1084,7 @@ RETENTION_PHRASES = [
     'desisti do curso', 'eu desisti', 'já desisti', 'ja desisti',
     'fui cancelado', 'foi cancelado', 'minha matrícula foi cancelada', 'minha matricula foi cancelada',
     'foi cancelada', 'matricula cancelada', 'matrícula cancelada',
+    'matricula foi cancelada', 'matrícula foi cancelada', 'a matricula foi cancelada',
 ]
 RETENTION_QUESTION_WORDS = []
 RETENTION_MSG = "Entendi sua situação. Vou te encaminhar para nosso consultor especializado que poderá te ajudar. Um momento, por favor!"
@@ -5175,7 +5176,7 @@ def process_after_hours_rescue():
 
 # ===================== IN-HOURS RESCUE (orfas dentro do horario) =====================
 _IN_HOURS_RESCUE_RECENT = {}  # conv_id -> last_rescue_ts
-IN_HOURS_RESCUE_AGE_MIN = 10
+IN_HOURS_RESCUE_AGE_MIN = 5
 IN_HOURS_RESCUE_MAX_AGE_MIN = 6 * 60  # ignora alem disso (provavelmente foi resolvido manualmente)
 IN_HOURS_RESCUE_COOLDOWN_S = 30 * 60  # nao re-resgata mesma conv em 30min
 
@@ -5596,6 +5597,291 @@ def process_in_hours_rescue():
         p(f"  [IN-HOURS-RESCUE] Total resgatadas: {rescued}")
 
 
+# ===================== QUEUE FAST SWEEP (fila waiting — sem esperar 10min) =====================
+_QUEUE_SWEEP_RECENT = {}  # conv_id -> last_action_ts
+QUEUE_FAST_SWEEP_MIN_AGE_MIN = 3   # idade minima p/ forcar reprocessamento
+QUEUE_FAST_SWEEP_COOLDOWN_S = 90    # nao repetir mesma conv em 90s
+
+
+def _queue_last_aluno_body(msgs):
+    """Ultima mensagem recebida do aluno com corpo ou anexo."""
+    if not msgs:
+        return '', None
+    for m in msgs:
+        if not m.get('received', False):
+            continue
+        body = (m.get('body') or m.get('text') or '').strip()
+        if not body:
+            img = extract_image_from_message(m)
+            if img:
+                body = img.get('caption', '') or '[imagem enviada pelo aluno]'
+            else:
+                atts = m.get('attachments') or []
+                if atts:
+                    body = '[anexo enviado pelo aluno]'
+        if body:
+            return body, m
+    return '', None
+
+
+def _queue_force_unblock_message(conv_id, msg_id):
+    """Remove dedup para permitir que o loop principal reprocesse a msg."""
+    if not msg_id:
+        return
+    try:
+        processed_msg_ids.discard(msg_id)
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM msg_dedup WHERE msg_id = %s", (msg_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
+
+def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
+    """Varredura rapida da fila — roda a CADA ciclo do loop principal.
+
+    Casos reportados na fila aguardando 5-22min:
+      - 'obrigado' / despedida -> fecha na hora (sem esperar in_hours_rescue)
+      - 'q eu ja pago' -> confirma pagamento e fecha
+      - 'A matricula foi cancelada ja' -> Wesley
+      - 'Ola' / anexo -> limpa dedup apos 3min para o loop principal atender
+
+    Regra geral: waiting = aluno falou por ultimo e ainda nao foi atendido.
+    """
+    global student_profile, _current_phone
+    if not is_within_business_hours():
+        return
+    if not waiting_convs:
+        return
+
+    now_ts = time.time()
+    acted = 0
+    unblocked = 0
+    _MAX = 35
+
+    for c in waiting_convs[:_MAX]:
+        try:
+            cid = c.get('id', '')
+            if not cid:
+                continue
+            last_done = _QUEUE_SWEEP_RECENT.get(cid, 0)
+            if last_done and (now_ts - last_done) < QUEUE_FAST_SWEEP_COOLDOWN_S:
+                continue
+
+            recv = c.get('lastReceivedMessageDate', '') or ''
+            if not recv:
+                continue
+            try:
+                from datetime import datetime as _dt
+                age_min = (now_ts - _dt.fromisoformat(str(recv).replace('Z', '+00:00')).timestamp()) / 60
+            except Exception:
+                continue
+
+            ct = c.get('contact', {}) or {}
+            phone = (ct.get('phoneNumber', '') or ct.get('contactId', '') or '').replace('+', '').replace(' ', '')
+            if phone.startswith('55') and len(phone) > 11:
+                phone = phone[2:]
+            name = (ct.get('name', '') or '').strip()
+            first = name.split()[0] if name else ''
+            first_part = f' *{first}*' if first else ''
+
+            try:
+                msgs = get_conversation_messages_api(cid, limit=12) or []
+                _cached_msgs[cid] = msgs
+            except Exception:
+                msgs = []
+
+            user_text, last_msg = _queue_last_aluno_body(msgs)
+            if not user_text:
+                continue
+
+            # --- DESPEDIDA / CONFIRMACAO DE RESOLUCAO -> FECHAR ---
+            if _is_farewell_message(user_text) or _is_resolution_confirmation(user_text):
+                _kind = 'despedida' if _is_farewell_message(user_text) else 'confirmacao_resolucao'
+                p(f"  [QUEUE-SWEEP] {_kind} conv={cid[:12]} ...{phone[-4:]} ({int(age_min)}min) '{user_text[:40]}' -> fechando")
+                if _kind == 'confirmacao_resolucao':
+                    reply = (
+                        f"Que ótimo{first_part}! Fico feliz que tenha conseguido resolver 😊\n\n"
+                        f"Se precisar de mais alguma coisa, é só chamar. Até mais!"
+                    )
+                else:
+                    reply = (
+                        f"Obrigado pelo contato{first_part}! 🙏\n\n"
+                        f"Estamos sempre por aqui — qualquer coisa, é só me chamar de novo 😊"
+                    )
+                try:
+                    send_and_track(cid, reply, force=True)
+                except Exception:
+                    pass
+                try:
+                    close_conversation_crm(cid, phone=phone)
+                except Exception:
+                    pass
+                try:
+                    update_pending_escalation_status(cid, 'resolved', note=f'QUEUE-SWEEP {_kind}: "{user_text[:80]}"')
+                except Exception:
+                    pass
+                if last_msg and last_msg.get('id'):
+                    processed_msg_ids.add(last_msg['id'])
+                _QUEUE_SWEEP_RECENT[cid] = now_ts
+                acted += 1
+                continue
+
+            # --- PAGAMENTO CONFIRMADO -> ACK + FECHAR ---
+            if _is_payment_confirmed_message(user_text):
+                p(f"  [QUEUE-SWEEP] pagamento conv={cid[:12]} ...{phone[-4:]} '{user_text[:40]}' -> ack+fechar")
+                ack = f"Tudo bem{first_part}! 😊 Obrigado pela confirmação. Qualquer coisa, é só me chamar. Até mais!"
+                try:
+                    send_and_track(cid, ack, force=True)
+                except Exception:
+                    pass
+                try:
+                    close_conversation_crm(cid, phone=phone)
+                except Exception:
+                    pass
+                if last_msg and last_msg.get('id'):
+                    processed_msg_ids.add(last_msg['id'])
+                _QUEUE_SWEEP_RECENT[cid] = now_ts
+                acted += 1
+                continue
+
+            # --- RETENCAO / CANCELAMENTO -> WESLEY ---
+            if is_retention_intent(user_text):
+                p(f"  [QUEUE-SWEEP] retencao conv={cid[:12]} ...{phone[-4:]} '{user_text[:40]}' -> Wesley")
+                _greet = (f", *{first}*" if first else '')
+                _hum = (f"Oi{_greet}! Desculpa a demora 🙏 Entendi sua situação. "
+                        f"Vou te conectar com o *Wesley*, nosso consultor especializado, "
+                        f"que vai te ajudar com isso, tá? Um momento!")
+                try:
+                    send_and_track(cid, _hum, force=True)
+                    _mark_handoff_active(cid, 'retention', target='Wesley', ttl_s=8 * 3600, body=_hum)
+                    trigger_retention(cid, None, user_text)
+                except Exception as e_ret:
+                    p(f"  [QUEUE-SWEEP] erro retencao: {e_ret}")
+                if last_msg and last_msg.get('id'):
+                    processed_msg_ids.add(last_msg['id'])
+                _QUEUE_SWEEP_RECENT[cid] = now_ts
+                acted += 1
+                continue
+
+            # --- ORFA >= 3min: desbloqueia dedup para o loop principal atender ---
+            if age_min >= QUEUE_FAST_SWEEP_MIN_AGE_MIN and last_msg:
+                mid = last_msg.get('id', '')
+                if mid and mid in processed_msg_ids:
+                    _queue_force_unblock_message(cid, mid)
+                    unblocked += 1
+                    p(f"  [QUEUE-SWEEP] desbloqueio conv={cid[:12]} ...{phone[-4:]} ({int(age_min)}min) '{user_text[:40]}'")
+                _QUEUE_SWEEP_RECENT[cid] = now_ts
+
+        except Exception as e_one:
+            p(f"  [QUEUE-SWEEP] erro conv {c.get('id','?')[:12]}: {e_one}")
+
+    if acted or unblocked:
+        p(f"  [QUEUE-SWEEP] acoes={acted} desbloqueios={unblocked} (waiting={len(waiting_convs)})")
+
+
+_HANDOFF_FULFILL_RECENT = {}
+HANDOFF_FULFILL_COOLDOWN_S = 120
+
+
+def process_handoff_fulfillment_sweep(open_convs):
+    """Cumpre promessas de transferencia quando bot ja respondeu mas nao ha
+    atendente no DCZ. Caso reportado: 'Vou te transferir para Debora...'
+    ficava na fila com bot por ultimo (rest, nao waiting) — in_hours_rescue
+    ignorava porque recv <= sent.
+
+    Regra geral: handoff_active + sem atendente + target ativo -> transferir.
+    """
+    if not is_within_business_hours() or not open_convs:
+        return
+
+    now_ts = time.time()
+    fulfilled = 0
+    _MAX = 20
+
+    for c in open_convs[:_MAX * 3]:
+        if fulfilled >= _MAX:
+            break
+        try:
+            cid = c.get('id', '')
+            if not cid or c.get('attendants'):
+                continue
+            last_done = _HANDOFF_FULFILL_RECENT.get(cid, 0)
+            if last_done and (now_ts - last_done) < HANDOFF_FULFILL_COOLDOWN_S:
+                continue
+
+            ho_motivo, ho_target = _is_handoff_active(cid)
+            if not ho_motivo or not ho_target:
+                continue
+            if ho_motivo not in ('dispatch', 'preferred', 'retention'):
+                continue
+
+            try:
+                has_h, att_name = _dcz_conv_has_human(cid)
+            except Exception:
+                has_h, att_name = False, ''
+            if has_h:
+                continue
+
+            target_first = ho_target.split()[0].lower()
+            if not is_attendant_active_now(target_first):
+                p(f"  [HANDOFF-FULFILL] {cid[:12]} target={ho_target} offline — limpando handoff stale")
+                try:
+                    _clear_handoff_active(cid, reason='target_offline_fulfill')
+                except Exception:
+                    pass
+                continue
+
+            ct = c.get('contact', {}) or {}
+            phone = (ct.get('phoneNumber', '') or ct.get('contactId', '') or '').replace('+', '').replace(' ', '')
+            if phone.startswith('55') and len(phone) > 11:
+                phone = phone[2:]
+            name = (ct.get('name', '') or '').strip()
+
+            p(f"  [HANDOFF-FULFILL] {cid[:12]} promessa {ho_target} sem atendente — forcando transferencia")
+            lead_id, _, _ = _ensure_lead_for_rescue(phone, name)
+            try:
+                if lead_id:
+                    _dcz_transfer_business(phone, ho_target, lead_id=lead_id)
+                    _dcz_transfer_lead(lead_id, ho_target)
+                ok = _dcz_transfer_chat(cid, ho_target)
+                if not ok:
+                    nome_norm = ho_target.strip().lower()
+                    nome_norm = ''.join(
+                        c for c in __import__('unicodedata').normalize('NFD', nome_norm)
+                        if __import__('unicodedata').category(c) != 'Mn'
+                    )
+                    att_id = ATTENDANT_MAP.get(nome_norm, '')
+                    if att_id:
+                        requests.post(
+                            f'{DCZ_MSG}/messaging/conversations/{cid}/change-attendant',
+                            headers=H, json={'attendantId': att_id}, timeout=15,
+                        )
+                try:
+                    requests.post(
+                        f'{DCZ_API}/api/v1/conversations/{cid}/messages',
+                        headers=H,
+                        json={'body': f'🔧 *Handoff fulfillment* — transferencia forcada para {ho_target} (promessa sem atendente no DCZ).', 'isInternal': True},
+                        timeout=10,
+                    )
+                except Exception:
+                    pass
+            except Exception as e_tf:
+                p(f"  [HANDOFF-FULFILL] erro transfer: {e_tf}")
+                continue
+
+            _HANDOFF_FULFILL_RECENT[cid] = now_ts
+            fulfilled += 1
+        except Exception as e_one:
+            p(f"  [HANDOFF-FULFILL] erro conv {c.get('id','?')[:12]}: {e_one}")
+
+    if fulfilled:
+        p(f"  [HANDOFF-FULFILL] Total transferencias forcadas: {fulfilled}")
+
+
 # ===================== POST-CLOSE RESCUE (reabertura apos encerramento) =====================
 _POST_CLOSE_RESCUE_RECENT = {}  # conv_id -> last_action_ts
 # (2026-05-25) AGE_MIN baixado de 5 para 1 min. Caso reportado: aluno
@@ -5830,6 +6116,8 @@ _PAYMENT_CONFIRMED_PHRASES = (
     'parcela paga', 'fatura paga',
     'quitei', 'ja quitei', 'já quitei', 'quitado', 'quitada',
     'paguei sim', 'paguei ja', 'paguei já',
+    'ja pago', 'já pago', 'eu ja pago', 'eu já pago',
+    'que eu ja pago', 'q eu ja pago', 'que eu já pago',
 )
 _PAYMENT_NEGATIVES = (
     'nao paguei', 'não paguei', 'ainda nao paguei', 'ainda não paguei',
@@ -12201,23 +12489,22 @@ def main():
                 except Exception as e_fila:
                     p(f"  [FILA] Erro no auto-dispatch: {e_fila}")
                 # (2026-05-25) post-close-rescue agora roda a cada 3 ciclos
-                # (era a cada 10). Caso reportado: alunos respondendo
-                # "obrigado" 1-2 min depois do encerramento ficavam ate 10
-                # ciclos sem fechar, conv ficava 'open' indefinidamente.
                 try:
                     process_post_close_rescue()
                 except Exception as e_pcr:
                     p(f"  [POST-CLOSE-RESCUE] Erro: {e_pcr}")
+                # (2026-05-26) in_hours_rescue a cada 3 ciclos (era 10) — orfas
+                # na fila 5-10min eram ignoradas por muito tempo.
+                try:
+                    process_in_hours_rescue()
+                except Exception as e_ihr:
+                    p(f"  [IN-HOURS-RESCUE] Erro: {e_ihr}")
 
             if cycle % 10 == 0:
                 try:
                     process_after_hours_rescue()
                 except Exception as e_rescue:
                     p(f"  [AH-RESCUE] Erro: {e_rescue}")
-                try:
-                    process_in_hours_rescue()
-                except Exception as e_ihr:
-                    p(f"  [IN-HOURS-RESCUE] Erro: {e_ihr}")
                 try:
                     process_supervisor_loop()
                 except Exception as e_sup:
@@ -12411,6 +12698,18 @@ def main():
                         except Exception:
                             _oldest_info = f" | Mais antigo: {_w0_name}"
                 p(f"  [QUEUE] waiting={len(waiting)} rest={len(rest)} -> processando {len(convs)}{_oldest_info}")
+
+            # (2026-05-26) Varredura rapida ANTES do processamento normal:
+            # fecha despedidas/pagamento/retencao na hora; desbloqueia dedup
+            # de orfas >= 3min; cumpre handoffs pendentes (ex: Debora).
+            try:
+                process_queue_fast_sweep(waiting, _convs_queue_source)
+            except Exception as e_qfs:
+                p(f"  [QUEUE-SWEEP] Erro: {e_qfs}")
+            try:
+                process_handoff_fulfillment_sweep(_convs_queue_source)
+            except Exception as e_hff:
+                p(f"  [HANDOFF-FULFILL] Erro: {e_hff}")
 
             # === MONITORAR FOLLOW-UP: conversas onde agente respondeu E aluno NÃO respondeu ===
             _fu_candidates = list(convs_opened) + [c for c in rest if (c.get('lastSendedMessageDate','') or '') > (c.get('lastReceivedMessageDate','') or '')]
