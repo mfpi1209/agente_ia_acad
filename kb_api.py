@@ -4647,16 +4647,35 @@ async def agent_live_logs(lines: int = 80):
 @app.post("/api/agent/live/start")
 async def agent_live_start():
     """Liga o agente PRINCIPAL via flag. Nao inicia subprocess novo —
-    o agente do start.sh ja esta vivo e respeita essa flag automaticamente."""
+    o agente do start.sh ja esta vivo e respeita essa flag automaticamente.
+
+    (2026-05-26) Se o PROCESSO nao esta vivo (heartbeat antigo), retorna
+    mensagem clara: ligar a flag nao reanima processo morto, precisa de
+    rebuild/restart no Easypanel.
+    """
     ok = _set_runtime_flag(True)
     if not ok:
         return {"ok": False, "msg": "Erro ao atualizar flag no banco"}
     hb = _read_heartbeat_status()
+    if not hb['process_alive']:
+        return {
+            "ok": True,
+            "msg": (
+                "Flag ligada — porem o processo do agente nao esta vivo "
+                f"(ultimo heartbeat ha {hb.get('seconds_ago', '?')}s). "
+                "Faca REBUILD no Easypanel para reiniciar o container."
+            ),
+            "process_alive": False,
+            "pid": hb.get('pid'),
+            "heartbeat_seconds_ago": hb.get('seconds_ago'),
+            "needs_rebuild": True,
+        }
     return {
         "ok": True,
         "msg": "Agente ligado (processamento ativado).",
         "process_alive": hb['process_alive'],
         "pid": hb.get('pid'),
+        "heartbeat_seconds_ago": hb.get('seconds_ago'),
     }
 
 

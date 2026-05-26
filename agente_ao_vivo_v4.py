@@ -5458,6 +5458,18 @@ def process_in_hours_rescue():
             except Exception as e_ho:
                 p(f"  [IN-HOURS-RESCUE] erro check handoff: {e_ho}")
 
+            # (2026-05-26) PROTECAO RETENCAO: se ha handoff(retention) ativo
+            # para essa conv, NAO redistribuir para consultor normal. Wesley
+            # cuida e o resgate so existe para conversas verdadeiramente orfas.
+            try:
+                ho_chk_m, ho_chk_t = _is_handoff_active(cid)
+                if ho_chk_m in _HUMAN_HANDOFF_MOTIVOS and ho_chk_t:
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} handoff({ho_chk_m}) ativo p/ {ho_chk_t} — NAO redistribui")
+                    _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                    continue
+            except Exception:
+                pass
+
             consultant = get_available_consultant()
             if not consultant:
                 p(f"  [IN-HOURS-RESCUE] sem consultor disponivel - registrando pending")
@@ -9227,6 +9239,46 @@ def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude
 def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
                                     exclude_attendants=None):
     """Corpo real de distribute_to_attendant, executado sob lock in-process."""
+
+    # === REGRA GERAL DE PROTECAO (2026-05-26) ===
+    # Nunca distribuir uma conv que JA tem atendente humano OU handoff humano
+    # ativo (retencao/preferred/dispatch). Caso reportado: Denise Castaldi
+    # estava com Wesley (retencao), respondeu "Sim" ao botao e o sistema
+    # removeu Wesley e atribuiu Mariana — porque alguma rota chamou
+    # distribute_to_attendant sem checar o estado da conv. Esta blindagem
+    # impede QUALQUER chamada (LOW-CONF, frustracao, fora-escopo, etc.) de
+    # sobrescrever um humano ja ativo na conv.
+    try:
+        has_h, att_name = _dcz_conv_has_human(conv_id)
+        if has_h:
+            p(f"  [DIST] PROTECAO: {conv_id[:12]} ja tem humano ({att_name or '?'}) — abortando distribuicao (motivo='{reason}')")
+            try:
+                # marca pending como ja em andamento para evitar nova tentativa via fila
+                update_pending_escalation_status(
+                    conv_id, 'in_progress',
+                    note=f'Protecao distribute: conv ja com {att_name or "humano"} — sem redistribuir.',
+                )
+            except Exception:
+                pass
+            return True
+    except Exception as e_prot1:
+        p(f"  [DIST] erro check humano (segue mesmo assim): {e_prot1}")
+
+    try:
+        ho_motivo_p, ho_target_p = _is_handoff_active(conv_id)
+        if ho_motivo_p in _HUMAN_HANDOFF_MOTIVOS and ho_target_p:
+            p(f"  [DIST] PROTECAO: {conv_id[:12]} handoff({ho_motivo_p}) ativo p/ {ho_target_p} — NAO sobrescreve (motivo='{reason}')")
+            try:
+                update_pending_escalation_status(
+                    conv_id, 'in_progress',
+                    note=f'Protecao distribute: handoff({ho_motivo_p}) ativo p/ {ho_target_p} — sem redistribuir.',
+                )
+            except Exception:
+                pass
+            return True
+    except Exception as e_prot2:
+        p(f"  [DIST] erro check handoff (segue mesmo assim): {e_prot2}")
+
     consultant = get_available_consultant(exclude_attendants=exclude_attendants)
     if not consultant:
         p(f"  [DIST] [MODE] human_unavailable — fallback nota interna (motivo='{reason}')")
