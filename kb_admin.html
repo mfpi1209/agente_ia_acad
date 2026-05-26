@@ -1836,8 +1836,16 @@ async function aiaLoadStatus(){
 async function aiaStart(){
   const b=document.getElementById('aia-btnStart');b.textContent='⏳ Ligando...';b.disabled=true;
   try{const r=await fetch(A+'/api/agent/live/start',{method:'POST'}).then(r=>r.json());
-    if(r.ok){document.getElementById('aia-stxt').textContent='Iniciando...';document.getElementById('aia-dot').style.background='var(--aia-yellow)';}
-    else{alert(r.msg||'Erro ao ligar');}
+    if(r.ok && r.needs_rebuild){
+      const txt=document.getElementById('aia-stxt');
+      txt.textContent='Processo MORTO — faça REBUILD no Easypanel';
+      txt.style.color='#ef4444';
+      document.getElementById('aia-dot').style.background='var(--aia-red)';
+      alert('Atenção:\n\n'+r.msg+'\n\nO botão Ligar apenas reativa a flag — não reanima processo morto. Faça REBUILD no Easypanel agora.');
+    }else if(r.ok){
+      document.getElementById('aia-stxt').textContent='Iniciando...';
+      document.getElementById('aia-dot').style.background='var(--aia-yellow)';
+    }else{alert(r.msg||'Erro ao ligar');}
   }catch(e){alert('Erro: '+e);}
   b.textContent='▶ Ligar';b.disabled=false;setTimeout(aiaLoadStatus,5000);
 }
