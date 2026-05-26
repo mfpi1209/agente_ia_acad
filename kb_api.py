@@ -4783,37 +4783,223 @@ async def delete_alert(alert_id: int):
         return {"deleted": cur.rowcount > 0}
 
 
-# (2026-05-26) Proxy reverso interno para dashboard_server.py (port 8050).
-# O navegador acessa /api/aia/* (mesmo dominio) e o kb_api faz o forward
-# para localhost:8050/api/*. Resolve o problema da aba 'Agente IA' que
-# tentava fetch direto em http://localhost:8050 (so funciona se o cliente
-# estivesse na mesma maquina).
-from fastapi import Request as _FAReq
-from fastapi.responses import Response as _FAResp
-_AIA_INTERNAL_BASE = 'http://127.0.0.1:8050'
+# ====================================================================
+# (2026-05-26) ROTAS DO DASHBOARD AGENTE IA - migradas de
+# dashboard_server.py para o mesmo processo. Antes dependiam de outro
+# servidor em :8050 que nao subia em producao. Agora tudo num so lugar.
+# Prefixo /api/aia/* — o JS do Cockpit usa const AIA='/api/aia'.
+# ====================================================================
+from psycopg2.extras import RealDictCursor as _AiaRDC
 
-@app.api_route('/api/aia/{path:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
-async def _aia_proxy(path: str, request: _FAReq):
-    url = f'{_AIA_INTERNAL_BASE}/{path}'
+
+def _aia_conn():
+    """Conexao psycopg2 dedicada para rotas AIA (similar a dashboard_server)."""
+    import psycopg2 as _aia_pg
+    return _aia_pg.connect(
+        host=os.environ.get('DB_HOST', 'localhost'),
+        port=int(os.environ.get('DB_PORT', 5432)),
+        user=os.environ.get('DB_USER', 'postgres'),
+        password=os.environ.get('DB_PASSWORD', ''),
+        dbname=os.environ.get('DB_NAME', 'log_conversa'),
+    )
+
+
+@app.get("/api/aia/api/stats")
+def aia_stats(days: int = 7):
+    days = max(1, min(int(days or 7), 90))
+    conn = _aia_conn()
+    cur = conn.cursor(cursor_factory=_AiaRDC)
+    from datetime import datetime as _dt, timedelta as _td
+    since = (_dt.now() - _td(days=days)).strftime('%Y-%m-%d')
+    cur.execute("SELECT COUNT(*) as total FROM interaction_summary WHERE created_at >= %s", (since,))
+    total = cur.fetchone()['total']
+    cur.execute("SELECT tema, COUNT(*) as cnt FROM interaction_summary WHERE created_at >= %s GROUP BY tema ORDER BY cnt DESC", (since,))
+    temas = cur.fetchall()
+    cur.execute("SELECT sentimento, COUNT(*) as cnt FROM interaction_summary WHERE created_at >= %s GROUP BY sentimento ORDER BY cnt DESC", (since,))
+    sentimentos = cur.fetchall()
+    cur.execute("SELECT nps_implicito, COUNT(*) as cnt FROM interaction_summary WHERE created_at >= %s AND nps_implicito IS NOT NULL GROUP BY nps_implicito ORDER BY nps_implicito", (since,))
+    nps = cur.fetchall()
+    cur.execute("SELECT resolvido, COUNT(*) as cnt FROM interaction_summary WHERE created_at >= %s GROUP BY resolvido ORDER BY cnt DESC", (since,))
+    resolvido = cur.fetchall()
+    cur.execute("SELECT DATE(created_at) as d, COUNT(*) as cnt FROM interaction_summary WHERE created_at >= %s GROUP BY d ORDER BY d", (since,))
+    por_dia = [{'d': r['d'].isoformat(), 'cnt': r['cnt']} for r in cur.fetchall()]
+    cur.execute("SELECT subtema, COUNT(*) as cnt FROM interaction_summary WHERE created_at >= %s AND subtema IS NOT NULL GROUP BY subtema ORDER BY cnt DESC LIMIT 15", (since,))
+    subtemas = cur.fetchall()
+    cur.execute("SELECT ROUND(AVG(nps_implicito)::numeric, 1) as avg_nps FROM interaction_summary WHERE created_at >= %s AND nps_implicito IS NOT NULL", (since,))
+    avg_nps = cur.fetchone()['avg_nps']
+    cur.execute("SELECT COUNT(*) as cnt FROM interaction_summary WHERE created_at >= %s AND resolvido IN ('sim', 'parcial')", (since,))
+    resolvidos = cur.fetchone()['cnt']
+    taxa_res = round(resolvidos / total * 100, 1) if total > 0 else 0
+    cur.execute("""
+        SELECT COUNT(*) FILTER (WHERE nps_implicito >= 9) as promotores,
+               COUNT(*) FILTER (WHERE nps_implicito >= 7 AND nps_implicito <= 8) as neutros,
+               COUNT(*) FILTER (WHERE nps_implicito <= 6) as detratores,
+               COUNT(*) FILTER (WHERE nps_implicito IS NOT NULL) as total_nps
+        FROM interaction_summary WHERE created_at >= %s
+    """, (since,))
+    nps_row = cur.fetchone()
+    nps_score = 0
+    if nps_row['total_nps'] > 0:
+        nps_score = round(((nps_row['promotores'] - nps_row['detratores']) / nps_row['total_nps']) * 100, 1)
+    cur.execute("""
+        SELECT EXTRACT(HOUR FROM created_at)::int as h, COUNT(*) as cnt
+        FROM interaction_summary WHERE created_at >= %s
+        GROUP BY h ORDER BY h
+    """, (since,))
+    por_hora = cur.fetchall()
+    cur.execute("""
+        SELECT COUNT(*) FILTER (WHERE avaliacao = 'correta') as corretas,
+               COUNT(*) FILTER (WHERE avaliacao = 'incorreta') as incorretas,
+               COUNT(*) FILTER (WHERE avaliacao IS NULL OR trim(avaliacao) = '') as pendentes
+        FROM interaction_summary WHERE created_at >= %s
+    """, (since,))
+    av = cur.fetchone()
+    avaliadas = (av['corretas'] or 0) + (av['incorretas'] or 0)
+    taxa_acerto = round((av['corretas'] or 0) / avaliadas * 100, 1) if avaliadas > 0 else 0
+    cur.execute("""
+        SELECT phone, student_name, COUNT(*) as cnt,
+               ROUND(AVG(nps_implicito)::numeric, 1) as avg_nps
+        FROM interaction_summary
+        WHERE created_at >= %s AND student_name IS NOT NULL AND trim(student_name) <> ''
+        GROUP BY phone, student_name
+        ORDER BY cnt DESC LIMIT 8
+    """, (since,))
+    top_alunos = cur.fetchall()
+    kb_total = kb_emb = 0
     try:
-        params = dict(request.query_params)
-        method = request.method
-        body = await request.body() if method in ('POST', 'PUT', 'PATCH') else None
-        headers = {k: v for k, v in request.headers.items()
-                   if k.lower() not in ('host', 'content-length')}
-        r = requests.request(method, url, params=params, data=body, headers=headers, timeout=20)
-        return _FAResp(content=r.content, status_code=r.status_code,
-                       media_type=r.headers.get('content-type', 'application/json'))
-    except requests.exceptions.ConnectionError:
-        return _FAResp(
-            content=b'{"error":"dashboard_server.py nao esta rodando em :8050"}',
-            status_code=503, media_type='application/json',
+        cur.execute("SELECT COUNT(*) as c FROM knowledge_base")
+        kb_total = cur.fetchone()['c']
+        cur.execute("SELECT COUNT(*) as c FROM knowledge_base WHERE embedding IS NOT NULL")
+        kb_emb = cur.fetchone()['c']
+    except Exception:
+        pass
+    conn.close()
+    return {
+        'total': total, 'temas': temas, 'sentimentos': sentimentos, 'nps': nps,
+        'resolvido': resolvido, 'por_dia': por_dia, 'subtemas': subtemas,
+        'avg_nps': float(avg_nps) if avg_nps else 0, 'taxa_resolucao': taxa_res,
+        'nps_score': nps_score, 'por_hora': por_hora,
+        'promotores': nps_row['promotores'], 'neutros': nps_row['neutros'],
+        'detratores': nps_row['detratores'],
+        'avaliacoes': {
+            'corretas': av['corretas'] or 0,
+            'incorretas': av['incorretas'] or 0,
+            'pendentes': av['pendentes'] or 0,
+            'taxa_acerto': taxa_acerto,
+        },
+        'top_alunos': [
+            {'phone': r['phone'], 'name': r['student_name'], 'cnt': r['cnt'],
+             'avg_nps': float(r['avg_nps']) if r['avg_nps'] is not None else None}
+            for r in top_alunos
+        ],
+        'knowledge_base': {'total': kb_total, 'com_embedding': kb_emb},
+    }
+
+
+@app.get("/api/aia/api/alerts")
+def aia_alerts():
+    conn = _aia_conn()
+    cur = conn.cursor(cursor_factory=_AiaRDC)
+    cur.execute("""
+        SELECT id, phone, student_name, tema, sentimento, nps_implicito,
+               pergunta_aluno, resposta_agente, conv_id, created_at
+        FROM interaction_summary
+        WHERE (nps_implicito <= 5 OR sentimento = 'frustrado')
+          AND created_at >= NOW() - INTERVAL '24 hours'
+        ORDER BY id DESC LIMIT 20
+    """)
+    rows = cur.fetchall()
+    for r in rows:
+        if r.get('created_at'):
+            r['created_at'] = r['created_at'].isoformat()
+    conn.close()
+    return rows
+
+
+@app.get("/api/aia/api/recent")
+def aia_recent(limit: int = 30, page: int = 1, tema: str = None,
+               sentimento: str = None, search: str = None, avaliacao: str = None):
+    limit = max(1, min(int(limit or 30), 200))
+    page = max(1, int(page or 1))
+    conn = _aia_conn()
+    cur = conn.cursor(cursor_factory=_AiaRDC)
+    where = ["1=1"]
+    params = []
+    if tema:
+        where.append("tema = %s"); params.append(tema)
+    if sentimento:
+        where.append("sentimento = %s"); params.append(sentimento)
+    if avaliacao == 'pendente':
+        where.append("(avaliacao IS NULL OR trim(avaliacao) = '')")
+    elif avaliacao in ('correta', 'incorreta'):
+        where.append("avaliacao = %s"); params.append(avaliacao)
+    if search:
+        where.append("(student_name ILIKE %s OR pergunta_aluno ILIKE %s OR phone ILIKE %s)")
+        params.extend([f'%{search}%'] * 3)
+    w = " AND ".join(where)
+    offset = (page - 1) * limit
+    cur.execute(f"SELECT COUNT(*) as cnt FROM interaction_summary WHERE {w}", params)
+    total = cur.fetchone()['cnt']
+    cur.execute(f"""
+        SELECT id, phone, student_name, tema, subtema, sentimento, resolvido,
+               nps_implicito, pergunta_aluno, resposta_agente, avaliacao, conv_id,
+               created_at
+        FROM interaction_summary WHERE {w}
+        ORDER BY id DESC LIMIT %s OFFSET %s
+    """, params + [limit, offset])
+    rows = cur.fetchall()
+    for r in rows:
+        if r.get('created_at'):
+            r['created_at'] = r['created_at'].isoformat()
+    conn.close()
+    return {'total': total, 'page': page, 'limit': limit, 'rows': rows}
+
+
+@app.post("/api/aia/api/avaliar/{record_id}")
+def aia_avaliar(record_id: int, avaliacao: str):
+    if avaliacao not in ('correta', 'incorreta', None, ''):
+        return {"error": "Valor invalido"}
+    conn = _aia_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE interaction_summary SET avaliacao = %s WHERE id = %s",
+                (avaliacao or None, record_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/aia/api/corrigir/{record_id}")
+async def aia_corrigir(record_id: int, request: Request):
+    body_json = await request.json()
+    resposta = (body_json.get('resposta_correta') or '').strip()
+    if not resposta:
+        return {"error": "Resposta vazia"}
+    conn = _aia_conn()
+    cur = conn.cursor(cursor_factory=_AiaRDC)
+    cur.execute("UPDATE interaction_summary SET avaliacao = 'incorreta' WHERE id = %s", (record_id,))
+    cur.execute("SELECT pergunta_aluno, tema FROM interaction_summary WHERE id = %s", (record_id,))
+    row = cur.fetchone()
+    if not row or not row.get('pergunta_aluno'):
+        conn.commit(); conn.close()
+        return {"error": "Registro nao encontrado"}
+    pergunta = row['pergunta_aluno']
+    tema = row.get('tema') or 'OUTRO'
+    try:
+        import openai as _openai_aia
+        client = _openai_aia.OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
+        emb_resp = client.embeddings.create(
+            input=pergunta[:2000], model='text-embedding-3-small', dimensions=256,
         )
+        embedding = emb_resp.data[0].embedding
+        emb_str = '[' + ','.join(str(x) for x in embedding) + ']'
+        cur.execute("""
+            INSERT INTO knowledge_base (pergunta_aluno, resposta_atendente, tema, embedding, created_at)
+            VALUES (%s, %s, %s, %s::float8[], NOW())
+        """, (pergunta, resposta, tema, emb_str))
     except Exception as e:
-        return _FAResp(
-            content=f'{{"error":"proxy_aia: {str(e)[:200]}"}}'.encode(),
-            status_code=500, media_type='application/json',
-        )
+        print(f"  [aia_corrigir] Erro KB: {e}")
+    conn.commit(); conn.close()
+    return {"ok": True, "msg": "Correcao salva na base de conhecimento"}
 
 
 if __name__ == '__main__':
