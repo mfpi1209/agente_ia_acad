@@ -5454,6 +5454,9 @@ def process_in_hours_rescue():
                 # entender", "Deu certo" ficavam aguardando atendente.
                 _is_fw = _is_farewell_message(_last_aluno_body) if _last_aluno_body else False
                 _is_rc = _is_resolution_confirmation(_last_aluno_body) if _last_aluno_body else False
+                # (2026-05-27) GUARD: sauda\u00e7\u00e3o pura nunca encerra.
+                if _last_aluno_body and _is_pure_greeting(_last_aluno_body):
+                    _is_fw = False; _is_rc = False
                 if _last_aluno_body and (_is_fw or _is_rc):
                     _kind_r = 'despedida' if _is_fw else 'confirmacao_resolucao'
                     p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} ultima msg do aluno = {_kind_r} ('{_last_aluno_body[:40]}') — pulando resgate e fechando")
@@ -5938,7 +5941,10 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
                 pass
 
             # --- DESPEDIDA / CONFIRMACAO DE RESOLUCAO -> FECHAR ---
-            if _is_farewell_message(user_text) or _is_resolution_confirmation(user_text):
+            # (2026-05-27) GUARD: sauda\u00e7\u00e3o pura nunca encerra.
+            if not _is_pure_greeting(user_text) and (
+                _is_farewell_message(user_text) or _is_resolution_confirmation(user_text)
+            ):
                 _kind = 'despedida' if _is_farewell_message(user_text) else 'confirmacao_resolucao'
                 p(f"  [QUEUE-SWEEP] {_kind} conv={cid[:12]} ...{phone[-4:]} ({int(age_min)}min) '{user_text[:40]}' -> fechando")
                 if _kind == 'confirmacao_resolucao':
@@ -6379,12 +6385,32 @@ def _is_resolution_confirmation(text):
         return False
     t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
                      if unicodedata.category(c) != 'Mn')
+    # (2026-05-27) Sauda\u00e7\u00e3o pura NUNCA \u00e9 confirmacao de resolu\u00e7\u00e3o.
+    t_clean = ''.join(c for c in t_norm if c.isalnum() or c.isspace()).strip()
+    if t_clean in _GREETING_ONLY_PHRASES:
+        return False
     for phrase in _RESOLUTION_PHRASES:
         ph_norm = ''.join(c for c in unicodedata.normalize('NFD', phrase)
                           if unicodedata.category(c) != 'Mn')
         if ph_norm in t_norm:
             return True
     return False
+
+
+def _is_pure_greeting(text):
+    """True se a mensagem do aluno \u00e9 APENAS uma sauda\u00e7\u00e3o (sem outro conte\u00fado).
+    Usado como guard defensivo em qualquer caminho que poderia tratar
+    sauda\u00e7\u00e3o como despedida/encerramento."""
+    if not text:
+        return False
+    import unicodedata
+    t = text.strip().lower()
+    if len(t) > 30:
+        return False
+    t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
+                     if unicodedata.category(c) != 'Mn')
+    t_clean = ''.join(c for c in t_norm if c.isalnum() or c.isspace()).strip()
+    return t_clean in _GREETING_ONLY_PHRASES
 
 
 # Confirmacao de pagamento (resposta a disparo de boleto/mensalidade).
@@ -6659,6 +6685,9 @@ def process_post_close_rescue():
             # nao reconhecia como motivo de fechamento.
             _is_pc_fw = _is_farewell_message(user_text)
             _is_pc_rc = _is_resolution_confirmation(user_text)
+            # (2026-05-27) GUARD: sauda\u00e7\u00e3o pura nunca encerra.
+            if _is_pure_greeting(user_text):
+                _is_pc_fw = False; _is_pc_rc = False
             if _is_pc_fw or _is_pc_rc:
                 if _is_pc_rc:
                     farewell_reply = (
@@ -11204,6 +11233,12 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     try:
         _is_farewell = _is_farewell_message(question)
         _is_resolution = _is_resolution_confirmation(question)
+        # (2026-05-27) GUARD DEFINITIVO: sauda\u00e7\u00e3o pura NUNCA encerra.
+        # Caso reportado mais de uma vez: aluno mandava 'boa tarde' e conv
+        # era encerrada com 'Obrigado pelo contato...'.
+        if _is_pure_greeting(question):
+            _is_farewell = False
+            _is_resolution = False
         if (_is_farewell or _is_resolution) and not is_button_click:
             # Confirma que a conv NAO é uma abertura nova — precisa ter
             # historico previo (>=2 msgs no cache) para nao fechar conv que
