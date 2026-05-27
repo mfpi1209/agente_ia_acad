@@ -5261,7 +5261,10 @@ def process_after_hours_rescue():
 _IN_HOURS_RESCUE_RECENT = {}  # conv_id -> last_rescue_ts
 IN_HOURS_RESCUE_AGE_MIN = 5
 IN_HOURS_RESCUE_MAX_AGE_MIN = 6 * 60  # ignora alem disso (provavelmente foi resolvido manualmente)
-IN_HOURS_RESCUE_COOLDOWN_S = 30 * 60  # nao re-resgata mesma conv em 30min
+IN_HOURS_RESCUE_COOLDOWN_S = 30 * 60  # nao re-resgata mesma conv em 30min (sucesso)
+# (2026-05-27) Para casos de falha (sem consultor, sem lead, transfer falhou),
+# usar cooldown curto para que o proximo ciclo tente novamente em minutos.
+_IN_HOURS_RESCUE_RETRY_S = 2 * 60  # retry em 2 min apos falha temporaria
 
 
 def _ensure_lead_for_rescue(phone, name=''):
@@ -5316,7 +5319,16 @@ def process_in_hours_rescue():
     _RESCUE_MAX_PER_EXEC = 40
     now_ts = time.time()
     rescued = 0
+    _rescue_iter = 0
     for c in convs:
+        _rescue_iter += 1
+        # (2026-05-27) Heartbeat a cada 20 convs para nao congelar o Cockpit
+        # durante processameto de grandes lotes (ex: pos-disparo com 1000 convs).
+        if _rescue_iter % 20 == 0:
+            try:
+                _heartbeat('online', f'in_hours_rescue iter={_rescue_iter} rescued={rescued}')
+            except Exception:
+                pass
         if rescued >= _RESCUE_MAX_PER_EXEC:
             p(f"  [IN-HOURS-RESCUE] limite por execucao atingido ({_RESCUE_MAX_PER_EXEC}) - continua no proximo ciclo")
             break
@@ -5543,7 +5555,9 @@ def process_in_hours_rescue():
                 ho_chk_m, ho_chk_t = _is_handoff_active(cid)
                 if ho_chk_m in _HUMAN_HANDOFF_MOTIVOS and ho_chk_t:
                     p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} handoff({ho_chk_m}) ativo p/ {ho_chk_t} — NAO redistribui")
-                    _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                    # (2026-05-27) Cooldown CURTO: handoff pode expirar em minutos,
+                    # entao verificamos novamente em 2min.
+                    _IN_HOURS_RESCUE_RECENT[cid] = now_ts - IN_HOURS_RESCUE_COOLDOWN_S + _IN_HOURS_RESCUE_RETRY_S
                     continue
             except Exception:
                 pass
@@ -5563,7 +5577,9 @@ def process_in_hours_rescue():
                     )
                 except Exception as e_pe:
                     p(f"  [IN-HOURS-RESCUE] erro pending: {e_pe}")
-                _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                # (2026-05-27) Cooldown CURTO em falha — tenta novamente em 2min
+                # quando consultor voltar a estar disponivel.
+                _IN_HOURS_RESCUE_RECENT[cid] = now_ts - IN_HOURS_RESCUE_COOLDOWN_S + _IN_HOURS_RESCUE_RETRY_S
                 continue
 
             consultant_name = consultant.get('nome', '')
@@ -5587,7 +5603,9 @@ def process_in_hours_rescue():
                     )
                 except Exception:
                     pass
-                _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                # (2026-05-27) Cooldown CURTO — tentativa de criar lead pode
+                # ser bem-sucedida no proximo ciclo (2 min).
+                _IN_HOURS_RESCUE_RECENT[cid] = now_ts - IN_HOURS_RESCUE_COOLDOWN_S + _IN_HOURS_RESCUE_RETRY_S
                 continue
 
             # Transfere ANTES de enviar a apology. Se transferencia falhar,
@@ -5641,7 +5659,8 @@ def process_in_hours_rescue():
                     )
                 except Exception:
                     pass
-                _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                # (2026-05-27) Transfer falhou: cooldown CURTO para retry rapido.
+                _IN_HOURS_RESCUE_RECENT[cid] = now_ts - IN_HOURS_RESCUE_COOLDOWN_S + _IN_HOURS_RESCUE_RETRY_S
                 continue
 
             # Agora sim envia a apology — transferencia confirmada
