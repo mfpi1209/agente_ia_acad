@@ -5876,20 +5876,60 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
                 acted += 1
                 continue
 
-            # --- ORFA >= 3min: desbloqueia dedup para o loop principal atender ---
-            if age_min >= QUEUE_FAST_SWEEP_MIN_AGE_MIN and last_msg:
-                mid = last_msg.get('id', '')
-                if mid and mid in processed_msg_ids:
-                    _queue_force_unblock_message(cid, mid)
-                    unblocked += 1
-                    p(f"  [QUEUE-SWEEP] desbloqueio conv={cid[:12]} ...{phone[-4:]} ({int(age_min)}min) '{user_text[:40]}'")
+            # --- ORFA >= 3min: distribui diretamente para consultor disponivel ---
+            # (2026-05-27) Antes so desbloqueia dedup — main loop ainda precisava
+            # de um ciclo extra para atender. Agora distribui na hora.
+            # Cobre casos onde a conversa esta em 'unstarted' (pos-disparo) e o
+            # main loop nao chega a processar a msg (dedup ja resolvido ou msg
+            # sem ID). Funcao roda TODO ciclo, garantia de max ~5s na fila.
+            if age_min >= QUEUE_FAST_SWEEP_MIN_AGE_MIN:
+                atts = c.get('attendants') or []
+                if not atts:
+                    # Tenta distribuir diretamente
+                    try:
+                        _cons = get_available_consultant()
+                        if _cons:
+                            _cname = _cons.get('nome', '') or _cons.get('responsavel', '')
+                            _cfirst = _cname.split()[0] if _cname else _cname
+                            _lead_id, _biz_id, _created = _ensure_lead_for_rescue(phone, name)
+                            if _lead_id:
+                                _bok = _dcz_transfer_business(phone, _cname, lead_id=_lead_id)
+                                _lok = _dcz_transfer_lead(_lead_id, _cname)
+                                _cok = _dcz_transfer_chat(cid, _cname)
+                                if _cok:
+                                    _supabase_increment_fila(_cons.get('id', ''), int(_cons.get('fila', 0)))
+                                    _apology = (
+                                        f"Oii{(' ' + first) if first else ''}! Desculpa a demora para te responder 🙏\n\n"
+                                        f"Vou te conectar agora com o(a) *{_cfirst}*, que vai dar continuidade ao seu atendimento. "
+                                        f"Em pouquinho ele(a) assume aqui 😊"
+                                    )
+                                    try:
+                                        send_and_track(cid, _apology)
+                                    except Exception:
+                                        pass
+                                    p(f"  [QUEUE-SWEEP] distribuido conv={cid[:12]} ...{phone[-4:]} ({int(age_min)}min) -> {_cfirst}")
+                                    acted += 1
+                                    _QUEUE_SWEEP_RECENT[cid] = now_ts
+                                    if last_msg and last_msg.get('id'):
+                                        processed_msg_ids.add(last_msg['id'])
+                                    continue
+                    except Exception as e_dist:
+                        p(f"  [QUEUE-SWEEP] erro distribuicao {cid[:12]}: {e_dist}")
+                # Se nao distribuiu (sem consultor, ou ja tem atendente),
+                # cai no desbloqueio classico para o loop principal tentar.
+                if last_msg:
+                    mid = last_msg.get('id', '')
+                    if mid and mid in processed_msg_ids:
+                        _queue_force_unblock_message(cid, mid)
+                        unblocked += 1
+                        p(f"  [QUEUE-SWEEP] desbloqueio conv={cid[:12]} ...{phone[-4:]} ({int(age_min)}min) '{user_text[:40]}'")
                 _QUEUE_SWEEP_RECENT[cid] = now_ts
 
         except Exception as e_one:
             p(f"  [QUEUE-SWEEP] erro conv {c.get('id','?')[:12]}: {e_one}")
 
     if acted or unblocked:
-        p(f"  [QUEUE-SWEEP] acoes={acted} desbloqueios={unblocked} (waiting={len(waiting_convs)})")
+        p(f"  [QUEUE-SWEEP] distribuidos={acted} desbloqueios={unblocked} (waiting={len(waiting_convs)})")
 
 
 _HANDOFF_FULFILL_RECENT = {}
