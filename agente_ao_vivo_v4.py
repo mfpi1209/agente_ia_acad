@@ -4101,10 +4101,21 @@ def log_to_db(conv_id, question, response, confidence, action):
 
 # ============================================================
 # DISPARO REPLY TRACKER (2026-05-27)
-# Detecta quando um aluno responde a um template (disparo) e registra
-# na interaction_summary com tema='DISPARO' — uma vez por conversa.
+# Detecta quando um aluno responde a um disparo (template HSM enviado via
+# Cockpit) e registra na interaction_summary com tema='DISPARO'.
+#
+# Estrategia: usar data de referencia (DISPATCH_REF_DATE) do disparo ativo.
+# Qualquer msg recebida do aluno com ts >= referencia eh tratada como
+# retorno de disparo. Idempotente por conv_id.
+#
+# Bug anterior: a deteccao por campo `header`/`type` da msg falhava
+# porque os templates do DCZ academico nao incluem esses campos em todas
+# as msgs — so em UM template antigo de marco. Isso fazia conversas com
+# msgs antigas do aluno (anteriores ao disparo) serem tratadas como
+# retorno valido.
 # ============================================================
 _DISPARO_LOGGED_CONVS: set = set()   # dedup in-memory (limpo a cada rebuild)
+DISPATCH_REF_DATE = os.environ.get('DISPATCH_REF_DATE', '2026-05-25T18:00:00')
 
 
 def _log_dispatch_reply_once(conv_id, phone, name, user_msg, response_msg=''):
@@ -4155,35 +4166,25 @@ def _msg_ts(m):
 
 
 def _is_dispatch_reply(msgs, last_user_msg=None):
-    """True somente se houver template ENVIADO E mensagem RECEBIDA do aluno
-    com timestamp POSTERIOR ao do template.
+    """True se aluno tem mensagem recebida com ts >= DISPATCH_REF_DATE.
 
-    (2026-05-27) Bug reportado: aluna Maria Ivone foi marcada como retorno
-    de disparo, mas a unica msg dela na conv era de fevereiro/2026 (antes
-    do disparo). O detector antigo so checava existencia de template +
-    existencia de msg recebida, sem comparar ordem.
+    (2026-05-27 v2) Abordagem por data de referencia do disparo ativo.
+    A deteccao anterior por campo `header`/`type` falhava porque os
+    templates HSM enviados pelo Cockpit nao expoem esses campos em todas
+    as msgs. Como o usuario faz disparos em datas conhecidas, usamos
+    DISPATCH_REF_DATE como divisor de aguas.
     """
-    if not msgs:
+    if not msgs or not DISPATCH_REF_DATE:
         return False
-    latest_template_ts = ''
-    for m in msgs:
-        if not m.get('received', False) and _is_template_message(m):
-            ts = _msg_ts(m)
-            if ts > latest_template_ts:
-                latest_template_ts = ts
-    if not latest_template_ts:
-        return False
-
-    # Procura msg recebida do aluno com ts > latest_template_ts
     candidate = last_user_msg
     if candidate and candidate.get('received', False):
         cts = _msg_ts(candidate)
-        if cts and cts > latest_template_ts:
+        if cts and cts >= DISPATCH_REF_DATE:
             return True
     for m in msgs:
         if m.get('received', False):
             cts = _msg_ts(m)
-            if cts and cts > latest_template_ts:
+            if cts and cts >= DISPATCH_REF_DATE:
                 return True
     return False
 
