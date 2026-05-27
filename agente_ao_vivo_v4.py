@@ -5510,7 +5510,7 @@ def process_in_hours_rescue():
                         time.sleep(1.0)
                         # Distribui ESPECIFICAMENTE para Wesley (trigger_retention
                         # encontra o lead_id via DCZ businesses se passar None)
-                        trigger_retention(cid, None, _last_aluno_body)
+                        trigger_retention(cid, None, _last_aluno_body, phone=phone)
                         update_pending_escalation_status(
                             cid, 'distributed_retention',
                             note=f'In-hours rescue: retencao -> Wesley (msg: {_last_aluno_body[:60]})',
@@ -5931,7 +5931,7 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
                 try:
                     send_and_track(cid, _hum, force=True)
                     _mark_handoff_active(cid, 'retention', target='Wesley', ttl_s=8 * 3600, body=_hum)
-                    trigger_retention(cid, None, user_text)
+                    trigger_retention(cid, None, user_text, phone=phone)
                 except Exception as e_ret:
                     p(f"  [QUEUE-SWEEP] erro retencao: {e_ret}")
                 if last_msg and last_msg.get('id'):
@@ -6227,7 +6227,9 @@ _FAREWELL_KEYWORDS = (
     'beleza', 'blz', 'ok', 'okay', 'okey', 'show', 'show de bola',
     'perfeito', 'otimo', 'ótimo', 'maravilha', 'tranquilo', 'tranquila',
     'entendido', 'entendida', 'ciente', 'compreendido', 'compreendi',
-    'bom dia', 'boa tarde', 'boa noite',
+    # (2026-05-27) Removidos: 'bom dia', 'boa tarde', 'boa noite'.
+    # Quando aluno abre conversa com saudacao isolada, o agente
+    # confundia com despedida e encerrava o atendimento.
     'nada', 'so isso', 'só isso', 'era isso', 'so era isso', 'só era isso',
     'pra voce tambem', 'pra você também', 'para voce tambem', 'para você também',
     'pra ti tambem', 'pra ti também', 'igualmente',
@@ -7677,7 +7679,27 @@ def process_supervisor_loop():
                 if _supervisor_recent_action(cid, 'auto_close'):
                     continue
                 lb_low = (last_body or '').lower()
+                # (2026-05-27) Quando a ultima msg JA EH de encerramento (do bot DCZ
+                # ou do agente), NAO mandamos nova msg de close — apenas FINALIZAMOS
+                # a conversa no DCZ (move biz para Encerramento + finish). Antes,
+                # 'continue' deixava a conv aberta indefinidamente esperando PRIO-1
+                # (15min), gerando filas como "Muito obrigado por falar..." parado.
                 if any(fp.lower() in lb_low for fp in LAST_MSG_CLOSE_PHRASES):
+                    if _supervisor_has_attendant_fresh(cid):
+                        continue
+                    ho_motivo_cl0, _ = _is_handoff_active(cid)
+                    if ho_motivo_cl0:
+                        continue
+                    if _signature_recently_sent(cid, 'auto_close_silent', window_s=24 * 3600):
+                        continue
+                    p(f"  [SUPERVISOR-CLOSE] ...{phone[-4:] if phone else '????'} {int(silence_s)}s last_msg=close — finalizando sem nova msg")
+                    close_conversation_crm(cid, phone=phone)
+                    _register_signature(cid, 'auto_close_silent', last_body or '')
+                    _supervisor_record_action(cid, 'auto_close')
+                    _sync_conv_state_after_supervisor(cid, phone, followup_stage=0, waiting=False)
+                    _clear_handoff_active(cid, reason='auto_close_silent')
+                    conversation_greeted.discard(cid)
+                    close_done += 1
                     continue
                 if _supervisor_has_attendant_fresh(cid):
                     p(f"  [SUPERVISOR-CLOSE] skip ...{phone[-4:] if phone else '????'} humano ativo / finalizada")
@@ -9511,8 +9533,12 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
             meta_typing_on()
             send_and_track(conv_id, busy_msg)
             _register_signature(conv_id, 'human_busy', busy_msg)
+            # (2026-05-27) TTL reduzido de 6h para 30min. Antes, conversas marcadas
+            # com 'human_unavailable' ficavam BLOQUEADAS para resgate por 6h, mesmo
+            # quando havia consultor disponivel logo apos. Agora o resgate
+            # in-hours pode reverter o handoff em ate 30min e distribuir.
             _mark_handoff_active(conv_id, 'human_unavailable', target='',
-                                 ttl_s=6 * 3600, body=busy_msg)
+                                 ttl_s=30 * 60, body=busy_msg)
         transfer_to_human(conv_id, reason)
         try:
             record_pending_escalation(
@@ -9741,9 +9767,41 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
     return True
 
 
-def trigger_retention(conv_id, lead_id, question):
-    """Aciona Retenção: tag + responsável Wesley no lead + nota interna."""
+def trigger_retention(conv_id, lead_id, question, phone=''):
+    """Aciona Retenção: tag + responsável Wesley no lead + nota interna + Negócio para Atendimento.
+
+    (2026-05-27) Reescrito: usa _dcz_transfer_business (com fallback robusto)
+    em vez de busca manual com _current_phone (que causava race condition
+    em processamento paralelo — Negócio ficava 'Sem atendente' em BASE DE ALUNOS).
+    Aceita parametro 'phone' opcional; se vazio, tenta descobrir via conv.
+    """
     try:
+        # Descobre phone se nao recebido
+        if not phone:
+            try:
+                r_conv = requests.get(
+                    f'{DCZ_MSG}/messaging/conversations/{conv_id}',
+                    headers=H, timeout=10
+                )
+                if r_conv.status_code == 200:
+                    cd = r_conv.json() or {}
+                    ct = cd.get('contact', {}) or {}
+                    phone = (ct.get('phoneNumber','') or ct.get('contactId','') or '').replace('+','').replace(' ','')
+                    if phone.startswith('55') and len(phone) > 11:
+                        phone = phone[2:]
+            except Exception as e_ph:
+                p(f"  [RETENÇÃO] Erro buscar phone da conv: {e_ph}")
+
+        # Garante lead_id (cria se nao tem)
+        if not lead_id and phone:
+            try:
+                _lid, _bid, _ = _ensure_lead_for_rescue(phone, '')
+                if _lid:
+                    lead_id = _lid
+                    p(f"  [RETENÇÃO] Lead garantido: {lead_id[:16]}")
+            except Exception as e_le:
+                p(f"  [RETENÇÃO] erro ensure_lead: {e_le}")
+
         if lead_id:
             r_lead = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
             existing_tags = []
@@ -9765,34 +9823,14 @@ def trigger_retention(conv_id, lead_id, question):
             )
             p(f"  [RETENÇÃO] Lead: tag + attendant Wesley (status={r.status_code})")
 
+            # Transfere Negocio para Wesley + Atendimento usando funcao robusta
             try:
-                r_biz = requests.get(
-                    f'{DCZ_CRM}/businesses', headers=H,
-                    params={'search': _current_phone or PHONE_TO_MONITOR, 'limit': 5}, timeout=10
-                )
-                if r_biz.status_code == 200:
-                    biz_data = r_biz.json()
-                    biz_list = biz_data.get('data', biz_data) if isinstance(biz_data, dict) else biz_data
-                    for biz in (biz_list if isinstance(biz_list, list) else []):
-                        biz_lead = biz.get('lead', {})
-                        biz_lead_id = biz_lead.get('id', '') if isinstance(biz_lead, dict) else str(biz_lead)
-                        if biz_lead_id == lead_id:
-                            biz_id = biz.get('id')
-                            rb = requests.patch(
-                                f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
-                                json={'attendant': {'id': RETENTION_WESLEY_CRM_ID}}, timeout=10
-                            )
-                            p(f"  [RETENÇÃO] Negócio attendant -> Wesley (status={rb.status_code})")
-                            rb2 = requests.patch(
-                                f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
-                                json={'stageId': STAGE_ATENDIMENTO_ID}, timeout=10
-                            )
-                            p(f"  [RETENÇÃO] Negócio -> Atendimento (status={rb2.status_code})")
-                            break
+                _biz_ok = _dcz_transfer_business(phone, 'Wesley', lead_id=lead_id)
+                p(f"  [RETENÇÃO] Negócio -> Wesley + Atendimento (ok={_biz_ok})")
             except Exception as e2:
                 p(f"  [RETENÇÃO] Erro ao atualizar negócio: {e2}")
         else:
-            p(f"  [RETENÇÃO] Sem lead_id, pulando transferência")
+            p(f"  [RETENÇÃO] Sem lead_id mesmo apos tentativa, pulando lead/negocio")
 
         note = (
             f"🔴 *Retenção - Agente IA*\n"
@@ -11695,7 +11733,8 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                                  ttl_s=8 * 3600, body=RETENTION_MSG)
 
             lead_id = student_profile.get('lead_id') if student_profile else None
-            trigger_retention(conv_id, lead_id, question)
+            _ph_ret = _current_phone or (student_profile.get('phone') if student_profile else '') or ''
+            trigger_retention(conv_id, lead_id, question, phone=_ph_ret)
 
             # Apresentação do Wesley enviada pelo agente
             _fname = (student_profile.get('first_name') or '').strip() if student_profile else ''
@@ -12405,7 +12444,8 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                                      ttl_s=8 * 3600, body=_msg_ret)
                 try:
                     lead_id_loc = student_profile.get('lead_id') if student_profile else None
-                    trigger_retention(conv_id, lead_id_loc, question)
+                    _ph_lc = _current_phone or (student_profile.get('phone') if student_profile else '') or ''
+                    trigger_retention(conv_id, lead_id_loc, question, phone=_ph_lc)
                 except Exception as e_lc_ret:
                     p(f"  [LOW-CONF-D4] erro trigger_retention: {e_lc_ret}")
                 waiting_for_client = False; inactivity_start = 0
