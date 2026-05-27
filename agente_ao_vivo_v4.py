@@ -4145,11 +4145,46 @@ def _log_dispatch_reply_once(conv_id, phone, name, user_msg, response_msg=''):
         return False
 
 
-def _is_dispatch_reply(msgs):
-    """Retorna True se alguma mensagem ENVIADA no histórico for um template (disparo HSM)."""
-    for m in (msgs or []):
+def _msg_ts(m):
+    """Extrai timestamp ISO da mensagem (createdAt|timestamp|date|sentAt)."""
+    for k in ('createdAt', 'timestamp', 'date', 'sentAt'):
+        v = m.get(k) if isinstance(m, dict) else None
+        if v:
+            return str(v)
+    return ''
+
+
+def _is_dispatch_reply(msgs, last_user_msg=None):
+    """True somente se houver template ENVIADO E mensagem RECEBIDA do aluno
+    com timestamp POSTERIOR ao do template.
+
+    (2026-05-27) Bug reportado: aluna Maria Ivone foi marcada como retorno
+    de disparo, mas a unica msg dela na conv era de fevereiro/2026 (antes
+    do disparo). O detector antigo so checava existencia de template +
+    existencia de msg recebida, sem comparar ordem.
+    """
+    if not msgs:
+        return False
+    latest_template_ts = ''
+    for m in msgs:
         if not m.get('received', False) and _is_template_message(m):
+            ts = _msg_ts(m)
+            if ts > latest_template_ts:
+                latest_template_ts = ts
+    if not latest_template_ts:
+        return False
+
+    # Procura msg recebida do aluno com ts > latest_template_ts
+    candidate = last_user_msg
+    if candidate and candidate.get('received', False):
+        cts = _msg_ts(candidate)
+        if cts and cts > latest_template_ts:
             return True
+    for m in msgs:
+        if m.get('received', False):
+            cts = _msg_ts(m)
+            if cts and cts > latest_template_ts:
+                return True
     return False
 
 
@@ -5932,10 +5967,9 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
                 continue
 
             # --- DISPARO REPLY TRACKER (2026-05-27) ---
-            # Se o historico tem template enviado E aluno nao eh robo,
-            # registra retorno do disparo na tabulacao (idempotente).
+            # Aluno respondeu APOS o disparo (timestamp > template) e nao eh robo.
             try:
-                if _is_dispatch_reply(msgs) and not _is_external_bot_input(user_text):
+                if _is_dispatch_reply(msgs, last_user_msg=last_msg) and not _is_external_bot_input(user_text):
                     _log_dispatch_reply_once(cid, phone, name, user_text)
             except Exception:
                 pass
