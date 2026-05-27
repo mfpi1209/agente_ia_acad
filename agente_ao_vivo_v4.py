@@ -5125,7 +5125,14 @@ def _was_after_hours_msg_recently_sent(msgs):
 # pós-disparo em massa, 10+ conversas ficavam invisiveis pro agente (e
 # pos-clicks de bot DCZ que mudam status p/ 'opened' tambem). Esta helper
 # unifica os 3 estados ativos e deduplica por id.
-def _fetch_active_conversations(limit_per_status=300, timeout=30):
+#
+# (2026-05-27) BUG CRITICO: a primeira versao usava timeout=60 nos 3 GETs.
+# Quando o DCZ ficava lento, agente travava ate 180s no ciclo e o heartbeat
+# atrasava >120s — cockpit mostrava "processo morto". Reduzido para 15s
+# por GET (max 45s no pior caso). Adicionado _heartbeat entre os GETs
+# para garantir que o cockpit nunca veja o agente como morto durante esta
+# coleta.
+def _fetch_active_conversations(limit_per_status=300, timeout=15):
     """Busca conversas ATIVAS (open + unstarted + opened) e funde sem duplicar.
     Retorna lista de dicts (vazia em caso de erro total). Loga erros parciais
     mas nao falha se 1 dos 3 GETs falhar.
@@ -5133,6 +5140,12 @@ def _fetch_active_conversations(limit_per_status=300, timeout=30):
     seen = set()
     out = []
     for _status in ('open', 'unstarted', 'opened'):
+        # Heartbeat entre cada GET — impede que o cockpit veja o agente
+        # como morto se o DCZ estiver lento. Heartbeat e DB local rapido.
+        try:
+            _heartbeat('online', f'fetch_active status={_status}')
+        except Exception:
+            pass
         try:
             _r = requests.get(
                 f'{DCZ_MSG}/messaging/conversations', headers=H,
@@ -12637,12 +12650,22 @@ def main():
             # (pos-disparo) e 'opened' (em fluxo automation DCZ) ficavam
             # invisiveis. Caso reportado: 10 alunos da imagem todos em
             # 'unstarted' por 2h sem o agente enxergar.
+            # (2026-05-27) Heartbeats antes/depois do fetch para evitar que
+            # o cockpit detecte processo morto durante DCZ lento.
+            try:
+                _heartbeat('online', f'cycle={cycle} fetching')
+            except Exception:
+                pass
             try:
                 convs_raw = _fetch_active_conversations(
-                    limit_per_status=300, timeout=60)
+                    limit_per_status=300, timeout=15)
             except Exception as _e_conv:
                 p(f"  [ERRO] Falha ao buscar conversas: {_e_conv}")
                 continue
+            try:
+                _heartbeat('online', f'cycle={cycle} fetched={len(convs_raw) if convs_raw else 0}')
+            except Exception:
+                pass
             if not convs_raw:
                 continue
 
