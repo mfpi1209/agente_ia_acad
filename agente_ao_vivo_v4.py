@@ -4165,28 +4165,69 @@ def _msg_ts(m):
     return ''
 
 
-def _is_dispatch_reply(msgs, last_user_msg=None):
-    """True se aluno tem mensagem recebida com ts >= DISPATCH_REF_DATE.
+def _looks_like_dispatch_msg(m):
+    """Heuristica: a msg OUT parece um disparo HSM (template enviado via Cockpit).
 
-    (2026-05-27 v2) Abordagem por data de referencia do disparo ativo.
-    A deteccao anterior por campo `header`/`type` falhava porque os
-    templates HSM enviados pelo Cockpit nao expoem esses campos em todas
-    as msgs. Como o usuario faz disparos em datas conhecidas, usamos
-    DISPATCH_REF_DATE como divisor de aguas.
+    Padrao observado nos disparos academicos:
+    - received=False (saida)
+    - attendant ausente/None (nao foi humano)
+    - sem buttons (nao eh menu interativo do bot)
+    - body longo (>= 80 chars) — disparos sao mensagens estruturadas longas
+    - nao tem interpretedContentPending (esse campo eh do bot IA respondendo)
+    """
+    if not m or not isinstance(m, dict):
+        return False
+    if m.get('received', False):
+        return False
+    att = m.get('attendant')
+    if att and isinstance(att, dict) and att.get('userId'):
+        return False  # humano enviou
+    if m.get('buttons'):
+        return False
+    if m.get('interpretedContentPending'):
+        return False
+    body = (m.get('body') or m.get('text') or '').strip()
+    return len(body) >= 80
+
+
+def _is_dispatch_reply(msgs, last_user_msg=None):
+    """True se a msg recebida do aluno tem ts >= DISPATCH_REF_DATE
+    E a msg OUT imediatamente anterior parece um disparo (template HSM).
+
+    (2026-05-27 v3) Antes marcavamos qualquer reply apos a data de
+    referencia como retorno de disparo — pegava falso positivo de alunos
+    que escreviam organicamente sem ter recebido o disparo. Agora exige
+    tambem que o ultimo OUT antes da resposta seja dispatch-like.
     """
     if not msgs or not DISPATCH_REF_DATE:
         return False
-    candidate = last_user_msg
-    if candidate and candidate.get('received', False):
-        cts = _msg_ts(candidate)
-        if cts and cts >= DISPATCH_REF_DATE:
-            return True
+
+    # Pega a msg recebida do aluno mais recente
+    last_received = last_user_msg if (last_user_msg and last_user_msg.get('received', False)) else None
+    if last_received is None:
+        for m in msgs:
+            if m.get('received', False):
+                last_received = m
+                break
+    if not last_received:
+        return False
+    recv_ts = _msg_ts(last_received)
+    if not recv_ts or recv_ts < DISPATCH_REF_DATE:
+        return False
+
+    # Procura a msg OUT imediatamente anterior ao reply
+    prev_out = None
     for m in msgs:
         if m.get('received', False):
-            cts = _msg_ts(m)
-            if cts and cts >= DISPATCH_REF_DATE:
-                return True
-    return False
+            continue
+        out_ts = _msg_ts(m)
+        if out_ts and out_ts < recv_ts:
+            prev_out = m
+            break
+    if not prev_out:
+        return False
+
+    return _looks_like_dispatch_msg(prev_out)
 
 
 def _move_business_to_base_alunos(phone):
