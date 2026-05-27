@@ -12828,7 +12828,12 @@ def main():
             # 15-20 min. Com 60/ciclo (~5-8s/conv = 5-8min por ciclo),
             # ainda eh seguro contra timeout e cobre disparos grandes.
             _MAX_WAITING_PER_CYCLE = 60
-            convs = waiting[:_MAX_WAITING_PER_CYCLE] + rest
+            # (2026-05-27) Limite para 'rest' (bot falou por último — follow-up
+            # tracking). Sem limite, ciclos com 1000+ convs travavam o heartbeat
+            # por centenas de segundos. O follow-up de rest é leve (só atualiza
+            # estado em memória), mas iterar 900 convs ainda demora.
+            _MAX_REST_PER_CYCLE = 200
+            convs = waiting[:_MAX_WAITING_PER_CYCLE] + rest[:_MAX_REST_PER_CYCLE]
             if waiting_atendente and (cycle <= 5 or cycle % 10 == 0):
                 p(f"  [PRIO-2] {len(waiting_atendente)} conversas 'falar com atendente' -> distribuir primeiro")
             if cycle <= 5 or cycle % 10 == 0 or len(waiting) > 0:
@@ -12939,6 +12944,14 @@ def main():
 
                 _in_waiting = id(conv) in _is_waiting_set
                 _conv_processed += 1
+
+                # Heartbeat a cada 10 convs — impede cockpit de marcar como
+                # morto durante ciclos longos (1000+ convs sem atualizar hb).
+                if _conv_processed % 10 == 0:
+                    try:
+                        _heartbeat('online', f'cycle={cycle} proc={_conv_processed}/{len(convs)}')
+                    except Exception:
+                        pass
 
                 # Extrair telefone do contato desta conversa
                 contact = conv.get('contact', {}) or {}
