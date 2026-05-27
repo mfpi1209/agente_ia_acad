@@ -465,7 +465,7 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
     <div class="aia-tbl-section">
       <div class="aia-tbl-header">
         <h2>Interações Recentes</h2>
-        <div class="aia-tbl-filters">
+        <div class="aia-tbl-filters" style="flex-wrap:wrap;gap:8px;">
           <input type="text" id="aia-search" placeholder="Buscar aluno, telefone..." onkeyup="aiaDebSearch()">
           <select id="aia-ftema" onchange="aiaLoadTbl()"><option value="">Todos os Temas</option></select>
           <select id="aia-fsent" onchange="aiaLoadTbl()">
@@ -474,6 +474,13 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
             <option value="neutro">Neutro</option>
             <option value="frustrado">Frustrado</option>
           </select>
+          <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--aia-muted);">
+            <i class="fas fa-calendar-alt" style="color:var(--aia-primary);"></i>
+            <input type="date" id="aia-fdate-start" onchange="aiaPage=1;aiaLoadTbl()" style="padding:5px 8px;border:1px solid var(--aia-border,#333);border-radius:6px;background:var(--aia-card,#1a1a2e);color:var(--aia-text,#e2e8f0);font-size:12px;cursor:pointer;" title="Data inicial">
+            <span>–</span>
+            <input type="date" id="aia-fdate-end" onchange="aiaPage=1;aiaLoadTbl()" style="padding:5px 8px;border:1px solid var(--aia-border,#333);border-radius:6px;background:var(--aia-card,#1a1a2e);color:var(--aia-text,#e2e8f0);font-size:12px;cursor:pointer;" title="Data final">
+            <button onclick="document.getElementById('aia-fdate-start').value='';document.getElementById('aia-fdate-end').value='';aiaPage=1;aiaLoadTbl();" style="padding:4px 8px;border:none;border-radius:6px;background:var(--aia-border,#333);color:var(--aia-muted,#888);cursor:pointer;font-size:11px;" title="Limpar datas">✕</button>
+          </div>
         </div>
       </div>
       <div class="aia-tbl-wrap">
@@ -1897,7 +1904,8 @@ function aiaRenderCharts(s){
 async function aiaLoadTbl(){
   try{
     const tema=document.getElementById('aia-ftema').value,sent=document.getElementById('aia-fsent').value,search=document.getElementById('aia-search').value;
-    const p=new URLSearchParams({limit:30,page:aiaPage});if(tema)p.set('tema',tema);if(sent)p.set('sentimento',sent);if(search)p.set('search',search);
+    const sd=document.getElementById('aia-fdate-start')?.value||'',ed=document.getElementById('aia-fdate-end')?.value||'';
+    const p=new URLSearchParams({limit:30,page:aiaPage});if(tema)p.set('tema',tema);if(sent)p.set('sentimento',sent);if(search)p.set('search',search);if(sd)p.set('start_date',sd);if(ed)p.set('end_date',ed);
     const d=await fetch(AIA+'/api/recent?'+p).then(r=>r.json());
     document.getElementById('aia-tbody').innerHTML=d.rows.map(r=>`<tr><td style="white-space:nowrap">${aiaFmtDate(r.created_at)}</td><td><strong>${r.student_name||'-'}</strong></td><td style="font-size:11px;color:var(--aia-muted)">${r.phone||'-'}</td><td><span class="aia-tag aia-tag-blue">${r.tema||'-'}</span></td><td>${aiaSentTag(r.sentimento)}</td><td>${aiaNpsTag(r.nps_implicito)}</td><td class="aia-cell-q" title="${(r.pergunta_aluno||'').replace(/"/g,'&quot;')}">${r.pergunta_aluno||'-'}</td><td class="aia-cell-q" title="${(r.resposta_agente||'').replace(/"/g,'&quot;')}">${r.resposta_agente||'-'}</td><td><button class="aia-btn-av ok ${r.avaliacao==='correta'?'active':''}" onclick="aiaAval(${r.id},'correta',this)">✓</button> <button class="aia-btn-av nok ${r.avaliacao==='incorreta'?'active':''}" onclick="aiaAval(${r.id},'incorreta',this)">✗</button></td><td><a class="aia-btn-dcz" href="${aiaDczLink(r.conv_id,r.phone)}" target="_blank">↗</a></td></tr>`).join('');
     const tp=Math.ceil(d.total/d.limit);

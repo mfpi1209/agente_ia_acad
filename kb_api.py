@@ -4937,7 +4937,8 @@ def aia_alerts():
 
 @app.get("/api/aia/api/recent")
 def aia_recent(limit: int = 30, page: int = 1, tema: str = None,
-               sentimento: str = None, search: str = None, avaliacao: str = None):
+               sentimento: str = None, search: str = None, avaliacao: str = None,
+               start_date: str = None, end_date: str = None):
     limit = max(1, min(int(limit or 30), 200))
     page = max(1, int(page or 1))
     conn = _aia_conn()
@@ -4952,6 +4953,10 @@ def aia_recent(limit: int = 30, page: int = 1, tema: str = None,
         where.append("(avaliacao IS NULL OR trim(avaliacao) = '')")
     elif avaliacao in ('correta', 'incorreta'):
         where.append("avaliacao = %s"); params.append(avaliacao)
+    if start_date:
+        where.append("created_at >= %s"); params.append(start_date)
+    if end_date:
+        where.append("created_at <= %s"); params.append(end_date + ' 23:59:59')
     if search:
         where.append("(student_name ILIKE %s OR pergunta_aluno ILIKE %s OR phone ILIKE %s)")
         params.extend([f'%{search}%'] * 3)

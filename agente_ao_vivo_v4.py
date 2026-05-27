@@ -4099,6 +4099,60 @@ def log_to_db(conv_id, question, response, confidence, action):
         p(f"    Log DB erro: {e}")
 
 
+# ============================================================
+# DISPARO REPLY TRACKER (2026-05-27)
+# Detecta quando um aluno responde a um template (disparo) e registra
+# na interaction_summary com tema='DISPARO' — uma vez por conversa.
+# ============================================================
+_DISPARO_LOGGED_CONVS: set = set()   # dedup in-memory (limpo a cada rebuild)
+
+
+def _log_dispatch_reply_once(conv_id, phone, name, user_msg, response_msg=''):
+    """Registra resposta de disparo em interaction_summary (idempotente por conv_id)."""
+    if conv_id in _DISPARO_LOGGED_CONVS:
+        return False
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM interaction_summary WHERE conv_id=%s AND tema='DISPARO' LIMIT 1",
+            (conv_id,)
+        )
+        if cur.fetchone():
+            _DISPARO_LOGGED_CONVS.add(conv_id)
+            cur.close(); conn.close()
+            return False
+        cur.execute("""
+            INSERT INTO interaction_summary
+            (phone, student_name, tema, subtema, sentimento, resolvido,
+             nps_implicito, pergunta_aluno, resposta_agente, conv_id, created_at)
+            VALUES (%s, %s, 'DISPARO', 'retorno_disparo', 'neutro', 'parcial',
+                    7, %s, %s, %s, NOW())
+        """, (
+            (phone or '')[-11:],
+            (name or '')[:200],
+            (user_msg or '')[:2000],
+            (response_msg or '')[:2000],
+            conv_id or '',
+        ))
+        conn.commit()
+        cur.close(); conn.close()
+        _DISPARO_LOGGED_CONVS.add(conv_id)
+        p(f"  [DISPARO-LOG] retorno registrado conv={conv_id[:12]} '{(user_msg or '')[:40]}'")
+        return True
+    except Exception as e:
+        p(f"  [DISPARO-LOG] erro: {e}")
+        return False
+
+
+def _is_dispatch_reply(msgs):
+    """Retorna True se alguma mensagem ENVIADA no histórico for um template (disparo HSM)."""
+    for m in (msgs or []):
+        if not m.get('received', False) and _is_template_message(m):
+            return True
+    return False
+
+
 def _move_business_to_base_alunos(phone):
     """Move o business de volta para Base de Alunos (ex: aluno retornou após encerramento)."""
     if not phone:
@@ -5807,6 +5861,15 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
             user_text, last_msg = _queue_last_aluno_body(msgs)
             if not user_text:
                 continue
+
+            # --- DISPARO REPLY TRACKER (2026-05-27) ---
+            # Se o historico tem template enviado E aluno nao eh robo,
+            # registra retorno do disparo na tabulacao (idempotente).
+            try:
+                if _is_dispatch_reply(msgs) and not _is_external_bot_input(user_text):
+                    _log_dispatch_reply_once(cid, phone, name, user_text)
+            except Exception:
+                pass
 
             # --- DESPEDIDA / CONFIRMACAO DE RESOLUCAO -> FECHAR ---
             if _is_farewell_message(user_text) or _is_resolution_confirmation(user_text):
