@@ -8175,14 +8175,28 @@ def process_openai_supervisor_loop():
         ptype = (result.get('tipo') or '').lower()
         resumo = result.get('resumo') or ''
         trecho = result.get('trecho_problematico') or ''
-        # extrai phone se possivel
+        # extrai phone — DCZ guarda em c.contact.phoneNumber ou
+        # c.contact.contactId, nunca no nivel raiz da conv.
+        # (2026-05-27) Bug reportado: supervisor distribuia mas o lead nao
+        # era criado porque phone ficava vazio. distribute_to_attendant
+        # entao usava PHONE_TO_MONITOR (default) e o CRM nao associava o
+        # lead com a conv real ('Lead nao encontrado' no painel).
         phone = ''
         try:
-            for k in ('contactPhoneNumber', 'phone', 'contactPhone'):
-                v = c.get(k)
-                if v:
-                    phone = str(v)
-                    break
+            ct = c.get('contact', {}) or {}
+            phone = (ct.get('phoneNumber') or ct.get('contactId')
+                     or ct.get('rawPhone') or ct.get('phone') or '')
+            phone = str(phone).replace('+', '').replace(' ', '').replace('-', '')
+            if phone.startswith('55') and len(phone) > 11:
+                phone = phone[2:]
+            # fallback: tenta nivel raiz (formato hipotetico de versoes
+            # futuras da API)
+            if not phone:
+                for k in ('contactPhoneNumber', 'phone', 'contactPhone'):
+                    v = c.get(k)
+                    if v:
+                        phone = str(v)
+                        break
         except Exception:
             pass
 
@@ -8436,7 +8450,12 @@ def _oneshot_fix_vanessa_barra_funda():
         return
 
     conv_id = target.get('id')
-    phone = (target.get('contact') or {}).get('phone') or target.get('contactPhoneNumber') or ''
+    _ct_one = target.get('contact') or {}
+    phone = (_ct_one.get('phoneNumber') or _ct_one.get('contactId')
+             or _ct_one.get('phone') or target.get('contactPhoneNumber') or '')
+    phone = str(phone).replace('+', '').replace(' ', '').replace('-', '')
+    if phone.startswith('55') and len(phone) > 11:
+        phone = phone[2:]
     p(f"  [ONESHOT-VANESSA] conv={conv_id[:12]} phone={phone}")
 
     # 1) nota interna pra equipe
