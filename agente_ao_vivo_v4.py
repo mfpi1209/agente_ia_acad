@@ -5352,7 +5352,11 @@ def process_after_hours_rescue():
                 continue
             recv = c.get('lastReceivedMessageDate', '') or ''
             sent = c.get('lastSendedMessageDate', '') or ''
-            if not recv or (sent and recv <= sent):
+            if not recv:
+                continue
+            # (2026-05-27) Caso Jucelia: balao DCZ automatico tem ts apos a
+            # msg do aluno por ~4s. Helper distingue balao vs resposta humana.
+            if _should_skip_due_to_sent_after_recv(cid, recv, sent):
                 continue
             try:
                 from datetime import datetime as _dt
@@ -5494,7 +5498,8 @@ def process_in_hours_rescue():
             sent = c.get('lastSendedMessageDate', '') or ''
             if not recv:
                 continue
-            if sent and recv <= sent:
+            # (2026-05-27) Caso Jucelia: helper distingue balao DCZ vs resposta humana
+            if _should_skip_due_to_sent_after_recv(cid, recv, sent):
                 continue
             try:
                 from datetime import datetime as _dt
@@ -6475,6 +6480,71 @@ def _is_external_bot_input(text):
     return False
 
 
+# (2026-05-27) Bug Jucelia: conv finalizada por humano, aluno responde "Obrigada"
+# 30min depois, o DCZ Easy automaticamente reabre a conv e dispara o balao
+# "Este atendimento foi encerrado, se quiser retornar para conversar...".
+# Esse balao tem ts > ts do "Obrigada" por ~4 segundos. Nossas funcoes de
+# resgate (in_hours_rescue, queue_fast_sweep, post_close_rescue) usavam
+# `if sent and recv <= sent: continue` — pulando ESSAS conversas, embora
+# elas precisem de close. Helper abaixo identifica esse balao DCZ para
+# permitir que as funcoes de resgate prossigam mesmo assim.
+_DCZ_AUTO_CLOSE_BALLOON_PATTERNS = (
+    'este atendimento foi encerrado',
+    'se quiser retornar para conversar',
+    'se quiser retornar para convervar',
+    'retornar ao atendimento',
+)
+
+
+def _sent_is_dcz_auto_close_balloon(cid):
+    """True se a ULTIMA msg outbound da conv eh o balao automatico do DCZ
+    Easy 'Este atendimento foi encerrado...'. Esse balao eh disparado pelo
+    DCZ quando aluno responde uma conv finalizada — NAO conta como
+    atendimento humano em andamento.
+    """
+    if not cid:
+        return False
+    try:
+        msgs = get_conversation_messages_api(cid, limit=6) or []
+    except Exception:
+        return False
+    for m in reversed(msgs):
+        if m.get('received', False):
+            continue
+        body = (m.get('body') or m.get('text') or '').strip().lower()
+        if not body:
+            continue
+        for pat in _DCZ_AUTO_CLOSE_BALLOON_PATTERNS:
+            if pat in body:
+                return True
+        # outra msg outbound real -> nao eh balao DCZ
+        return False
+    return False
+
+
+def _should_skip_due_to_sent_after_recv(cid, recv, sent):
+    """Retorna True se a regra `recv <= sent` deve bloquear o resgate.
+    Retorna False (= prossegue) se o motivo do `sent > recv` for o balao
+    DCZ automatico. Janela curta (<= 5min) eh tipica desse caso.
+    """
+    if not sent or recv > sent:
+        return False
+    try:
+        from datetime import datetime as _dt
+        _ts_r = _dt.fromisoformat(str(recv).replace('Z', '+00:00')).timestamp()
+        _ts_s = _dt.fromisoformat(str(sent).replace('Z', '+00:00')).timestamp()
+        _diff = _ts_s - _ts_r
+    except Exception:
+        return True  # nao parseou -> mantem comportamento antigo
+    # Se diferenca > 5min, eh resposta humana real -> bloqueia
+    if _diff > 300:
+        return True
+    # Janela curta: pode ser balao DCZ. Confirma.
+    if _sent_is_dcz_auto_close_balloon(cid):
+        return False  # NAO bloqueia: prossegue com resgate
+    return True
+
+
 def _msg_is_template_hsm(conv_id, msg_id):
     """Verifica em _cached_msgs se a msg eh template HSM (disparo via WhatsApp
     Business API). Templates NUNCA devem ser confundidos com 'bot externo' —
@@ -6971,7 +7041,8 @@ def process_post_close_rescue():
             sent = c.get('lastSendedMessageDate', '') or ''
             if not recv:
                 continue
-            if sent and recv <= sent:
+            # (2026-05-27) Caso Jucelia: helper distingue balao DCZ vs resposta humana
+            if _should_skip_due_to_sent_after_recv(cid, recv, sent):
                 continue
             try:
                 from datetime import datetime as _dt
