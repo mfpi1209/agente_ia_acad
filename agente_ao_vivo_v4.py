@@ -920,6 +920,7 @@ SAIDA_ANTE_MIN = 20
 # Para reativar: remover do set e fazer rebuild.
 _ATTENDANTS_ON_VACATION = {
     'joyce',   # ferias a partir de 2026-05-25
+    'felipe',  # inativo/offline - nao distribuir (2026-05-27)
 }
 
 # ===================== HORÁRIO DE ATENDIMENTO (sobrescrito por agent_config) =====================
@@ -950,8 +951,8 @@ _last_pending_dispatch_ts = 0
 AFTER_HOURS_FIRST_MSG = (
     "Oii{name}! Nesse momento nosso time de atendimento humano está fora do horário, "
     "mas eu (assistente virtual) sigo por aqui pra tentar te ajudar agora mesmo 😊\n\n"
-    "📅 *Segunda a Sexta*: 09h às 20h\n"
-    "📅 *Sábado*: 09h às 13h\n\n"
+    "📅 *Segunda a Sexta*: 08h às 20h\n"
+    "📅 *Sábado*: 08h às 13h\n\n"
     "Me conta o que você precisa que eu já vou tentando resolver com você."
 )
 
@@ -7706,7 +7707,7 @@ _OPENAI_SUPERVISOR_PROMPT = """Voce e um auditor SENIOR de qualidade que revisa 
 
 Contexto do agente:
 - E um canal de ATENDIMENTO ACADEMICO (NaO comercial — matricula deve ser orientada via consultor).
-- Horario de atendimento: Seg-Sex 9h-20h, Sab 9h-13h. Fora disso o bot deve dizer "fora do horario" OU oferecer fila pre-abertura quando faltar <= 60min para 9h.
+- Horario de atendimento: Seg-Sex 8h-20h, Sab 8h-13h. Fora disso o bot deve dizer "fora do horario" OU oferecer fila pre-abertura quando faltar <= 60min para 8h.
 - Regras canonicas que o bot DEVE seguir:
   * A1 (prova regimental) do MES VIGENTE: dizer que a nota e divulgada ate o final do mes. NaO mandar procurar tutor.
   * A1 de MES ANTERIOR: orientar a procurar tutor/professor.
