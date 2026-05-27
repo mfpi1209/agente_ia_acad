@@ -5641,6 +5641,75 @@ def process_in_hours_rescue():
                         pass
                     _IN_HOURS_RESCUE_RECENT[cid] = now_ts
                     continue
+
+                # PAGAMENTO FORA DO VENCIMENTO (2026-05-27) -> informar + fechar
+                # Caso Odirlei/Wanny: aluno disse que vai pagar dia X (apos 25/05).
+                if _last_aluno_body and _is_payment_later(_last_aluno_body):
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} pagamento tardio ('{_last_aluno_body[:40]}') — informando valor maior + fechando")
+                    _greet = (f", *{first}*" if first else '')
+                    _info = (
+                        f"Tudo bem{_greet}! 👍\n\n"
+                        f"Você pode efetuar o pagamento sim, sem problema 😊\n\n"
+                        f"Só fique atento(a): como o vencimento da mensalidade foi *25/05*, "
+                        f"pagando depois dessa data o valor fica um pouco *maior*, porque os "
+                        f"descontos vigentes da parcela são reduzidos após o vencimento.\n\n"
+                        f"Quando puder, é só efetuar o pagamento normalmente pela 2ª via. "
+                        f"Qualquer dúvida, estou por aqui!"
+                    )
+                    try:
+                        send_and_track(cid, _info)
+                    except Exception as e_pl:
+                        p(f"  [IN-HOURS-RESCUE] erro info pagto-tardio: {e_pl}")
+                    try:
+                        log_to_db(cid, _last_aluno_body, _info, 1.0, 'payment_later')
+                    except Exception:
+                        pass
+                    try:
+                        time.sleep(1.0)
+                        close_conversation_crm(cid, phone=phone)
+                    except Exception as e_cc:
+                        p(f"  [IN-HOURS-RESCUE] erro close pagto-tardio: {e_cc}")
+                    try:
+                        update_pending_escalation_status(
+                            cid, 'closed_payment_later',
+                            note='Aluno informou pagamento fora do vencimento — agente informou valor maior e fechou',
+                        )
+                    except Exception:
+                        pass
+                    _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                    continue
+
+                # ALUNO OCUPADO / RETORNA DEPOIS (2026-05-27) -> ack + fechar
+                # Caso Karen: 'Ola no momento estou ocupada, assim que puder retorno.'
+                if _last_aluno_body and _is_busy_later(_last_aluno_body):
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} aluno ocupado ('{_last_aluno_body[:40]}') — ack curto + fechando")
+                    _greet = (f", *{first}*" if first else '')
+                    _ack = (
+                        f"Tudo bem{_greet}! 😊 Quando estiver mais tranquilo(a), "
+                        f"estaremos à disposição. Até mais!"
+                    )
+                    try:
+                        send_and_track(cid, _ack)
+                    except Exception as e_bl:
+                        p(f"  [IN-HOURS-RESCUE] erro ack ocupado: {e_bl}")
+                    try:
+                        log_to_db(cid, _last_aluno_body, _ack, 1.0, 'busy_later')
+                    except Exception:
+                        pass
+                    try:
+                        time.sleep(1.0)
+                        close_conversation_crm(cid, phone=phone)
+                    except Exception as e_cc:
+                        p(f"  [IN-HOURS-RESCUE] erro close ocupado: {e_cc}")
+                    try:
+                        update_pending_escalation_status(
+                            cid, 'closed_busy_later',
+                            note='Aluno informou estar ocupado — agente respondeu e fechou',
+                        )
+                    except Exception:
+                        pass
+                    _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                    continue
             except Exception as e_far:
                 p(f"  [IN-HOURS-RESCUE] erro check farewell {cid[:12]}: {e_far}")
 
@@ -6069,6 +6138,66 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
                 acted += 1
                 continue
 
+            # --- PAGAMENTO FORA DO VENCIMENTO -> INFORMAR + FECHAR (2026-05-27) ---
+            # Caso Odirlei/Wanny: aluno disse que vai pagar dia X (apos 25/05).
+            # Agente informa que pode pagar sim, mas valor sera maior pela perda
+            # do desconto da mensalidade, e encerra.
+            if _is_payment_later(user_text):
+                p(f"  [QUEUE-SWEEP] pagamento-tardio conv={cid[:12]} ...{phone[-4:]} '{user_text[:40]}' -> informar+fechar")
+                info = (
+                    f"Tudo bem{first_part}! 👍\n\n"
+                    f"Você pode efetuar o pagamento sim, sem problema 😊\n\n"
+                    f"Só fique atento(a): como o vencimento da mensalidade foi *25/05*, "
+                    f"pagando depois dessa data o valor fica um pouco *maior*, porque os "
+                    f"descontos vigentes da parcela são reduzidos após o vencimento.\n\n"
+                    f"Quando puder, é só efetuar o pagamento normalmente pela 2ª via. "
+                    f"Qualquer dúvida, estou por aqui!"
+                )
+                try:
+                    send_and_track(cid, info, force=True)
+                except Exception:
+                    pass
+                try:
+                    close_conversation_crm(cid, phone=phone)
+                except Exception:
+                    pass
+                try:
+                    update_pending_escalation_status(cid, 'resolved', note=f'QUEUE-SWEEP pagamento_tardio: "{user_text[:80]}"')
+                except Exception:
+                    pass
+                if last_msg and last_msg.get('id'):
+                    processed_msg_ids.add(last_msg['id'])
+                _QUEUE_SWEEP_RECENT[cid] = now_ts
+                acted += 1
+                continue
+
+            # --- ALUNO OCUPADO / RETORNA DEPOIS -> ACK + FECHAR (2026-05-27) ---
+            # Caso Karen: 'Ola no momento estou ocupada, assim que puder retorno.'
+            # Agente nao deixa pendente — manda ack curto e encerra.
+            if _is_busy_later(user_text):
+                p(f"  [QUEUE-SWEEP] aluno-ocupado conv={cid[:12]} ...{phone[-4:]} '{user_text[:40]}' -> ack+fechar")
+                ack = (
+                    f"Tudo bem{first_part}! 😊 Quando estiver mais tranquilo(a), "
+                    f"estaremos à disposição. Até mais!"
+                )
+                try:
+                    send_and_track(cid, ack, force=True)
+                except Exception:
+                    pass
+                try:
+                    close_conversation_crm(cid, phone=phone)
+                except Exception:
+                    pass
+                try:
+                    update_pending_escalation_status(cid, 'resolved', note=f'QUEUE-SWEEP aluno_ocupado: "{user_text[:80]}"')
+                except Exception:
+                    pass
+                if last_msg and last_msg.get('id'):
+                    processed_msg_ids.add(last_msg['id'])
+                _QUEUE_SWEEP_RECENT[cid] = now_ts
+                acted += 1
+                continue
+
             # --- RETENCAO / CANCELAMENTO -> WESLEY ---
             if is_retention_intent(user_text):
                 p(f"  [QUEUE-SWEEP] retencao conv={cid[:12]} ...{phone[-4:]} '{user_text[:40]}' -> Wesley")
@@ -6375,9 +6504,14 @@ _FAREWELL_KEYWORDS = (
     'beleza', 'blz', 'show', 'show de bola',
     'perfeito', 'otimo', 'ótimo', 'maravilha', 'tranquilo', 'tranquila',
     'entendido', 'entendida', 'ciente', 'compreendido', 'compreendi',
-    # (2026-05-27) REMOVIDO: 'bom dia', 'boa tarde', 'boa noite', 'ok', 'okay', 'okey'
-    # — eram saudacoes/curtas usadas como ABERTURA, nao despedida.
-    # Caso reportado: aluna mandou so 'Boa tarde' e foi encerrada como despedida.
+    # (2026-05-27 v2) Restaurados: 'ok'/'okay'/'okey' sao confirmacao curta
+    # de fim de conversa. Caso Monica: respondeu so 'Ok' ao disparo - era pra
+    # encerrar humanizado. _is_pure_greeting nao captura ok porque ele NAO eh
+    # uma saudacao de abertura como bom dia/boa tarde.
+    'ok', 'okay', 'okey',
+    # (2026-05-27) REMOVIDO antes: 'bom dia', 'boa tarde', 'boa noite'
+    # — eram saudacoes de ABERTURA, nao despedida. Caso Anderson/Natalia:
+    # mandou so 'Boa tarde' e foi encerrado como despedida.
     'so isso', 'só isso', 'era isso', 'so era isso', 'só era isso',
     'pra voce tambem', 'pra você também', 'para voce tambem', 'para você também',
     'pra ti tambem', 'pra ti também', 'igualmente',
@@ -6541,6 +6675,126 @@ def _is_payment_confirmed_message(text):
         return False
     for phrase in _PAYMENT_CONFIRMED_PHRASES:
         # normalizar acentos da phrase para comparar
+        phrase_norm = ''.join(c for c in unicodedata.normalize('NFD', phrase)
+                              if unicodedata.category(c) != 'Mn')
+        if phrase_norm in t_norm:
+            return True
+    return False
+
+
+# ============================================================
+# PAYMENT LATER (2026-05-27)
+# Aluno informou que vai pagar APOS o vencimento. Agente deve responder
+# explicando que pode pagar sim, mas o valor sera maior (perde desconto
+# da mensalidade vigente) e encerrar.
+# ============================================================
+_PAYMENT_LATER_PHRASES = (
+    'vou pagar dia', 'pago dia', 'pagarei dia', 'vou pagar no dia',
+    'pago no dia', 'pago apenas dia',
+    'vou pagar semana que vem', 'pago semana que vem', 'pago semana q vem',
+    'vou pagar mes que vem', 'pago mes que vem', 'pago mês que vem',
+    'pago no proximo mes', 'pago no próximo mês',
+    'so consigo dia', 'só consigo dia', 'so consigo pagar dia', 'só consigo pagar dia',
+    'so vou conseguir dia', 'só vou conseguir dia',
+    'so vou conseguir pagar dia', 'só vou conseguir pagar dia',
+    'so consigo no dia', 'só consigo no dia',
+    'so consigo no fim do mes', 'só consigo no fim do mês',
+    'so vou conseguir no fim', 'só vou conseguir no fim',
+    'pago no fim do mes', 'pago no fim do mês', 'so no fim do mes', 'só no fim do mês',
+    'so tenho dinheiro dia', 'só tenho dinheiro dia',
+    'so tenho como pagar dia', 'só tenho como pagar dia',
+    'pago depois', 'vou pagar depois', 'consigo pagar depois',
+    'so consigo depois', 'só consigo depois', 'depois eu pago', 'depois eu efetuo',
+    'pagar fora do prazo', 'pagar depois do vencimento', 'pagar apos o vencimento',
+    'pagar após o vencimento', 'pagar pos o vencimento',
+    'vou pagar mais tarde', 'pago mais tarde',
+    'pago somente dia', 'só posso pagar dia', 'so posso pagar dia',
+    'o que eu faço para fazer', 'o que eu faco para fazer',
+    'como faco para pagar atrasado', 'como faço para pagar atrasado',
+    'irei pagar dia', 'irei pagar somente', 'irei efetuar o pagamento dia',
+    'efetuarei o pagamento dia', 'efetuarei pagamento dia',
+)
+_PAYMENT_LATER_NUM_PATTERNS = (
+    # 'dia 30', '30/05', '30-05', 'no dia 30'
+    r'\bdia\s+\d{1,2}\b',
+    r'\bate\s+(o\s+)?dia\s+\d{1,2}\b',
+    r'\baté\s+(o\s+)?dia\s+\d{1,2}\b',
+    r'\bdia\s+\d{1,2}/\d{1,2}',
+    r'\bem\s+\d{1,2}/\d{1,2}',
+)
+
+
+def _is_payment_later(text):
+    """Aluno disse que vai pagar fora do vencimento (data futura).
+    Caso reportado: Odirlei 'Pagarei a mensalidade dia...'; Wanny 'O que eu faço
+    para fazer o pagamento...'. Agente deve explicar que valor sera maior
+    pela perda do desconto da mensalidade e encerrar.
+    """
+    if not text:
+        return False
+    import unicodedata, re
+    t = text.strip().lower()
+    if len(t) > 350:
+        return False
+    t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
+                     if unicodedata.category(c) != 'Mn')
+    # NEGATIVOS: ja pagou (nao eh payment-later)
+    if 'ja paguei' in t_norm or 'já paguei' in t_norm or 'foi pago' in t_norm:
+        return False
+    for phrase in _PAYMENT_LATER_PHRASES:
+        phrase_norm = ''.join(c for c in unicodedata.normalize('NFD', phrase)
+                              if unicodedata.category(c) != 'Mn')
+        if phrase_norm in t_norm:
+            return True
+    # Padrao "vou pagar/pagarei + dia/data"
+    if any(k in t_norm for k in ('pagar', 'pagarei', 'pago', 'pagamento')):
+        for pat in _PAYMENT_LATER_NUM_PATTERNS:
+            if re.search(pat, t_norm):
+                return True
+    return False
+
+
+# ============================================================
+# BUSY/LATER (2026-05-27)
+# Aluno disse que esta ocupado/sem tempo agora e retorna depois.
+# Agente envia ack curto + encerra (nao adianta deixar conv pendente).
+# ============================================================
+_BUSY_LATER_PHRASES = (
+    'no momento estou ocupad', 'agora estou ocupad', 'estou ocupad no momento',
+    'estou ocupad agora', 'estou em atendimento', 'estou atendendo',
+    'estou trabalhando', 'estou no servico', 'estou no serviço',
+    'estou em servico', 'estou em serviço', 'estou em reuniao', 'estou em reunião',
+    'sem tempo agora', 'sem tempo no momento', 'nao tenho tempo agora',
+    'não tenho tempo agora', 'nao posso falar agora', 'não posso falar agora',
+    'agora nao posso falar', 'agora não posso falar',
+    'agora nao posso', 'agora não posso', 'agora nao da', 'agora não dá',
+    'agora nao consigo', 'agora não consigo',
+    'depois eu vejo', 'depois eu vou ver', 'depois eu retorno',
+    'depois te retorno', 'depois eu te retorno', 'depois eu volto a falar',
+    'assim que puder retorno', 'assim que puder volto', 'assim que puder respondo',
+    'assim que puder eu retorno', 'quando der retorno', 'quando puder retorno',
+    'quando eu puder retorno', 'mais tarde retorno', 'mais tarde eu retorno',
+    'depois retorno', 'mais tarde te respondo',
+    'so de noite consigo', 'só de noite consigo',
+    'so a noite consigo', 'só a noite consigo',
+    'depois eu falo', 'depois te falo', 'depois eu te falo',
+)
+
+
+def _is_busy_later(text):
+    """Aluno disse que esta ocupado/sem tempo agora, retorna depois.
+    Caso reportado: Karen 'Ola no momento estou ocupada, assim que puder
+    retorno.'. Agente envia ack curto e encerra.
+    """
+    if not text:
+        return False
+    import unicodedata
+    t = text.strip().lower()
+    if len(t) > 250:
+        return False
+    t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
+                     if unicodedata.category(c) != 'Mn')
+    for phrase in _BUSY_LATER_PHRASES:
         phrase_norm = ''.join(c for c in unicodedata.normalize('NFD', phrase)
                               if unicodedata.category(c) != 'Mn')
         if phrase_norm in t_norm:
@@ -11870,6 +12124,68 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             save_memory(cur_phone, student_profile, 'financeiro', summary, sentiment)
         except Exception as e_pay:
             p(f"  [PAGAMENTO-OK] Erro na memória: {e_pay}")
+        conversation_messages.clear()
+        conversation_greeted.discard(conv_id)
+        waiting_for_client = False
+        followup_stage = 0
+        inactivity_start = 0
+        return
+
+    # === PAGAMENTO FORA DO VENCIMENTO (2026-05-27) ===
+    # Aluno informou que vai pagar dia X (apos vencimento 25/05).
+    # Agente confirma que pode pagar sim, mas valor sera maior pela perda do
+    # desconto da mensalidade, e encerra. Caso Odirlei/Wanny.
+    if _is_payment_later(question):
+        p(f"  [PAGAMENTO-TARDIO] Aluno informou pagamento fora do vencimento: \"{question[:80]}\"")
+        _info = (
+            f"Tudo bem{name_suffix}! 👍\n\n"
+            f"Você pode efetuar o pagamento sim, sem problema 😊\n\n"
+            f"Só fique atento(a): como o vencimento da mensalidade foi *25/05*, "
+            f"pagando depois dessa data o valor fica um pouco *maior*, porque os "
+            f"descontos vigentes da parcela são reduzidos após o vencimento.\n\n"
+            f"Quando puder, é só efetuar o pagamento normalmente pela 2ª via. "
+            f"Qualquer dúvida, estou por aqui!"
+        )
+        meta_typing_on()
+        send_and_track(conv_id, _info)
+        conversation_messages.append({'role': 'bot', 'text': _info})
+        log_to_db(conv_id, question, _info, 1.0, 'payment_later')
+        _register_signature(conv_id, 'payment_later', _info)
+
+        close_conversation_crm(conv_id, phone=_current_phone)
+        try:
+            summary = generate_conversation_summary(conversation_messages)
+            save_memory(cur_phone, student_profile, 'financeiro', summary, sentiment)
+        except Exception as e_pl:
+            p(f"  [PAGAMENTO-TARDIO] Erro memoria: {e_pl}")
+        conversation_messages.clear()
+        conversation_greeted.discard(conv_id)
+        waiting_for_client = False
+        followup_stage = 0
+        inactivity_start = 0
+        return
+
+    # === ALUNO OCUPADO / RETORNA DEPOIS (2026-05-27) ===
+    # Aluno disse 'estou ocupado/sem tempo agora, retorno depois'. Agente
+    # responde com ack curto e encerra — nao deixa pendente. Caso Karen.
+    if _is_busy_later(question):
+        p(f"  [OCUPADO] Aluno informou estar ocupado: \"{question[:80]}\"")
+        _ack = (
+            f"Tudo bem{name_suffix}! 😊 Quando estiver mais tranquilo(a), "
+            f"estaremos à disposição. Até mais!"
+        )
+        meta_typing_on()
+        send_and_track(conv_id, _ack)
+        conversation_messages.append({'role': 'bot', 'text': _ack})
+        log_to_db(conv_id, question, _ack, 1.0, 'busy_later')
+        _register_signature(conv_id, 'busy_later', _ack)
+
+        close_conversation_crm(conv_id, phone=_current_phone)
+        try:
+            summary = generate_conversation_summary(conversation_messages)
+            save_memory(cur_phone, student_profile, 'ocupado', summary, sentiment)
+        except Exception as e_bl:
+            p(f"  [OCUPADO] Erro memoria: {e_bl}")
         conversation_messages.clear()
         conversation_greeted.discard(conv_id)
         waiting_for_client = False
