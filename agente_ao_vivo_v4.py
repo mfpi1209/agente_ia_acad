@@ -5783,6 +5783,34 @@ def process_in_hours_rescue():
             except Exception:
                 pass
 
+            # (2026-05-28) PROTECAO RETENCAO 2: cobre /retencao do CONSULTOR
+            # no DCZ (sem handoff_active nosso). Detecta via tag CRM, historico
+            # ou trigger_retention nosso anterior. Caso reportado: consultor
+            # usa /retencao -> conv ia pra Wesley -> rescue redistribuia para
+            # outro consultor (ou voltava ao consultor original).
+            try:
+                _lead_chk, _, _ = _ensure_lead_for_rescue(phone, name)
+            except Exception:
+                _lead_chk = None
+            try:
+                if _is_in_retention(cid, lead_id=_lead_chk, msgs=_conv_msgs):
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} em RETENCAO — NAO redistribui (mantem Wesley)")
+                    # Garante que negocio/lead/chat estao com Wesley + marca handoff
+                    try:
+                        trigger_retention(cid, _lead_chk, _last_aluno_body or '[retencao em andamento]', phone=phone)
+                        _mark_handoff_active(cid, 'retention', target='Wesley',
+                                             ttl_s=8 * 3600, body='Sticky retencao - resgate')
+                        update_pending_escalation_status(
+                            cid, 'distributed_retention',
+                            note='In-hours rescue: conv em retencao mantida com Wesley (sticky)',
+                        )
+                    except Exception as e_rstk:
+                        p(f"  [IN-HOURS-RESCUE] erro sticky retencao: {e_rstk}")
+                    _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                    continue
+            except Exception as e_chk:
+                p(f"  [IN-HOURS-RESCUE] erro check retencao: {e_chk}")
+
             consultant = get_available_consultant()
             if not consultant:
                 p(f"  [IN-HOURS-RESCUE] sem consultor disponivel - registrando pending")
@@ -6231,6 +6259,28 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
             if age_min >= QUEUE_FAST_SWEEP_MIN_AGE_MIN:
                 atts = c.get('attendants') or []
                 if not atts:
+                    # (2026-05-28) PROTECAO RETENCAO: se conv passou por /retencao,
+                    # NUNCA distribuir para consultor de Atendimento. Mantem Wesley.
+                    try:
+                        _lead_chk_qs, _, _ = _ensure_lead_for_rescue(phone, name)
+                    except Exception:
+                        _lead_chk_qs = None
+                    try:
+                        if _is_in_retention(cid, lead_id=_lead_chk_qs, msgs=msgs):
+                            p(f"  [QUEUE-SWEEP] Conv {cid[:12]} em RETENCAO — mantem Wesley (nao distribui)")
+                            try:
+                                trigger_retention(cid, _lead_chk_qs, user_text or '[retencao em andamento]', phone=phone)
+                                _mark_handoff_active(cid, 'retention', target='Wesley',
+                                                     ttl_s=8 * 3600, body='Sticky retencao queue-sweep')
+                            except Exception as e_qsr:
+                                p(f"  [QUEUE-SWEEP] erro sticky retencao: {e_qsr}")
+                            _QUEUE_SWEEP_RECENT[cid] = now_ts
+                            acted += 1
+                            if last_msg and last_msg.get('id'):
+                                processed_msg_ids.add(last_msg['id'])
+                            continue
+                    except Exception as e_chk_qs:
+                        p(f"  [QUEUE-SWEEP] erro check retencao: {e_chk_qs}")
                     # Tenta distribuir diretamente
                     try:
                         _cons = get_available_consultant()
@@ -6876,19 +6926,89 @@ def _extract_last_attendant_from_history(msgs):
     """Procura o nome do atendente que encerrou no historico recente.
     Padrao: 'Camila Ferreira finalizou o atendimento'.
     Retorna primeiro nome em lowercase ou None.
+
+    (2026-05-28) Se houver evento de RETENCAO (consultor X usou /retencao no
+    DCZ ou nosso trigger_retention) DEPOIS do ultimo 'finalizou', retorna
+    'wesley' — caso contrario o resgate sticky devolve aluno em retencao
+    para o consultor original. Caso reportado: aluna voltava para Beatriz
+    apos /retencao para Wesley.
     """
     if not msgs:
         return None
     import re
-    for m in reversed(msgs):
+    # 1) Acha index do ultimo "X finalizou o atendimento"
+    last_fin_idx = -1
+    last_fin_name = None
+    for i, m in enumerate(msgs):
         body = (m.get('body') or m.get('text') or '').strip()
         if not body:
             continue
-        match = re.match(r'^([A-Z][a-zA-ZÀ-ÿ]+)(?:\s+[A-Z][a-zA-ZÀ-ÿ]+)*\s+finalizou\s+o\s+atendimento',
-                         body)
-        if match:
-            return match.group(1).strip().lower()
-    return None
+        mt = re.match(r'^([A-Z][a-zA-ZÀ-ÿ]+)(?:\s+[A-Z][a-zA-ZÀ-ÿ]+)*\s+finalizou\s+o\s+atendimento', body)
+        if mt:
+            last_fin_idx = i
+            last_fin_name = mt.group(1).strip().lower()
+    # 2) Procura evento de retencao APOS o ultimo "finalizou" (ou em qualquer
+    #    lugar se nao houve "finalizou"). Marcadores:
+    #    - "moveu para o departamento Retenção"
+    #    - nota interna "Retenção - Agente IA" (nosso trigger_retention)
+    #    - frase "Transferido automaticamente para Wesley"
+    ret_after = False
+    for i, m in enumerate(msgs):
+        if i <= last_fin_idx:
+            continue
+        body = (m.get('body') or m.get('text') or '').strip().lower()
+        if not body:
+            continue
+        if 'retenção' in body or 'retencao' in body:
+            if 'departamento' in body or 'wesley' in body or 'agente ia' in body:
+                ret_after = True
+                break
+        if 'transferido automaticamente para wesley' in body:
+            ret_after = True
+            break
+    if ret_after:
+        return 'wesley'
+    return last_fin_name
+
+
+def _is_in_retention(cid, lead_id=None, msgs=None):
+    """True se a conv esta em processo de retencao com Wesley.
+    Checa multiplas fontes para nao devolver aluno em retencao ao consultor
+    original (caso reportado: /retencao no DCZ -> aluno voltava ao consultor).
+    Fontes:
+    1. handoff_active(motivo='retention')
+    2. histórico contém "Retenção" + ("departamento"|"wesley"|"agente ia")
+    3. tag RETENTION_TAG_ID no lead (DCZ_CRM)
+    4. ultima nota nossa de trigger_retention
+    """
+    try:
+        motivo, target = _is_handoff_active(cid)
+        if motivo == 'retention' or (target and 'wesley' in (target or '').lower()):
+            return True
+    except Exception:
+        pass
+    if msgs:
+        for m in msgs[-30:]:
+            body = (m.get('body') or m.get('text') or '').strip().lower()
+            if not body:
+                continue
+            if 'retenção' in body or 'retencao' in body:
+                if any(k in body for k in ('departamento', 'wesley', 'agente ia',
+                                            'cancelamento', 'transferid')):
+                    return True
+            if 'transferido automaticamente para wesley' in body:
+                return True
+    if lead_id:
+        try:
+            r = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=8)
+            if r.status_code == 200:
+                lead_data = r.json()
+                tag_ids = [t.get('id', '') for t in (lead_data.get('tags') or [])]
+                if RETENTION_TAG_ID in tag_ids:
+                    return True
+        except Exception:
+            pass
+    return False
 
 
 def _had_attendant_left_after_handoff(conv_id, msgs):
@@ -7133,6 +7253,48 @@ def process_post_close_rescue():
 
             last_attendant_first = _extract_last_attendant_from_history(msgs)
             consultant_used = None
+
+            # (2026-05-28) PROTECAO RETENCAO: se conv passou por /retencao
+            # (consultor mandou pra Wesley), NUNCA devolver para consultor
+            # original. Caso reportado: Beatriz -> /retencao Wesley -> aluna
+            # voltava para Beatriz. Forca sticky em Wesley.
+            try:
+                _lead_for_ret, _, _ = _ensure_lead_for_rescue(phone, name)
+            except Exception:
+                _lead_for_ret = None
+            if _is_in_retention(cid, lead_id=_lead_for_ret, msgs=msgs):
+                p(f"  [POST-CLOSE-RESCUE] Conv {cid[:12]} em RETENCAO — sticky Wesley")
+                target = 'Wesley'
+                msg = (
+                    f"Oii{first_part}! Vi que voltou para falar com a gente 😊\n\n"
+                    f"Vou pedir para o(a) *{target}*, que cuida do seu caso, "
+                    f"dar continuidade ao seu atendimento. Em pouquinho ele(a) assume aqui."
+                )
+                try:
+                    meta_typing_on()
+                    send_and_track(cid, msg)
+                except Exception:
+                    pass
+                try:
+                    trigger_retention(cid, _lead_for_ret, user_text, phone=phone)
+                    _mark_handoff_active(cid, 'retention', target='Wesley',
+                                         ttl_s=8 * 3600, body=msg)
+                except Exception as e_rt:
+                    p(f"  [POST-CLOSE-RESCUE] erro retention sticky: {e_rt}")
+                try:
+                    note = (
+                        f"🔴 *Sticky retencao* — aluno voltou apos encerramento. "
+                        f"Conv ja estava em retencao (Wesley). Mantido com Wesley."
+                    )
+                    requests.post(
+                        f'{DCZ_API}/api/v1/conversations/{cid}/messages',
+                        headers=H, json={'body': note, 'isInternal': True}, timeout=10,
+                    )
+                except Exception:
+                    pass
+                _POST_CLOSE_RESCUE_RECENT[cid] = now_ts
+                rescued += 1
+                continue
 
             if last_attendant_first and is_attendant_active_now(last_attendant_first):
                 target = last_attendant_first.capitalize()
