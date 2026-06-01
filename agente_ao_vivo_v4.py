@@ -6986,15 +6986,27 @@ def _extract_last_attendant_from_history(msgs):
     return last_fin_name
 
 
+_RETENTION_RECENT_HOURS = 168  # 7 dias: evento de retencao precisa ser desse periodo
+
+
 def _is_in_retention(cid, lead_id=None, msgs=None):
-    """True se a conv esta em processo de retencao com Wesley.
-    Checa multiplas fontes para nao devolver aluno em retencao ao consultor
-    original (caso reportado: /retencao no DCZ -> aluno voltava ao consultor).
-    Fontes:
-    1. handoff_active(motivo='retention')
-    2. histórico contém "Retenção" + ("departamento"|"wesley"|"agente ia")
-    3. tag RETENTION_TAG_ID no lead (DCZ_CRM)
-    4. ultima nota nossa de trigger_retention
+    """True se a conv esta EM PROCESSO ATIVO de retencao com Wesley.
+
+    Caso reportado (2026-06-01): a regra retornava True so porque o lead
+    tinha a tag 'Retenção Wesley' (de algum atendimento meses antes).
+    Aluno mandava 'ola' ou 'boa tarde' e o agente disparava trigger_retention
+    de novo, transferindo para Wesley indevidamente.
+
+    Regra atualizada: exige EVIDENCIA RECENTE (handoff_active ativo OU
+    evento de retencao no historico nos ultimos _RETENTION_RECENT_HOURS).
+    A tag sozinha NAO basta — ela eh "permanente" no CRM e nao indica
+    intencao atual.
+
+    Fontes aceitas:
+    1. handoff_active(motivo='retention') ativo agora
+    2. historico contém "Retenção" + ("departamento"|"wesley"|"agente ia"|
+       "cancelamento"|"transferid") DENTRO de _RETENTION_RECENT_HOURS
+    3. ultima nota nossa de trigger_retention DENTRO de _RETENTION_RECENT_HOURS
     """
     try:
         motivo, target = _is_handoff_active(cid)
@@ -7003,26 +7015,68 @@ def _is_in_retention(cid, lead_id=None, msgs=None):
     except Exception:
         pass
     if msgs:
+        cutoff = None
+        try:
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            cutoff = _dt.now(_tz.utc) - _td(hours=_RETENTION_RECENT_HOURS)
+        except Exception:
+            cutoff = None
+
+        def _msg_ts_utc(m):
+            try:
+                ts = m.get('createdAt') or m.get('created_at') or ''
+                if not ts:
+                    return None
+                from datetime import datetime as _dt
+                return _dt.fromisoformat(str(ts).replace('Z', '+00:00'))
+            except Exception:
+                return None
+
         for m in msgs[-30:]:
             body = (m.get('body') or m.get('text') or '').strip().lower()
             if not body:
                 continue
-            if 'retenção' in body or 'retencao' in body:
-                if any(k in body for k in ('departamento', 'wesley', 'agente ia',
-                                            'cancelamento', 'transferid')):
-                    return True
-            if 'transferido automaticamente para wesley' in body:
+            # Filtro temporal: se nao consegue extrair ts, ignora (seguranca:
+            # nao quer disparar retencao por evento antigo)
+            ts = _msg_ts_utc(m)
+            if cutoff and ts and ts < cutoff:
+                continue
+            if cutoff and ts is None:
+                # Sem ts -> nao podemos confiar. Pula.
+                continue
+            # NAO usar a propria nota interna do agente como evidencia —
+            # pode ser de execucao anterior que disparou falso positivo.
+            # Detecta nota nossa: contem assinatura "*Retenção - Agente IA*"
+            # ou variantes.
+            if 'retenção - agente ia' in body or 'retencao - agente ia' in body:
+                continue
+            if 'sticky retencao' in body or 'sticky retenção' in body:
+                continue
+            # Evento real do DCZ "moveu para o departamento Retenção"
+            if 'moveu para o departamento retenç' in body or \
+               'moveu para o departamento retenc' in body:
                 return True
-    if lead_id:
-        try:
-            r = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=8)
-            if r.status_code == 200:
-                lead_data = r.json()
-                tag_ids = [t.get('id', '') for t in (lead_data.get('tags') or [])]
-                if RETENTION_TAG_ID in tag_ids:
+            # Mensagem do aluno com palavra-chave clara
+            recv_flag = m.get('received', False)
+            if recv_flag:
+                # aluno disse algo com keyword forte
+                from_aluno = body
+                for kw in ('cancelar', 'trancar', 'desistir', 'cancelamento',
+                          'trancamento'):
+                    if kw in from_aluno:
+                        return True
+            # Mensagem de evento do sistema com "transferido automaticamente para wesley"
+            # (vinda do DCZ, nao da nossa nota)
+            if 'transferido automaticamente para wesley' in body and \
+               'retenção - agente ia' not in body and \
+               'retencao - agente ia' not in body:
+                # apenas se nao for a propria nota nossa (que tem esse texto)
+                # — fallback: aceitar so se for mensagem NAO-interna
+                if not bool(m.get('isInternal', False)):
                     return True
-        except Exception:
-            pass
+    # NOTA: a checagem da tag RETENTION_TAG_ID foi REMOVIDA (2026-06-01).
+    # Tag fica "para sempre" no CRM e gerava falsos positivos. Use apenas
+    # handoff_active OU evento recente no historico.
     return False
 
 
