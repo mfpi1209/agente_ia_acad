@@ -11424,6 +11424,27 @@ def get_new_client_message(conv_id, force=False):
             has_outgoing_response = True
             continue
 
+        # (2026-06-01) GUARD ANTI-MENSAGEM-ANTIGA — bug reportado (Marcia):
+        # a API ignora o `limit` e devolve TODAS as msgs (newest-first). Quando
+        # as msgs novas ("Oi"/"Ola") ja estavam em processed_msg_ids, o loop
+        # descia ate uma msg de uma SESSAO JA ENCERRADA dias atras ("Agradeço!"
+        # de 1 semana antes) e a tratava como atual -> despedida -> fechava a
+        # conversa. Regra geral: so processa msg do aluno MAIS RECENTE que a
+        # ultima resposta (bot/humano). Tudo antes ja foi respondido.
+        if last_outgoing_ts and msg_ts:
+            try:
+                from datetime import datetime as _dt_g
+                _ts_msg = _dt_g.fromisoformat(str(msg_ts).replace('Z', '+00:00'))
+                _ts_out = _dt_g.fromisoformat(str(last_outgoing_ts).replace('Z', '+00:00'))
+                if _ts_msg <= _ts_out:
+                    processed_msg_ids.add(mid)
+                    continue
+            except Exception:
+                # fallback comparacao lexicografica (ISO8601 ordena igual)
+                if str(msg_ts) <= str(last_outgoing_ts):
+                    processed_msg_ids.add(mid)
+                    continue
+
         image_info = extract_image_from_message(m)
         img_caption = image_info.get('caption', '') if image_info else ''
 
