@@ -920,7 +920,9 @@ SAIDA_ANTE_MIN = 20
 # Para reativar: remover do set e fazer rebuild.
 _ATTENDANTS_ON_VACATION = {
     'joyce',   # ferias a partir de 2026-05-25
-    'felipe',  # inativo/offline - nao distribuir (2026-05-27)
+    # 'felipe' removido em 2026-06-01: voltou a ficar Ativo no painel.
+    # O controle de ativo/inativo do Felipe agora eh 100% pelo dashboard
+    # (campo ativo_inativo no Supabase).
 }
 
 # ===================== HORÁRIO DE ATENDIMENTO (sobrescrito por agent_config) =====================
