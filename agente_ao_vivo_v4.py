@@ -6332,6 +6332,21 @@ _HANDOFF_FULFILL_RECENT = {}
 HANDOFF_FULFILL_COOLDOWN_S = 120
 
 
+# ===================== INACTIVE ATTENDANT RESCUE — REMOVIDO (2026-06-01) =====================
+# Tentativa anterior foi agressiva demais: varria TODAS as conversas e tirava
+# dos atendentes inativos, mesmo quando o atendimento estava em andamento
+# normalmente (ex: Julia ainda atendendo um aluno apesar de marcada como
+# inativa no Supabase). Resultou em ~31 conversas indevidamente
+# redistribuidas para Danubia/Camila e tiveram que ser revertidas
+# manualmente.
+#
+# Decisao: NAO mexer em conversa que ja tem atendente. A unica prevencao
+# necessaria eh no momento de DISTRIBUIR UMA NOVA conv — e isso ja eh feito
+# por get_available_consultant() (filtro ativo_inativo=Ativo) + checagem
+# _ATTENDANTS_ON_VACATION. Se atendente inativo recebe conv por outro canal
+# (DCZ Easy auto-dist, n8n, etc.), isso eh problema externo — nao do agente.
+
+
 def process_handoff_fulfillment_sweep(open_convs):
     """Cumpre promessas de transferencia quando bot ja respondeu mas nao ha
     atendente no DCZ. Caso reportado: 'Vou te transferir para Debora...'
@@ -13551,6 +13566,13 @@ def main():
                     process_in_hours_rescue()
                 except Exception as e_ihr:
                     p(f"  [IN-HOURS-RESCUE] Erro: {e_ihr}")
+                # (2026-06-01) DESATIVADO: process_inactive_attendant_rescue
+                # Era agressivo demais — varria todas as conversas existentes e
+                # tirava dos inativos, mesmo quando ja havia atendimento em
+                # andamento. A regra correta eh: NAO mexer em conversa que ja
+                # tem atendente; apenas EVITAR escolher inativo quando o
+                # agente IA for distribuir UMA NOVA conv (isso ja eh feito
+                # via get_available_consultant + filtro ativo_inativo=Ativo).
 
             if cycle % 10 == 0:
                 try:
