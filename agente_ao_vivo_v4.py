@@ -911,19 +911,19 @@ ALMOCO_DURACAO_MIN = 60
 SAIDA_ANTE_MIN = 20
 
 # ============================================================
-# CONSULTORES EM FERIAS / AFASTADOS (2026-05-25)
+# BLOQUEIO MANUAL DE CONSULTORES (override de emergencia)
 # ============================================================
-# Nomes em LOWERCASE (primeiro nome). Filtragem aplicada em:
-# - get_available_consultant (nao escolhe pra novas distribuicoes)
-# - is_attendant_active_now (retorna False -> sticky promise tambem pula)
-# - honor_preferred_attendant_promise (re-encaminha para outro consultor)
-# Para reativar: remover do set e fazer rebuild.
-_ATTENDANTS_ON_VACATION = {
-    'joyce',   # ferias a partir de 2026-05-25
-    # 'felipe' removido em 2026-06-01: voltou a ficar Ativo no painel.
-    # O controle de ativo/inativo do Felipe agora eh 100% pelo dashboard
-    # (campo ativo_inativo no Supabase).
-}
+# (2026-06-01) ESVAZIADO: o controle de ativo/inativo agora eh 100% pelo
+# DASHBOARD (campo `ativo_inativo` no Supabase, tabela de distribuicao).
+# Tanto get_available_consultant quanto is_attendant_active_now ja
+# consultam `ativo_inativo=eq.Ativo`, entao quem o painel marca como
+# Inativo NAO recebe leads — sem precisar de lista fixa no codigo.
+#
+# Este set continua existindo APENAS como override manual de emergencia:
+# se for preciso bloquear alguem IMEDIATAMENTE (sem mexer no painel),
+# adicione o PRIMEIRO NOME em lowercase aqui e faca rebuild. Em condicoes
+# normais deve ficar VAZIO.
+_ATTENDANTS_ON_VACATION = set()
 
 # ===================== HORÁRIO DE ATENDIMENTO (sobrescrito por agent_config) =====================
 BUSINESS_HOURS_WEEKDAY_START = 8   # Seg-Sex início (mudado de 9 para 8 em 2026-05-21: alguns consultores entram 8h)

@@ -7,6 +7,34 @@
 
 ---
 
+### [2026-06-01] - Ativo/inativo de consultor 100% pelo dashboard (Supabase)
+
+**Decisão**
+`_ATTENDANTS_ON_VACATION` esvaziado (`set()`). O controle de quem recebe
+leads passa a ser exclusivamente o campo `ativo_inativo` da tabela de
+distribuição no Supabase (o dashboard do Cockpit). O set permanece no
+código apenas como override manual de emergência (deve ficar vazio).
+
+**Contexto**
+A lista fixa duplicava o controle do painel e causava confusão recorrente:
+consultores marcados "Ativo" no dashboard (ex: Felipe) continuavam
+bloqueados no código e não recebiam leads, enquanto o usuário não entendia
+por quê. `get_available_consultant` e `is_attendant_active_now` já
+consultavam `ativo_inativo=eq.Ativo`, então a lista fixa era redundante.
+
+**Alternativas descartadas**
+- Manter a lista e editá-la a cada mudança: fonte contínua de erro humano e
+  dessincronia com o painel.
+
+**Impacto**
+- Quem o painel marca como Inativo não recebe leads (Joyce continua fora por
+  estar Inativa no Supabase, não mais por lista fixa).
+- Para bloquear alguém imediatamente sem mexer no painel, adicionar o
+  primeiro nome (lowercase) ao set e rebuildar.
+- Requer rebuild para entrar em vigor.
+
+---
+
 ### [2026-05-26] - Fix: cegueira a `unstarted`/`opened` + follow-up bot DCZ + guarda D6
 
 **Decisão**
