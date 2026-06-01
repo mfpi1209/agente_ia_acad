@@ -6676,6 +6676,19 @@ def _is_farewell_message(text):
     t_clean = ''.join(c for c in t_norm if c.isalnum() or c.isspace()).strip()
     if t_clean in _GREETING_ONLY_PHRASES:
         return False
+    # (2026-06-01) Se a msg contem saudacao + outro token curto (ex:
+    # "ola obrigada", "oi obrigado", "boa tarde td bem"), eh ABERTURA de
+    # conversa, NAO despedida. Senao "obrigada" sozinho ainda casa.
+    if _is_pure_greeting(text):
+        return False
+    # Se contem saudacao no inicio + palavra de "cortesia/agradecimento",
+    # tratar como abertura (cortes\u00eda). Caso reportado: aluno volta
+    # apos dias e diz "Ola obrigada" — n\u00e3o deve fechar.
+    tokens_init = [w for w in t_clean.split() if w]
+    if tokens_init and tokens_init[0] in _GREETING_TOKENS and len(tokens_init) <= 4:
+        # Se PELO MENOS uma saudacao real no inicio, n\u00e3o tratar como
+        # despedida — aluno est\u00e1 abrindo conversa.
+        return False
     if any(emo in text for emo in _FAREWELL_EMOJIS) and len(t) <= 30:
         return True
     for kw in _FAREWELL_KEYWORDS:
@@ -6742,20 +6755,54 @@ def _is_resolution_confirmation(text):
     return False
 
 
+# (2026-06-01) Palavras "neutras" que acompanham saudacao sem mudar a
+# natureza (abertura de conversa). Ex: "Ola tudo bem?", "Oi td bom".
+_GREETING_NEUTRAL_TOKENS = (
+    'tudo', 'bem', 'bom', 'td', 'tdb', 'tdbm', 'beleza', 'blz',
+    'eai', 'ae', 'e', 'ai',
+)
+# Tokens que TAMBEM sao saudacoes (versao tokenizada)
+_GREETING_TOKENS = (
+    'oi', 'oii', 'oiii', 'ola', 'olá', 'opa', 'eai', 'hey', 'hi',
+    'bom', 'boa', 'dia', 'tarde', 'noite',  # "bom dia" etc.
+    'oie', 'oiee',
+)
+
+
 def _is_pure_greeting(text):
-    """True se a mensagem do aluno \u00e9 APENAS uma sauda\u00e7\u00e3o (sem outro conte\u00fado).
+    """True se a mensagem do aluno e APENAS uma saudacao (sem outro conteudo).
     Usado como guard defensivo em qualquer caminho que poderia tratar
-    sauda\u00e7\u00e3o como despedida/encerramento."""
+    saudacao como despedida/encerramento.
+
+    (2026-06-01) Agora reconhece saudacoes COMPOSTAS:
+      - "Ola Oi" / "Oi tudo bem" / "Bom dia tudo bom"
+      - "Ola!" / "Oi." (pontuacao)
+    """
     if not text:
         return False
     import unicodedata
     t = text.strip().lower()
-    if len(t) > 30:
+    if len(t) > 40:
         return False
     t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
                      if unicodedata.category(c) != 'Mn')
     t_clean = ''.join(c for c in t_norm if c.isalnum() or c.isspace()).strip()
-    return t_clean in _GREETING_ONLY_PHRASES
+    # Match exato (rapido)
+    if t_clean in _GREETING_ONLY_PHRASES:
+        return True
+    # Match tokenizado: TODAS as palavras tem que ser saudacao ou neutro
+    tokens = [tok for tok in t_clean.split() if tok]
+    if not tokens or len(tokens) > 6:
+        return False
+    for tok in tokens:
+        if tok in _GREETING_TOKENS:
+            continue
+        if tok in _GREETING_NEUTRAL_TOKENS:
+            continue
+        return False
+    # Pelo menos UM token tem que ser saudacao real (nao so neutros)
+    has_real_greeting = any(tok in _GREETING_TOKENS for tok in tokens)
+    return has_real_greeting
 
 
 # Confirmacao de pagamento (resposta a disparo de boleto/mensalidade).
@@ -13219,7 +13266,10 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                 waiting_for_client = False; inactivity_start = 0
                 return
             # 2) Despedida pura
-            if _is_farewell_message(question):
+            # (2026-06-01) GUARD: saudacao pura nunca encerra. Sem esse guard,
+            # bug reportado: aluno volta apos dias com "Olá Oi" e o agente
+            # responde "Foi otimo poder te ajudar!" + fecha.
+            if not _is_pure_greeting(question) and _is_farewell_message(question):
                 p(f"  [LOW-CONF-D4] cancelado: msg eh despedida -> closing")
                 _msg_f = random.choice(_CLOSING_RESPONSES).format(name_suffix=name_suffix)
                 send_and_track(conv_id, _msg_f, force=True)
