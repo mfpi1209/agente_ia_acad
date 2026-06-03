@@ -53,6 +53,32 @@ usuário: a turma é a janela de matrícula em que a `data_matricula` se encaixa
 
 ---
 
+### [2026-06-03] - Semestre/turma atual respondido pelos dados do aluno
+
+**Decisão**
+Adicionado handler canônico `handle_semestre_intent` (gatilho `detect_semestre_intent`)
+que responde, **quando o aluno PERGUNTA**, o semestre atual (`serie` da
+`mm_matriculados`) e, para calouro (nova matrícula), a turma de ingresso. Múltiplos
+cursos → lista o semestre de cada um. Pós / fora da base / sem `serie` → transfere
+para consultor (nunca inventa). Função de transferência generalizada em
+`_transfer_acad_question_to_consultant` (reutilizada por início-aulas e semestre).
+
+**Contexto**
+O `serie` já era injetado no contexto do LLM, mas a regra de privacidade do prompt
+("NUNCA diga 'você está no Xº semestre'") tornava a resposta a uma pergunta direta
+inconsistente. Mesmo princípio do início das aulas: resposta determinística da base
+quando perguntado, transferência quando não há dado.
+
+**Alternativas descartadas**
+- Deixar só com o LLM: comportamento inconsistente (desvia ou arrisca).
+- Revelar dados proativamente: mantido proibido; só responde quando o aluno pergunta.
+
+**Impacto**
+- Pergunta direta sobre semestre/turma respondida com dado real; sem dado → consultor.
+  Vale após rebuild.
+
+---
+
 ### [2026-06-03] - Anti-alucinação de contato da coordenação + entrada oficial na KB
 
 **Decisão**

@@ -530,42 +530,48 @@ def detect_inicio_aulas_intent(text):
     return False
 
 
-def _transfer_inicio_aulas_to_consultant(conv_id, question='', motivo=''):
-    """Fallback do inicio das aulas: NAO sabe a data com certeza (Pos, aluno
-    fora da base, data fora das janelas) -> avisa o aluno e transfere para
-    consultor. Nunca inventa. Mesmo padrao do handle_polo_visit_intent."""
+def _transfer_acad_question_to_consultant(conv_id, question='', assunto='essa informação',
+                                          motivo='', handoff_tag='acad_info'):
+    """Fallback generico para perguntas academicas sem dado confiavel (Pos,
+    aluno fora da base, dado ausente) -> avisa o aluno e transfere para
+    consultor. NUNCA inventa. Mesmo padrao do handle_polo_visit_intent.
+
+    assunto: o que o consultor vai confirmar (ex: 'a data de início das suas
+             aulas', 'o seu semestre atual').
+    handoff_tag: usado em reason/handoff (ex: 'inicio_aulas', 'semestre').
+    """
     name_prefix = ''
     try:
         name_prefix = _student_first_name_prefix(conv_id)
     except Exception:
         pass
     msg = (
-        f"Boa pergunta{name_prefix}! Pra te passar a data certinha de início das "
-        f"suas aulas, vou *te conectar com um(a) consultor(a)* que confirma isso "
-        f"no seu cadastro. Em pouquinho alguém te chama por aqui, tá? 😊"
+        f"Pra te passar {assunto} certinho{name_prefix}, vou *te conectar com "
+        f"um(a) consultor(a)* que confirma isso no seu cadastro. Em pouquinho "
+        f"alguém te chama por aqui, tá? 😊"
     )
     try:
         meta_typing_on()
         send_and_track(conv_id, msg)
-        log_to_db(conv_id, question or '[inicio_aulas_transfer]', msg, 1.0, 'inicio_aulas_transfer')
+        log_to_db(conv_id, question or f'[{handoff_tag}_transfer]', msg, 1.0, f'{handoff_tag}_transfer')
     except Exception as e:
-        p(f"  [INICIO-AULAS] erro ao enviar msg de transferencia: {e}")
+        p(f"  [{handoff_tag.upper()}] erro ao enviar msg de transferencia: {e}")
     if is_within_business_hours():
         try:
             distribute_to_attendant(
                 conv_id,
-                reason=f'Início das aulas — sem dado confiável ({motivo}). Pergunta: "{(question or "")[:120]}"',
+                reason=f'{assunto} — sem dado confiável ({motivo}). Pergunta: "{(question or "")[:120]}"',
             )
         except Exception as e:
-            p(f"  [INICIO-AULAS] erro distribuir: {e}")
+            p(f"  [{handoff_tag.upper()}] erro distribuir: {e}")
     else:
         try:
             record_pending_escalation(
-                conv_id, reason='inicio_aulas_after_hours', tier='insist',
+                conv_id, reason=f'{handoff_tag}_after_hours', tier='insist',
                 retorno_label=next_human_available_label(),
                 question=(question or '')[:500],
             )
-            _mark_handoff_active(conv_id, 'inicio_aulas', target='', ttl_s=12 * 3600, body=msg)
+            _mark_handoff_active(conv_id, handoff_tag, target='', ttl_s=12 * 3600, body=msg)
         except Exception:
             pass
     return msg
@@ -595,9 +601,10 @@ def handle_inicio_aulas_intent(conv_id, question='', academic=None):
     #    sem dado confiavel -> transfere, nunca chuta.
     if not acad or (nivel and 'grad' not in nivel):
         p(f"  [INICIO-AULAS] sem dado de graduacao (nivel='{nivel or 'vazio'}') -> transferir consultor")
-        msg = _transfer_inicio_aulas_to_consultant(
-            conv_id, question=question,
+        msg = _transfer_acad_question_to_consultant(
+            conv_id, question=question, assunto='a data de início das suas aulas',
             motivo='pos/sem dado acadêmico' if nivel else 'aluno fora da base',
+            handoff_tag='inicio_aulas',
         )
         _register_signature(conv_id, sig, msg)
         return msg
@@ -606,8 +613,9 @@ def handle_inicio_aulas_intent(conv_id, question='', academic=None):
     turma = resolve_turma_ingresso(data_matricula)
     if not turma:
         p(f"  [INICIO-AULAS] data_matricula='{data_matricula}' fora das janelas -> transferir consultor")
-        msg = _transfer_inicio_aulas_to_consultant(
-            conv_id, question=question, motivo='data_matricula fora das janelas',
+        msg = _transfer_acad_question_to_consultant(
+            conv_id, question=question, assunto='a data de início das suas aulas',
+            motivo='data_matricula fora das janelas', handoff_tag='inicio_aulas',
         )
         _register_signature(conv_id, sig, msg)
         return msg
@@ -655,6 +663,142 @@ def handle_inicio_aulas_intent(conv_id, question='', academic=None):
         return msg if sent_ok else ''
     except Exception as e:
         p(f"  [INICIO-AULAS] erro: {e}")
+        return ''
+
+
+# === SEMESTRE / TURMA ATUAL DO ALUNO ===
+# (2026-06-03) Mesmo principio do inicio das aulas: responde o semestre (serie
+# da mm_matriculados) e, para calouro, a turma de ingresso (data_matricula).
+# Sem dado confiavel (Pos / fora da base / sem serie) -> transfere, nao inventa.
+_SEMESTRE_TRIGGERS = [
+    'qual meu semestre', 'qual o meu semestre', 'qual e meu semestre',
+    'meu semestre atual', 'semestre atual', 'que semestre eu estou',
+    'que semestre estou', 'em que semestre eu', 'em que semestre estou',
+    'em qual semestre', 'qual semestre eu estou', 'qual semestre estou',
+    'qual semestre eu to', 'qual semestre to', 'qual semestre eu curso',
+    'qual meu periodo', 'qual o meu periodo', 'meu periodo atual',
+    'em que periodo eu', 'em que periodo estou', 'em qual periodo',
+    'qual meu modulo', 'qual o meu modulo', 'meu modulo atual',
+    'qual minha turma', 'qual a minha turma', 'minha turma atual',
+    'que turma eu sou', 'qual turma eu sou', 'qual turma eu estou',
+    'turma atual',
+]
+
+
+def detect_semestre_intent(text):
+    """True se o aluno perguntou em qual semestre/periodo/turma ele esta."""
+    if not text:
+        return False
+    import unicodedata
+    norm = ''.join(c for c in unicodedata.normalize('NFD', text.lower())
+                   if unicodedata.category(c) != 'Mn')
+    norm = ' '.join(norm.split())
+    for kw in _SEMESTRE_TRIGGERS:
+        kw_n = ''.join(c for c in unicodedata.normalize('NFD', kw.lower())
+                       if unicodedata.category(c) != 'Mn')
+        if kw_n in norm:
+            return True
+    return False
+
+
+def handle_semestre_intent(conv_id, question='', academic=None):
+    """Responde o semestre/turma atual do aluno usando a mm_matriculados.
+
+    - Graduacao encontrada: informa o semestre (serie) e, para calouro (nova
+      matricula), a turma de ingresso (resolvida pela data_matricula).
+    - Multiplos cursos: lista o semestre de cada um.
+    - Pos / fora da base / sem serie: transfere para consultor (nao inventa).
+
+    Dedup 6h. Retorna a mensagem enviada (str) ou '' se nada foi enviado.
+    """
+    sig = 'semestre_resolved'
+    if _signature_recently_sent(conv_id, sig, window_s=6 * 3600):
+        p(f"  [SEMESTRE] dedup: ja respondido nas ultimas 6h - suprimindo")
+        return ''
+
+    acad = academic or {}
+    nivel = (acad.get('nivel') or '').strip().lower()
+
+    if not acad or (nivel and 'grad' not in nivel):
+        p(f"  [SEMESTRE] sem dado de graduacao (nivel='{nivel or 'vazio'}') -> transferir consultor")
+        msg = _transfer_acad_question_to_consultant(
+            conv_id, question=question, assunto='o seu semestre atual',
+            motivo='pos/sem dado acadêmico' if nivel else 'aluno fora da base',
+            handoff_tag='semestre',
+        )
+        _register_signature(conv_id, sig, msg)
+        return msg
+
+    name_prefix = ''
+    try:
+        name_prefix = _student_first_name_prefix(conv_id)
+    except Exception:
+        pass
+
+    def _ord_sem(s):
+        s = (s or '').strip()
+        return f"{s}º semestre" if s.isdigit() else (s or '')
+
+    # Multiplos cursos -> lista cada um
+    multi = acad.get('_all_courses') or []
+    if len(multi) > 1:
+        linhas = []
+        for c in multi[:3]:
+            s = _ord_sem(c.get('serie'))
+            cu = (c.get('curso') or 'seu curso').strip()
+            if s:
+                linhas.append(f"• *{cu}*: {s}")
+        if linhas:
+            msg = (
+                f"Você tem mais de um curso com a gente{name_prefix}! 😊\n\n"
+                + "\n".join(linhas)
+                + "\n\nQualquer dúvida, é só me chamar! 💙"
+            )
+            try:
+                meta_typing_on()
+                sent_ok = send_and_track(conv_id, msg)
+                if sent_ok:
+                    log_to_db(conv_id, question or '', msg, 1.0, sig)
+                    _register_signature(conv_id, sig, msg)
+                    p(f"  [SEMESTRE] multi-curso respondido ({len(linhas)} cursos)")
+                return msg if sent_ok else ''
+            except Exception as e:
+                p(f"  [SEMESTRE] erro: {e}")
+                return ''
+
+    serie = (acad.get('serie') or '').strip()
+    if not serie:
+        p(f"  [SEMESTRE] sem serie -> transferir consultor")
+        msg = _transfer_acad_question_to_consultant(
+            conv_id, question=question, assunto='o seu semestre atual',
+            motivo='serie ausente', handoff_tag='semestre',
+        )
+        _register_signature(conv_id, sig, msg)
+        return msg
+
+    curso = (acad.get('curso') or '').strip()
+    tipo = (acad.get('tipo_matricula') or '').lower()
+    base = f"Deixa eu conferir aqui{name_prefix}! 😊\n\nVocê está no *{_ord_sem(serie)}*"
+    if curso:
+        base += f" do curso de *{curso}*"
+    base += "."
+    # Para calouro (nova matricula) a turma de ingresso eh significativa.
+    if 'nova matricula' in tipo:
+        turma = resolve_turma_ingresso(acad.get('data_matricula'))
+        if turma:
+            base += f"\n\nVocê entrou na *turma de {turma['turma']}*."
+    base += "\n\nQualquer dúvida, é só me chamar! 💙"
+
+    try:
+        meta_typing_on()
+        sent_ok = send_and_track(conv_id, base)
+        if sent_ok:
+            log_to_db(conv_id, question or '', base, 1.0, sig)
+            _register_signature(conv_id, sig, base)
+            p(f"  [SEMESTRE] serie={serie} tipo='{tipo}' respondido")
+        return base if sent_ok else ''
+    except Exception as e:
+        p(f"  [SEMESTRE] erro: {e}")
         return ''
 
 
@@ -12856,6 +13000,22 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             return
     except Exception as e_ia:
         p(f"  [INICIO-AULAS] erro: {e_ia}")
+
+    # === SEMESTRE / TURMA ATUAL (resolvido pelos dados do aluno) ===
+    # (2026-06-03) Mesmo padrao do inicio das aulas: responde o semestre (serie
+    # da mm_matriculados) quando o aluno PERGUNTA; sem dado confiavel (Pos /
+    # fora da base) transfere para consultor. NUNCA inventa.
+    try:
+        if detect_semestre_intent(question):
+            _acad_sem = (student_profile or {}).get('academic')
+            p(f"  [SEMESTRE] intent detectado — resolvendo semestre/turma do aluno")
+            _sem_msg = handle_semestre_intent(conv_id, question=question, academic=_acad_sem)
+            if _sem_msg:
+                conversation_messages.append({'role': 'user', 'text': question})
+                conversation_messages.append({'role': 'bot', 'text': _sem_msg})
+            return
+    except Exception as e_sem:
+        p(f"  [SEMESTRE] erro: {e_sem}")
 
     # === POLO: intencao de ir presencialmente / dificuldade comunicacao online ===
     # Resolve o caso "Vanessa Carmona" (LLM inventou endereco da Barra Funda).
