@@ -7,6 +7,38 @@
 
 ---
 
+### [2026-06-03] - Anti-alucinação de contato da coordenação + entrada oficial na KB
+
+**Decisão**
+Adicionada a **regra crítica nº 16** no `SYSTEM_PROMPT` proibindo o agente de
+inventar qualquer e-mail/telefone/ramal/WhatsApp de coordenação, secretaria,
+polo ou financeiro. O canal oficial de contato com a coordenação é o
+**Blackboard → Organizações**; se o aluno não encontrar, transferir para
+consultor. Também foram cadastradas 6 entradas (variações de pergunta) na
+`knowledge_base` com tema `COORDENACAO` apontando para esse caminho.
+
+**Contexto**
+Print do usuário mostrou o agente respondendo *"geralmente o e-mail é algo como
+coordenacao@cruzeirodosul.edu.br"* e *"o telefone da coordenação é (11)
+2797-2000"*. Investigação confirmou que NENHUM desses dados existe no código nem
+nas 9.847 entradas da KB — eram alucinação do gpt-4o-mini preenchendo uma lacuna
+(não havia regra anti-invenção específica para contatos institucionais, só para
+URLs/datas/endereço de polo). Pior: contradizia entradas reais da KB.
+
+**Alternativas descartadas**
+- Só corrigir o prompt sem cadastrar na KB: o RAG ainda não traria resposta
+  confiável e o LLM poderia chutar de novo.
+- Cadastrar e-mail/telefone público: não existe canal direto; contato é só pela
+  plataforma.
+
+**Impacto**
+- Após rebuild, perguntas sobre contato da coordenação caem na entrada oficial
+  (RAG top score ~0.83–0.86) e o agente orienta Blackboard → Organizações,
+  transferindo para consultor em caso de dificuldade. Nunca mais inventa
+  e-mail/telefone "provável".
+
+---
+
 ### [2026-06-01] - Ativo/inativo de consultor 100% pelo dashboard (Supabase)
 
 **Decisão**
