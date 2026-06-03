@@ -441,6 +441,9 @@ _INICIO_AULAS_TRIGGERS = [
     'quando inicia aula', 'quando iniciam aula',
     'quando vou comecar', 'quando vou começar',
     'inicio das aulas', 'início das aulas',
+    'inicio do curso', 'início do curso',
+    'inicia o curso', 'começa o curso', 'comeca o curso',
+    'comeco as aulas', 'começo as aulas',
     'data de inicio', 'data de início',
     'mes que comeca', 'mês que começa',
     'em que mes', 'em que mês',
@@ -455,13 +458,59 @@ _INICIO_AULAS_TRIGGERS = [
     'turma de fevereiro', 'turma de janeiro',
 ]
 
-INICIO_AULAS_MSG = (
-    "Sobre o início das aulas, deixa eu te explicar 😊\n\n"
-    "Quem está se matriculando *agora* em graduação ingressa na "
-    "*turma do 2º semestre*, então as aulas começam em *agosto*.\n\n"
-    "Se precisar de mais informações sobre cronograma ou calendário "
-    "acadêmico, posso te transferir pra um(a) consultor(a) — é só me avisar!"
-)
+# (2026-06-03) Inicio das aulas agora eh RESOLVIDO por aluno: a turma de
+# ingresso vem da data_matricula (mm_matriculados) cruzada com as janelas de
+# matricula do Calendario Academico Graduacao EAD 2026, e a data de inicio
+# das aulas vem do proprio calendario. NUNCA mais resposta fixa "agosto".
+# Quando NAO for possivel determinar (Pos, aluno fora da base, data fora das
+# janelas conhecidas), o agente TRANSFERE para consultor — nao inventa.
+#
+# Janelas SEQUENCIAIS e SEM sobreposicao: cada data_matricula cai em exatamente
+# uma. Tupla = (janela_ini_iso, janela_fim_iso, nome_turma, inicio_aulas_iso).
+# Fonte: Calendario Academico Graduacao EAD 2026 (oficial).
+_TURMAS_INGRESSO_2026 = [
+    ("2025-11-18", "2026-02-15", "Fevereiro", "2026-02-02"),
+    ("2026-02-16", "2026-03-08", "Março",     "2026-03-02"),
+    ("2026-03-09", "2026-04-12", "Abril",     "2026-04-01"),
+    ("2026-04-13", "2026-05-12", "Maio",      "2026-05-04"),
+    ("2026-05-13", "2026-08-16", "Agosto",    "2026-08-03"),
+    ("2026-08-17", "2026-09-13", "Setembro",  "2026-09-01"),
+    ("2026-09-14", "2026-10-11", "Outubro",   "2026-10-01"),
+    ("2026-10-12", "2026-11-17", "Novembro",  "2026-11-03"),
+]
+
+
+def _parse_iso_date(s):
+    """Converte 'YYYY-MM-DD' (ou prefixo) em datetime.date, ou None."""
+    if not s:
+        return None
+    try:
+        from datetime import date as _date
+        y, m, d = str(s)[:10].split('-')
+        return _date(int(y), int(m), int(d))
+    except Exception:
+        return None
+
+
+def resolve_turma_ingresso(data_matricula):
+    """Recebe a data_matricula (ISO 'YYYY-MM-DD') e devolve a turma de ingresso
+    + data de inicio das aulas. Retorna dict {turma, inicio_dt, inicio_br} ou
+    None se a data nao mapear em nenhuma janela conhecida de 2026 (-> o caller
+    deve transferir para consultor, NUNCA chutar)."""
+    dt = _parse_iso_date(data_matricula)
+    if not dt:
+        return None
+    for ini, fim, turma, inicio in _TURMAS_INGRESSO_2026:
+        di = _parse_iso_date(ini)
+        df = _parse_iso_date(fim)
+        if di and df and di <= dt <= df:
+            ini_dt = _parse_iso_date(inicio)
+            return {
+                'turma': turma,
+                'inicio_dt': ini_dt,
+                'inicio_br': ini_dt.strftime('%d/%m') if ini_dt else '',
+            }
+    return None
 
 
 def detect_inicio_aulas_intent(text):
@@ -481,24 +530,132 @@ def detect_inicio_aulas_intent(text):
     return False
 
 
-def handle_inicio_aulas_intent(conv_id, question=''):
-    """Envia a resposta canonica sobre inicio das aulas (turma de agosto).
-    Dedup de 6h. Bloqueia o LLM de parafrasear/inventar informacao errada."""
-    sig = 'inicio_aulas_canonical'
-    if _signature_recently_sent(conv_id, sig, window_s=6 * 3600):
-        p(f"  [INICIO-AULAS] dedup: ja enviado nas ultimas 6h - suprimindo")
-        return True
+def _transfer_inicio_aulas_to_consultant(conv_id, question='', motivo=''):
+    """Fallback do inicio das aulas: NAO sabe a data com certeza (Pos, aluno
+    fora da base, data fora das janelas) -> avisa o aluno e transfere para
+    consultor. Nunca inventa. Mesmo padrao do handle_polo_visit_intent."""
+    name_prefix = ''
+    try:
+        name_prefix = _student_first_name_prefix(conv_id)
+    except Exception:
+        pass
+    msg = (
+        f"Boa pergunta{name_prefix}! Pra te passar a data certinha de início das "
+        f"suas aulas, vou *te conectar com um(a) consultor(a)* que confirma isso "
+        f"no seu cadastro. Em pouquinho alguém te chama por aqui, tá? 😊"
+    )
     try:
         meta_typing_on()
-        sent_ok = send_and_track(conv_id, INICIO_AULAS_MSG)
+        send_and_track(conv_id, msg)
+        log_to_db(conv_id, question or '[inicio_aulas_transfer]', msg, 1.0, 'inicio_aulas_transfer')
+    except Exception as e:
+        p(f"  [INICIO-AULAS] erro ao enviar msg de transferencia: {e}")
+    if is_within_business_hours():
+        try:
+            distribute_to_attendant(
+                conv_id,
+                reason=f'Início das aulas — sem dado confiável ({motivo}). Pergunta: "{(question or "")[:120]}"',
+            )
+        except Exception as e:
+            p(f"  [INICIO-AULAS] erro distribuir: {e}")
+    else:
+        try:
+            record_pending_escalation(
+                conv_id, reason='inicio_aulas_after_hours', tier='insist',
+                retorno_label=next_human_available_label(),
+                question=(question or '')[:500],
+            )
+            _mark_handoff_active(conv_id, 'inicio_aulas', target='', ttl_s=12 * 3600, body=msg)
+        except Exception:
+            pass
+    return msg
+
+
+def handle_inicio_aulas_intent(conv_id, question='', academic=None):
+    """Responde quando comecam as aulas usando a TURMA REAL do aluno.
+
+    Estrategia (2026-06-03):
+    - Resolve a turma de ingresso pela data_matricula (mm_matriculados) cruzada
+      com as janelas do calendario, e devolve a data oficial de inicio.
+    - Se nao for possivel determinar com certeza (Pos / fora da base /
+      data fora das janelas), TRANSFERE para consultor (nunca inventa).
+
+    Dedup de 6h. Retorna a mensagem enviada (str) ou '' se nada foi enviado.
+    """
+    sig = 'inicio_aulas_resolved'
+    if _signature_recently_sent(conv_id, sig, window_s=6 * 3600):
+        p(f"  [INICIO-AULAS] dedup: ja respondido nas ultimas 6h - suprimindo")
+        return ''
+
+    acad = academic or {}
+    nivel = (acad.get('nivel') or '').strip().lower()
+    data_matricula = acad.get('data_matricula')
+
+    # 1) Aluno nao encontrado na base academica OU nao eh graduacao (ex: Pos):
+    #    sem dado confiavel -> transfere, nunca chuta.
+    if not acad or (nivel and 'grad' not in nivel):
+        p(f"  [INICIO-AULAS] sem dado de graduacao (nivel='{nivel or 'vazio'}') -> transferir consultor")
+        msg = _transfer_inicio_aulas_to_consultant(
+            conv_id, question=question,
+            motivo='pos/sem dado acadêmico' if nivel else 'aluno fora da base',
+        )
+        _register_signature(conv_id, sig, msg)
+        return msg
+
+    # 2) Resolve a turma de ingresso pela data_matricula.
+    turma = resolve_turma_ingresso(data_matricula)
+    if not turma:
+        p(f"  [INICIO-AULAS] data_matricula='{data_matricula}' fora das janelas -> transferir consultor")
+        msg = _transfer_inicio_aulas_to_consultant(
+            conv_id, question=question, motivo='data_matricula fora das janelas',
+        )
+        _register_signature(conv_id, sig, msg)
+        return msg
+
+    # 3) Temos a turma + data de inicio. Personaliza por tempo (futuro/passado).
+    try:
+        from datetime import date as _date
+        hoje = _date.today()
+    except Exception:
+        hoje = None
+    name_prefix = ''
+    try:
+        name_prefix = _student_first_name_prefix(conv_id)
+    except Exception:
+        pass
+
+    inicio_dt = turma['inicio_dt']
+    inicio_br = turma['inicio_br']
+    if hoje and inicio_dt and inicio_dt > hoje:
+        # Aulas ainda vao comecar
+        msg = (
+            f"Que bom que você perguntou{name_prefix}! 😊\n\n"
+            f"Pela sua matrícula, você entra na *turma de {turma['turma']}*, então "
+            f"suas aulas começam em *{inicio_br}*.\n\n"
+            f"Assim que liberar, o conteúdo aparece pra você na plataforma. "
+            f"Qualquer dúvida, é só me chamar! 💙"
+        )
+    else:
+        # Aulas ja comecaram (semestre em andamento)
+        msg = (
+            f"Deixa eu te explicar{name_prefix} 😊\n\n"
+            f"Pela sua matrícula, suas aulas *já começaram em {inicio_br}* e "
+            f"seguem ao longo do semestre, com as disciplinas mensais.\n\n"
+            f"Se você não está conseguindo acessar o conteúdo, me avisa que eu te "
+            f"ajudo a resolver, tá? 💙"
+        )
+
+    try:
+        meta_typing_on()
+        sent_ok = send_and_track(conv_id, msg)
         if sent_ok:
-            log_to_db(conv_id, question or '', INICIO_AULAS_MSG, 1.0, sig)
-            _register_signature(conv_id, sig, INICIO_AULAS_MSG)
-            p(f"  [INICIO-AULAS] resposta canonica enviada (turma de agosto)")
-        return sent_ok
+            log_to_db(conv_id, question or '', msg, 1.0, sig)
+            _register_signature(conv_id, sig, msg)
+            p(f"  [INICIO-AULAS] turma={turma['turma']} inicio={inicio_br} (resolvido por data_matricula)")
+        return msg if sent_ok else ''
     except Exception as e:
         p(f"  [INICIO-AULAS] erro: {e}")
-        return False
+        return ''
 
 
 # === MasterClass FAQ ===
@@ -1247,7 +1404,7 @@ Sua personalidade: simpática, paciente, fala de um jeito leve e natural. Você 
 9. **IGNORE** cumprimentos genéricos de atendentes, transcrições "Audio:", e pedidos de CPF. Extraia só informação útil.
 10. **NUNCA ofereça transferir para atendente** por conta própria. Isso é controlado pelos botões do sistema.
 11. **ENDEREÇO DE POLO — REGRA CRÍTICA**: NUNCA, JAMAIS, INVENTE endereço, rua, número, bairro, ponto de referência, horário ou CEP de polo. Se o aluno perguntar endereço/local de polo e isso NÃO estiver explicitamente no bloco "ENDEREÇOS OFICIAIS DOS POLOS" (quando presente), responda APENAS: "Deixa eu confirmar essa informação com a equipe para te passar certinho, tá?". O sistema cuida da transferência automática quando o aluno expressa intenção de visita ou dificuldade. NÃO mencione metrô, linha, terminal, hospital ou referência geográfica de polo se não estiver nas referências.
-12. **INÍCIO DAS AULAS — REGRA CRÍTICA**: Quem se matricular AGORA em graduação ingressa na **turma do 2º semestre (agosto)**. NUNCA diga que as aulas começam em "fevereiro" ou "janeiro" para alunos novos/matriculados agora — isso é informação ERRADA. Se o aluno perguntar quando as aulas começam (perguntas tipo "quando começa", "quando inicia", "em que mês", "vou começar em agosto?", "fevereiro?"), responda que para quem está se matriculando agora as aulas iniciam em **agosto** (2º semestre). Se houver dúvida sobre cronograma detalhado ou calendário acadêmico, transfira para consultor.
+12. **INÍCIO DAS AULAS — REGRA CRÍTICA**: A data de início das aulas **depende da turma de ingresso de CADA aluno** (que vem da data de matrícula dele) — NÃO é um mês fixo igual pra todos. NUNCA diga um mês "padrão" (nem "agosto", nem "fevereiro") por conta própria, e NUNCA invente a data. O sistema já calcula e responde isso automaticamente a partir dos dados do aluno antes de você. Se por algum motivo você precisar responder sobre quando as aulas começam e NÃO tiver a data exata da turma daquele aluno nas referências, NÃO chute: responda "Pra te passar a data certinha de início das suas aulas, vou te conectar com um(a) consultor(a), tá?" — a transferência acontece automaticamente.
 13. **ESQUECI MINHA SENHA — REGRA CRÍTICA**: O fluxo correto é por **SMS**, NÃO por e-mail. Procedimento oficial: o aluno clica em *Esqueci minha senha* na tela de login → digita o seu *telefone atualizado* → recebe um *código por SMS* → informa o código no campo indicado → cria a *nova senha*. NUNCA diga que ele "recebe um link no e-mail", "informa CPF e e-mail" ou "olha no spam do e-mail" — isso é informação ERRADA. Sempre lembre que o **telefone precisa estar atualizado** no cadastro pra o SMS chegar. Se o aluno disser que não recebeu o SMS, oriente que pode ser telefone desatualizado e ofereça transferir para consultor confirmar o cadastro.
 14. **CALENDÁRIO ACADÊMICO — REGRA CRÍTICA**: Quando o aluno perguntar sobre DATAS (prova A1, prova AF, liberação de notas, início das aulas, fim do semestre, prazo de matrícula, transferência, retorno ao curso, dispensa, AC, TCE, ENADE, feriados acadêmicos), use APENAS as datas que aparecem no bloco "CALENDÁRIO ACADÊMICO GRADUAÇÃO 2026" quando ele for fornecido nas referências. NUNCA invente, deduza ou aproxime datas. Se a pergunta envolve um período/data que não está listada no bloco, responda: "Deixa eu confirmar essa data certinho com a equipe, tá? Já vou te conectar com um(a) consultor(a)." e a transferência acontece automaticamente. Para perguntas sobre data específica de uma matéria, oriente o aluno a consultar o Portal do Aluno (cronograma da disciplina). PROIBIDO usar a frase "para não te passar informação errada" — sempre prefira uma transição natural.
 15. **BLACKBOARD x ÁREA DO ALUNO — REGRA CRÍTICA**: Os dois ambientes existem e têm finalidades **diferentes**. NUNCA confunda os dois:
@@ -1799,9 +1956,9 @@ def fetch_academic_data(cpf, phone=None):
         conn = psycopg2.connect(**acad_config)
         cur = conn.cursor()
 
-        _ACAD_COLS = "nome, curso_limpo, serie, polo_aulas, situacao, tipo_matricula, email_ad, ano_tri_ingresso, tipo, curso_raw"
+        _ACAD_COLS = "nome, curso_limpo, serie, polo_aulas, situacao, tipo_matricula, email_ad, ano_tri_ingresso, tipo, curso_raw, data_matricula"
         _ACAD_KEYS = ['nome', 'curso', 'serie', 'polo', 'situacao', 'tipo_matricula',
-                      'email_academico', 'ciclo', 'nivel', 'curso_raw']
+                      'email_academico', 'ciclo', 'nivel', 'curso_raw', 'data_matricula']
 
         rows = []
 
@@ -12683,16 +12840,19 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     except Exception as e_mc:
         p(f"  [MASTERCLASS] erro: {e_mc}")
 
-    # === INICIO DAS AULAS (matricula nova -> turma de agosto) ===
-    # Regra critica do time: quem se matricula agora ingressa na turma do
-    # 2o semestre (agosto). O LLM ja errou dizendo "fevereiro". Resposta
-    # canonica ANTES do LLM para nunca paragrafar errado.
+    # === INICIO DAS AULAS (resolvido por turma real do aluno) ===
+    # (2026-06-03) Usa data_matricula (mm_matriculados) + janelas do calendario
+    # para descobrir a turma de ingresso e a data oficial de inicio. Se nao der
+    # para determinar (Pos / fora da base / data fora das janelas), transfere
+    # para consultor. NUNCA responde data fixa ("agosto") nem inventa.
     try:
         if detect_inicio_aulas_intent(question):
-            p(f"  [INICIO-AULAS] intent detectado — resposta canonica (turma de agosto)")
-            if handle_inicio_aulas_intent(conv_id, question=question):
+            _acad_ia = (student_profile or {}).get('academic')
+            p(f"  [INICIO-AULAS] intent detectado — resolvendo turma do aluno")
+            _ia_msg = handle_inicio_aulas_intent(conv_id, question=question, academic=_acad_ia)
+            if _ia_msg:
                 conversation_messages.append({'role': 'user', 'text': question})
-                conversation_messages.append({'role': 'bot', 'text': INICIO_AULAS_MSG})
+                conversation_messages.append({'role': 'bot', 'text': _ia_msg})
             return
     except Exception as e_ia:
         p(f"  [INICIO-AULAS] erro: {e_ia}")

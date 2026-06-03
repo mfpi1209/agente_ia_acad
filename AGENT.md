@@ -7,6 +7,52 @@
 
 ---
 
+### [2026-06-03] - Início das aulas resolvido pela turma real do aluno (data_matricula + calendário)
+
+**Decisão**
+Removido o curto-circuito que respondia **"agosto" fixo** para qualquer pergunta
+sobre início das aulas. Agora `handle_inicio_aulas_intent` resolve a **turma de
+ingresso de cada aluno** a partir da `data_matricula` (tabela `mm_matriculados`,
+banco `dcz_sync`, atualizada diariamente) cruzada com as **janelas de matrícula
+do Calendário Acadêmico Graduação EAD 2026**, e responde com a **data oficial de
+início das aulas** daquela turma. Quando não dá para determinar com certeza
+(Pós, aluno fora da base, `data_matricula` fora das janelas conhecidas), o agente
+**transfere para consultor** — nunca inventa.
+
+Implementação:
+- `_TURMAS_INGRESSO_2026`: janelas sequenciais sem sobreposição (janela → turma →
+  início das aulas), fonte = PDF oficial do calendário.
+- `resolve_turma_ingresso(data_matricula)`: mapeia a data na janela e devolve
+  turma + data de início (ou None → transferir).
+- `data_matricula` adicionada ao `_ACAD_COLS`/`_ACAD_KEYS` em `fetch_academic_data`.
+- Regra 12 do `SYSTEM_PROMPT` reescrita: início das aulas depende da turma de
+  cada aluno; o LLM nunca cita mês fixo nem inventa; sem dado → transfere.
+
+**Contexto**
+Caso real (Ivanice): matriculou-se em abril → turma de **Maio** (aulas 04/05),
+mas a regra fixa respondeu "agosto", prejudicando os estudos da aluna. O agente
+JÁ possuía o calendário (`academic_calendar_2026`, com as datas de "Início das
+aulas do mês de X") e a `data_matricula`, mas o curto-circuito anti-alucinação
+cravava "agosto" e nunca consultava esses dados. Regra de turma confirmada pelo
+usuário: a turma é a janela de matrícula em que a `data_matricula` se encaixa
+(ex.: matrícula 15/08 → Agosto/03/08; 17/08 → Setembro/01/09).
+
+**Alternativas descartadas**
+- Manter resposta fixa "agosto": causou o dano relatado; errada para 2026/1.
+- Deixar o LLM responder com o calendário injetado: o LLM não sabe a turma do
+  aluno sem a lógica de janelas; risco de chute. Optou-se por resposta canônica
+  determinística antes do LLM.
+- Inventar contato/data para Pós: proibido. Pós não tem dado (tabela só tem
+  `tipo='grad'`) → sempre consultor.
+
+**Impacto**
+- Graduação encontrada na base: data de início correta por turma (inclui calouros
+  mensais e veteranos). Fronteiras de janela testadas (12/04→Abril, 13/04→Maio).
+- Pós / fora da base / data fora das janelas → transferência para consultor, sem
+  inventar. Vale após rebuild.
+
+---
+
 ### [2026-06-03] - Anti-alucinação de contato da coordenação + entrada oficial na KB
 
 **Decisão**
