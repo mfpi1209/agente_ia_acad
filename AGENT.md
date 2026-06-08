@@ -7,6 +7,56 @@
 
 ---
 
+### [2026-06-08] - Retenção distribuída ao time (Wesley + Danúbia), SEM dashboard
+
+**Decisão**
+A retenção deixou de ser fixa no **Wesley** e passa a ser distribuída para um
+**time de Retenção** (`RETENTION_TEAM = ['Wesley', 'Danubia']`), atribuindo
+**atendente + lead + negócio + chat**, igual era para o Wesley.
+
+A retenção **NÃO consulta o dashboard de Ativo/Inativo**. Motivo (confirmado pelo
+usuário): Wesley e Danúbia ficam de propósito como **"Inativo"** no painel para
+**não receberem lead de atendimento normal** — mas devem continuar recebendo
+retenção sempre. Ou seja, igual ao Wesley funcionava antes: se a mensagem do
+aluno é caso de retenção, distribui direto para um dos dois.
+
+Escolha do membro (`choose_retention_target`):
+1. **STICKY**: se a conversa já está com um membro (via `handoff_active`), mantém.
+2. Senão, **rodízio determinístico por conversa** (`hash(conv_id) % 2`), que
+   divide ~50/50 entre os dois e, por ser determinístico, já é naturalmente
+   sticky mesmo se o handoff expirar. **Sempre** retorna um nome (nunca fica sem
+   dono).
+
+Implementação:
+- `_retention_sticky_target()` / `choose_retention_target(conv_id)`: sticky + rodízio.
+- `trigger_retention(..., target_name=None)`: escolhe o alvo, atribui lead/negócio
+  (CRM IDs por `CRM_ATTENDANT_MAP`), transfere o chat, marca o `handoff_active`
+  (sticky) e **retorna o nome**.
+- Todos os call sites (`handle_message` principal e LOW-CONF-D4, `in_hours_rescue`,
+  `queue_sweep`, `post_close_rescue`) usam o alvo dinâmico; removidos os
+  `_mark_handoff_active(target='Wesley')` hardcoded (que travavam o sticky no Wesley).
+- Mensagens ao aluno tornaram-se **genéricas** ("nosso *time de Retenção*"),
+  sem citar nome fixo; a apresentação interna usa o nome real do membro escolhido.
+- Comportamento **fora do horário** mantido como era com o Wesley: apenas informa
+  (mensagem after-hours) e enfileira — não distribui na hora.
+
+**Contexto**
+Danúbia passou a integrar o departamento de retenção; a regra é a mesma para
+ambos. Ambos ficam Inativo no painel por design (bloqueia atendimento normal),
+então a retenção precisa ignorar esse status.
+
+**Alternativas descartadas**
+- *Respeitar Ativo/Inativo do dashboard*: descartada porque os dois ficam Inativo
+  de propósito — gatear por isso travaria a retenção.
+- *Round-robin por contador em memória*: reseta no restart; o rodízio por hash do
+  `conv_id` é stateless, balanceado e sticky por natureza.
+
+**Impacto**
+Retenção divide carga ~50/50 entre Wesley e Danúbia, sempre distribui (não depende
+do painel) e mantém a mesma conversa com o mesmo consultor (sticky).
+
+---
+
 ### [2026-06-03] - Início das aulas resolvido pela turma real do aluno (data_matricula + calendário)
 
 **Decisão**

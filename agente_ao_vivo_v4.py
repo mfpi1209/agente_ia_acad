@@ -1269,9 +1269,9 @@ AFTER_HOURS_INSIST_MSG = (
 RETENTION_AFTER_HOURS_MSG = (
     "Oii{name}, entendi 💙\n\n"
     "Essa é uma decisão importante e a gente quer te ouvir com a atenção que você merece. "
-    "Para esse assunto, quem cuida com carinho é o *Wesley*, nosso consultor especializado.\n\n"
-    "No momento ele está fora do horário de atendimento, mas assim que retomar *{retorno_label}* "
-    "ele entra em contato com você por aqui mesmo, tá? 😊\n\n"
+    "Para esse assunto, quem cuida com carinho é o nosso *time de Retenção*, especializado nisso.\n\n"
+    "No momento estamos fora do horário de atendimento, mas assim que retomar *{retorno_label}* "
+    "alguém da equipe entra em contato com você por aqui mesmo, tá? 😊\n\n"
     "Enquanto isso, se precisar de ajuda com *acesso, boleto, aulas* ou qualquer outra coisa, "
     "é só me chamar — eu sigo por aqui pra te ajudar."
 )
@@ -5896,28 +5896,30 @@ def process_in_hours_rescue():
                 # Caso reportado: "Mas eu cancelei minha matricula" -> foi para
                 # Marilia em vez de Wesley.
                 if _last_aluno_body and is_retention_intent(_last_aluno_body):
-                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} retencao detectada ('{_last_aluno_body[:40]}') — distribuindo para Wesley")
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} retencao detectada ('{_last_aluno_body[:40]}') — distribuindo p/ time de Retenção")
                     try:
-                        # Mensagem humanizada antes da transferencia
-                        _greet = (f", *{first}*" if first else '')
-                        _hum = (f"Oi{_greet}! Desculpa a demora 🙏 Entendi sua situação. "
-                                f"Vou te conectar com o *Wesley*, nosso consultor especializado, "
-                                f"que vai te ajudar com isso, tá? Um momento!")
-                        send_and_track(cid, _hum)
-                        log_to_db(cid, _last_aluno_body, _hum, 1.0, 'retention')
-                        _register_signature(cid, 'retention', _hum)
-                        _mark_handoff_active(cid, 'retention', target='Wesley',
-                                             ttl_s=8 * 3600, body=_hum)
-                        time.sleep(1.0)
-                        # Distribui ESPECIFICAMENTE para Wesley.
-                        # (2026-05-27) trigger_retention resolve/cria lead se phone for passado.
-                        trigger_retention(cid, None, _last_aluno_body, phone=phone)
-                        update_pending_escalation_status(
-                            cid, 'distributed_retention',
-                            note=f'In-hours rescue: retencao -> Wesley (msg: {_last_aluno_body[:60]})',
-                        )
+                        # (2026-06-08) trigger_retention escolhe Wesley/Danúbia por
+                        # disponibilidade e marca o handoff. So manda a msg/distribui
+                        # se houver alguem ativo; senao segura e re-tenta no proximo ciclo.
+                        _alvo = trigger_retention(cid, None, _last_aluno_body, phone=phone)
+                        if _alvo:
+                            _greet = (f", *{first}*" if first else '')
+                            _hum = (f"Oi{_greet}! Desculpa a demora 🙏 Entendi sua situação. "
+                                    f"Vou te conectar com o nosso *time de Retenção*, "
+                                    f"que vai te ajudar com isso, tá? Um momento!")
+                            send_and_track(cid, _hum)
+                            log_to_db(cid, _last_aluno_body, _hum, 1.0, 'retention')
+                            _register_signature(cid, 'retention', _hum)
+                            update_pending_escalation_status(
+                                cid, 'distributed_retention',
+                                note=f'In-hours rescue: retencao -> {_alvo} (msg: {_last_aluno_body[:60]})',
+                            )
+                            _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                            continue
+                        else:
+                            p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} retencao SEM membro ativo — segura p/ proximo ciclo")
                     except Exception as e_ret:
-                        p(f"  [IN-HOURS-RESCUE] erro retencao->Wesley: {e_ret}")
+                        p(f"  [IN-HOURS-RESCUE] erro retencao: {e_ret}")
                     _IN_HOURS_RESCUE_RECENT[cid] = now_ts
                     continue
 
@@ -6098,15 +6100,14 @@ def process_in_hours_rescue():
                 _lead_chk = None
             try:
                 if _is_in_retention(cid, lead_id=_lead_chk, msgs=_conv_msgs):
-                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} em RETENCAO — NAO redistribui (mantem Wesley)")
-                    # Garante que negocio/lead/chat estao com Wesley + marca handoff
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} em RETENCAO — NAO redistribui (mantem time de Retenção)")
+                    # Garante que negocio/lead/chat seguem com o membro de retencao
+                    # (sticky: trigger_retention reusa o alvo ja atribuido).
                     try:
-                        trigger_retention(cid, _lead_chk, _last_aluno_body or '[retencao em andamento]', phone=phone)
-                        _mark_handoff_active(cid, 'retention', target='Wesley',
-                                             ttl_s=8 * 3600, body='Sticky retencao - resgate')
+                        _alvo_stk = trigger_retention(cid, _lead_chk, _last_aluno_body or '[retencao em andamento]', phone=phone)
                         update_pending_escalation_status(
                             cid, 'distributed_retention',
-                            note='In-hours rescue: conv em retencao mantida com Wesley (sticky)',
+                            note=f'In-hours rescue: conv em retencao mantida com {_alvo_stk or "time de Retenção"} (sticky)',
                         )
                     except Exception as e_rstk:
                         p(f"  [IN-HOURS-RESCUE] erro sticky retencao: {e_rstk}")
@@ -6535,17 +6536,23 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
                 acted += 1
                 continue
 
-            # --- RETENCAO / CANCELAMENTO -> WESLEY ---
+            # --- RETENCAO / CANCELAMENTO -> TIME DE RETENÇÃO (Wesley/Danúbia) ---
             if is_retention_intent(user_text):
-                p(f"  [QUEUE-SWEEP] retencao conv={cid[:12]} ...{phone[-4:]} '{user_text[:40]}' -> Wesley")
-                _greet = (f", *{first}*" if first else '')
-                _hum = (f"Oi{_greet}! Desculpa a demora 🙏 Entendi sua situação. "
-                        f"Vou te conectar com o *Wesley*, nosso consultor especializado, "
-                        f"que vai te ajudar com isso, tá? Um momento!")
                 try:
-                    send_and_track(cid, _hum, force=True)
-                    _mark_handoff_active(cid, 'retention', target='Wesley', ttl_s=8 * 3600, body=_hum)
-                    trigger_retention(cid, None, user_text, phone=phone)
+                    # (2026-06-08) trigger_retention escolhe o membro ativo e marca
+                    # o handoff. So envia a msg se houver alguem ativo; senao segura.
+                    _alvo_qs = trigger_retention(cid, None, user_text, phone=phone)
+                    if _alvo_qs:
+                        p(f"  [QUEUE-SWEEP] retencao conv={cid[:12]} ...{phone[-4:]} '{user_text[:40]}' -> {_alvo_qs}")
+                        _greet = (f", *{first}*" if first else '')
+                        _hum = (f"Oi{_greet}! Desculpa a demora 🙏 Entendi sua situação. "
+                                f"Vou te conectar com o nosso *time de Retenção*, "
+                                f"que vai te ajudar com isso, tá? Um momento!")
+                        send_and_track(cid, _hum, force=True)
+                        log_to_db(cid, user_text, _hum, 1.0, 'retention')
+                        _register_signature(cid, 'retention', _hum)
+                    else:
+                        p(f"  [QUEUE-SWEEP] retencao conv={cid[:12]} SEM membro ativo — segura p/ proximo ciclo")
                 except Exception as e_ret:
                     p(f"  [QUEUE-SWEEP] erro retencao: {e_ret}")
                 if last_msg and last_msg.get('id'):
@@ -6571,11 +6578,10 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
                         _lead_chk_qs = None
                     try:
                         if _is_in_retention(cid, lead_id=_lead_chk_qs, msgs=msgs):
-                            p(f"  [QUEUE-SWEEP] Conv {cid[:12]} em RETENCAO — mantem Wesley (nao distribui)")
+                            p(f"  [QUEUE-SWEEP] Conv {cid[:12]} em RETENCAO — mantem time de Retenção (nao distribui)")
                             try:
+                                # sticky: trigger_retention reusa o alvo ja atribuido
                                 trigger_retention(cid, _lead_chk_qs, user_text or '[retencao em andamento]', phone=phone)
-                                _mark_handoff_active(cid, 'retention', target='Wesley',
-                                                     ttl_s=8 * 3600, body='Sticky retencao queue-sweep')
                             except Exception as e_qsr:
                                 p(f"  [QUEUE-SWEEP] erro sticky retencao: {e_qsr}")
                             _QUEUE_SWEEP_RECENT[cid] = now_ts
@@ -7683,12 +7689,14 @@ def process_post_close_rescue():
             except Exception:
                 _lead_for_ret = None
             if _is_in_retention(cid, lead_id=_lead_for_ret, msgs=msgs):
-                p(f"  [POST-CLOSE-RESCUE] Conv {cid[:12]} em RETENCAO — sticky Wesley")
-                target = 'Wesley'
+                # (2026-06-08) sticky: mantem com o membro de retencao ja atribuido
+                # (Wesley OU Danúbia); choose_retention_target resolve via handoff.
+                _alvo_pc = choose_retention_target(cid)
+                p(f"  [POST-CLOSE-RESCUE] Conv {cid[:12]} em RETENCAO — sticky {_alvo_pc or 'time de Retenção'}")
                 msg = (
                     f"Oii{first_part}! Vi que voltou para falar com a gente 😊\n\n"
-                    f"Vou pedir para o(a) *{target}*, que cuida do seu caso, "
-                    f"dar continuidade ao seu atendimento. Em pouquinho ele(a) assume aqui."
+                    f"Vou pedir para o nosso *time de Retenção*, que cuida do seu caso, "
+                    f"dar continuidade ao seu atendimento. Em pouquinho alguém assume aqui."
                 )
                 try:
                     meta_typing_on()
@@ -7697,14 +7705,12 @@ def process_post_close_rescue():
                     pass
                 try:
                     trigger_retention(cid, _lead_for_ret, user_text, phone=phone)
-                    _mark_handoff_active(cid, 'retention', target='Wesley',
-                                         ttl_s=8 * 3600, body=msg)
                 except Exception as e_rt:
                     p(f"  [POST-CLOSE-RESCUE] erro retention sticky: {e_rt}")
                 try:
                     note = (
                         f"🔴 *Sticky retencao* — aluno voltou apos encerramento. "
-                        f"Conv ja estava em retencao (Wesley). Mantido com Wesley."
+                        f"Conv ja estava em retencao. Mantido com {_alvo_pc or 'time de Retenção'}."
                     )
                     requests.post(
                         f'{DCZ_API}/api/v1/conversations/{cid}/messages',
@@ -10835,13 +10841,71 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
     return True
 
 
-def trigger_retention(conv_id, lead_id, question, phone=None):
-    """Aciona Retenção: tag + responsável Wesley no lead + business -> ATENDIMENTO + nota interna.
+# ============================================================
+# TIME DE RETENÇÃO (2026-06-08)
+# ============================================================
+# A retenção é distribuída para um membro do time SEMPRE que a mensagem do aluno
+# for caso de retenção — assim como funcionava com o Wesley hoje. NÃO consulta o
+# dashboard de Ativo/Inativo: Wesley e Danúbia ficam de propósito como "Inativo"
+# no painel (para NÃO entrar lead de atendimento normal), mas continuam recebendo
+# retenção normalmente.
+#
+# Escolha do membro: STICKY primeiro (se a conversa já está com X, mantém X);
+# senão, balanceia de forma determinística por conversa (hash do conv_id), o que
+# divide ~50/50 entre os dois e, por ser determinístico, já é naturalmente sticky
+# mesmo que o handoff tenha expirado.
+RETENTION_TEAM = ['Wesley', 'Danubia']  # ordem = base do rodízio
+
+
+def _retention_sticky_target(conv_id):
+    """Se a conversa já está em retenção com um membro do time, devolve esse
+    nome (mantém sticky). Senão, None."""
+    try:
+        motivo, tgt = _is_handoff_active(conv_id)
+        if motivo in ('retention', 'retention_after_hours') and tgt:
+            tnorm = _normalize_attendant_name(tgt).split()[0] if tgt else ''
+            for m in RETENTION_TEAM:
+                if _normalize_attendant_name(m).split()[0] == tnorm:
+                    return m
+    except Exception:
+        pass
+    return None
+
+
+def choose_retention_target(conv_id):
+    """Decide para quem vai a retenção: STICKY (se já atribuída a um membro) OU
+    rodízio determinístico por conversa entre os membros do time. SEMPRE retorna
+    um nome (retenção nunca fica sem dono); não considera Ativo/Inativo."""
+    sticky = _retention_sticky_target(conv_id)
+    if sticky:
+        return sticky
+    try:
+        idx = (hash(str(conv_id)) & 0x7FFFFFFF) % len(RETENTION_TEAM)
+    except Exception:
+        idx = 0
+    return RETENTION_TEAM[idx]
+
+
+def trigger_retention(conv_id, lead_id, question, phone=None, target_name=None):
+    """Aciona Retenção: tag + responsável (Wesley OU Danúbia) no lead + business
+    -> ATENDIMENTO + nota interna + transfere o chat. STICKY e por disponibilidade.
+
+    target_name: se informado, usa esse membro do time; senão escolhe via
+    choose_retention_target (sticky + menor fila entre ativos).
+
+    Retorna o nome do atendente atribuído (str) ou None se ninguém do time
+    estiver ativo (caller deve segurar e re-tentar).
 
     (2026-05-27) Se lead_id=None, tenta resolver via telefone (identify_student)
-    e, se ainda assim falhar, cria lead+business novos. Antes pulava silenciosamente
-    e deixava negócio sem atendente / sem mover pipeline (bug reportado).
+    e, se ainda assim falhar, cria lead+business novos.
     """
+    # (0) Decide o alvo
+    alvo = target_name or choose_retention_target(conv_id)
+    if not alvo:
+        p(f"  [RETENÇÃO] Nenhum membro do time ativo agora — segurando (sem forçar)")
+        return None
+    crm_id = _lookup_attendant_id(alvo, CRM_ATTENDANT_MAP) or RETENTION_WESLEY_CRM_ID
+    p(f"  [RETENÇÃO] Alvo escolhido: {alvo} (crm_id={crm_id[:8]}...)")
     try:
         # (1) Resolve lead_id se nao veio
         if not lead_id:
@@ -10879,10 +10943,10 @@ def trigger_retention(conv_id, lead_id, question, phone=None):
 
             r = requests.patch(
                 f'{DCZ_CRM}/leads/{lead_id}', headers=H,
-                json={'tags': existing_tags, 'attendant': {'id': RETENTION_WESLEY_CRM_ID}},
+                json={'tags': existing_tags, 'attendant': {'id': crm_id}},
                 timeout=10
             )
-            p(f"  [RETENÇÃO] Lead: tag + attendant Wesley (status={r.status_code})")
+            p(f"  [RETENÇÃO] Lead: tag + attendant {alvo} (status={r.status_code})")
 
             try:
                 # Busca business: primeiro sub-recurso /leads/{id}/businesses (mais confiavel)
@@ -10916,9 +10980,9 @@ def trigger_retention(conv_id, lead_id, question, phone=None):
                 if biz_id:
                     rb = requests.patch(
                         f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
-                        json={'attendant': {'id': RETENTION_WESLEY_CRM_ID}}, timeout=10
+                        json={'attendant': {'id': crm_id}}, timeout=10
                     )
-                    p(f"  [RETENÇÃO] Negócio attendant -> Wesley (status={rb.status_code})")
+                    p(f"  [RETENÇÃO] Negócio attendant -> {alvo} (status={rb.status_code})")
                     rb2 = requests.patch(
                         f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
                         json={'stageId': STAGE_ATENDIMENTO_ID}, timeout=10
@@ -10935,7 +10999,7 @@ def trigger_retention(conv_id, lead_id, question, phone=None):
             f"🔴 *Retenção - Agente IA*\n"
             f"O aluno manifestou intenção de cancelamento/trancamento.\n"
             f"Mensagem: \"{question[:120]}\"\n"
-            f"Transferido automaticamente para Wesley Guerreiro (Retenção)."
+            f"Transferido automaticamente para {alvo} (Retenção)."
         )
         requests.post(
             f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
@@ -10943,17 +11007,26 @@ def trigger_retention(conv_id, lead_id, question, phone=None):
         )
         p(f"  [RETENÇÃO] Nota interna enviada na conversa")
 
-        _dcz_transfer_chat(conv_id, 'Wesley')
-        p(f"  [RETENÇÃO] Chat transferido para Wesley")
+        _dcz_transfer_chat(conv_id, alvo)
+        p(f"  [RETENÇÃO] Chat transferido para {alvo}")
+
+        # Marca handoff STICKY com o alvo real (evita bouncing entre membros).
+        try:
+            _mark_handoff_active(conv_id, 'retention', target=alvo,
+                                 ttl_s=8 * 3600, body=note)
+        except Exception:
+            pass
 
         _conv_states.setdefault(conv_id, _default_conv_state())['_human_took_over'] = True
         _conv_states[conv_id]['waiting_for_client'] = False
         _conv_states[conv_id]['inactivity_start'] = 0
         _conv_states[conv_id]['followup_stage'] = 0
         _conv_states[conv_id]['_last_responded_ts'] = time.time()
+        return alvo
 
     except Exception as e:
         p(f"  [RETENÇÃO] Erro: {e}")
+        return None
 
 
 RETENTION_SINGLE_WORDS = [
@@ -12885,13 +12958,16 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                 conversation_messages.append({'role': 'bot', 'text': msg_after})
                 log_to_db(conv_id, question, msg_after, 1.0, 'retention_after_hours')
                 _register_signature(conv_id, 'retention_after_hours', msg_after)
-                _mark_handoff_active(conv_id, 'retention_after_hours', target='Wesley',
+                # (2026-06-08) target='' (pendente): quando o expediente abrir, o
+                # in_hours_rescue re-detecta e distribui via trigger_retention para
+                # o membro ativo (Wesley OU Danúbia).
+                _mark_handoff_active(conv_id, 'retention_after_hours', target='',
                                      ttl_s=14 * 3600, body=msg_after)
                 try:
                     requests.post(
                         f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
                         headers=H,
-                        json={'body': f'🤝 *Retenção fora do horário* — IA orientou aluno; Wesley deve retomar {retorno}.',
+                        json={'body': f'🤝 *Retenção fora do horário* — IA orientou aluno; time de Retenção deve retomar {retorno}.',
                               'isInternal': True},
                         timeout=10,
                     )
@@ -12903,34 +12979,46 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             except Exception as e_ret:
                 p(f"  [RETENÇÃO] Erro na memória (after_hours): {e_ret}")
             record_pending_escalation(conv_id, 'retention_after_hours', tier='insist',
-                                    retorno_label=retorno, question=question,
-                                    preferred_attendant='Wesley')
-            p(f"  [RETENÇÃO] [MODE] after_hours — sem trigger_retention, retorno {retorno}, preferred=Wesley")
+                                    retorno_label=retorno, question=question)
+            p(f"  [RETENÇÃO] [MODE] after_hours — sem trigger_retention, retorno {retorno} (time de Retenção)")
             waiting_for_client = True; inactivity_start = time.time()
             return
 
         if _signature_recently_sent(conv_id, 'retention', window_s=24 * 3600):
             p(f"  [RETENÇÃO] dedup: retention ja enviada nas ultimas 24h - suprimindo reenvio")
         else:
-            meta_typing_on()
-            send_and_track(conv_id, RETENTION_MSG)
-            conversation_messages.append({'role': 'bot', 'text': RETENTION_MSG})
-            log_to_db(conv_id, question, RETENTION_MSG, 1.0, 'retention')
-            _register_signature(conv_id, 'retention', RETENTION_MSG)
-            _mark_handoff_active(conv_id, 'retention', target='Wesley',
-                                 ttl_s=8 * 3600, body=RETENTION_MSG)
-
+            # (2026-06-08) trigger_retention escolhe Wesley/Danúbia por disponibilidade
+            # e marca o handoff. Só envia mensagens se houver alguem ativo.
             lead_id = student_profile.get('lead_id') if student_profile else None
-            trigger_retention(conv_id, lead_id, question)
+            _alvo_ret = trigger_retention(conv_id, lead_id, question, phone=_current_phone)
+            if _alvo_ret:
+                meta_typing_on()
+                send_and_track(conv_id, RETENTION_MSG)
+                conversation_messages.append({'role': 'bot', 'text': RETENTION_MSG})
+                log_to_db(conv_id, question, RETENTION_MSG, 1.0, 'retention')
+                _register_signature(conv_id, 'retention', RETENTION_MSG)
 
-            # Apresentação do Wesley enviada pelo agente
-            _fname = (student_profile.get('first_name') or '').strip() if student_profile else ''
-            _wesley_intro = (f"Olá{', *' + _fname + '*' if _fname else ''}! "
-                             f"Sou o Wesley e irei seguir com o seu atendimento 😊")
-            time.sleep(1)
-            send_and_track(conv_id, _wesley_intro)
-            _register_signature(conv_id, 'retention_intro', _wesley_intro)
-            p(f"  [RETENÇÃO] Apresentação do Wesley enviada pelo agente")
+                # Apresentação do consultor de retenção (Wesley OU Danúbia)
+                _fname = (student_profile.get('first_name') or '').strip() if student_profile else ''
+                _ret_first = _alvo_ret.split()[0]
+                _ret_intro = (f"Olá{', *' + _fname + '*' if _fname else ''}! "
+                              f"Sou {_ret_first} e irei seguir com o seu atendimento 😊")
+                time.sleep(1)
+                send_and_track(conv_id, _ret_intro)
+                _register_signature(conv_id, 'retention_intro', _ret_intro)
+                p(f"  [RETENÇÃO] Apresentação de {_ret_first} enviada pelo agente")
+            else:
+                # Ninguém do time ativo agora: segura com msg neutra; in_hours_rescue
+                # / queue_sweep re-tentam quando alguém ficar ativo.
+                meta_typing_on()
+                send_and_track(conv_id, RETENTION_MSG)
+                conversation_messages.append({'role': 'bot', 'text': RETENTION_MSG})
+                log_to_db(conv_id, question, RETENTION_MSG, 1.0, 'retention')
+                _register_signature(conv_id, 'retention', RETENTION_MSG)
+                _mark_handoff_active(conv_id, 'retention', target='', ttl_s=8 * 3600, body=RETENTION_MSG)
+                record_pending_escalation(conv_id, 'retention', tier='insist',
+                                          retorno_label=next_human_available_label(), question=question)
+                p(f"  [RETENÇÃO] Nenhum membro ativo — segurando p/ re-tentativa nos ciclos")
 
         try:
             summary = generate_conversation_summary(conversation_messages)
@@ -12938,7 +13026,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         except Exception as e_ret:
             p(f"  [RETENÇÃO] Erro na memória: {e_ret}")
         waiting_for_client = False; inactivity_start = 0
-        p(f"  [RETENÇÃO] Conversa encaminhada para Wesley - follow-ups desativados")
+        p(f"  [RETENÇÃO] Conversa encaminhada para time de Retenção - follow-ups desativados")
         return
 
     # === A1 / PROVA REGIMENTAL ===
@@ -13638,22 +13726,21 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                     pass
                 waiting_for_client = False; inactivity_start = 0
                 return
-            # 4) Retencao (cancelamento) -> Wesley humanizado
+            # 4) Retencao (cancelamento) -> time de Retenção (Wesley/Danúbia)
             if is_retention_intent(question):
-                p(f"  [LOW-CONF-D4] cancelado: msg eh retencao -> Wesley")
+                p(f"  [LOW-CONF-D4] cancelado: msg eh retencao -> time de Retenção")
                 _fname = (student_profile.get('first_name') or '').strip() if student_profile else ''
                 _greet = (f", *{_fname}*" if _fname else '')
-                _msg_ret = (f"Entendi sua situação{_greet}. Vou te encaminhar para o *Wesley*, "
-                            f"nosso consultor especializado, que vai te ajudar com isso. Um momento, por favor! 😊")
+                _msg_ret = (f"Entendi sua situação{_greet}. Vou te encaminhar para o nosso "
+                            f"*time de Retenção*, que vai te ajudar com isso. Um momento, por favor! 😊")
                 send_and_track(conv_id, _msg_ret, force=True)
                 conversation_messages.append({'role': 'bot', 'text': _msg_ret})
                 log_to_db(conv_id, question, _msg_ret, 1.0, 'retention')
                 _register_signature(conv_id, 'retention', _msg_ret)
-                _mark_handoff_active(conv_id, 'retention', target='Wesley',
-                                     ttl_s=8 * 3600, body=_msg_ret)
                 try:
                     lead_id_loc = student_profile.get('lead_id') if student_profile else None
-                    trigger_retention(conv_id, lead_id_loc, question)
+                    # trigger_retention escolhe o membro ativo e marca o handoff (sticky)
+                    trigger_retention(conv_id, lead_id_loc, question, phone=_current_phone)
                 except Exception as e_lc_ret:
                     p(f"  [LOW-CONF-D4] erro trigger_retention: {e_lc_ret}")
                 waiting_for_client = False; inactivity_start = 0
