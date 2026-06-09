@@ -10480,6 +10480,43 @@ def _enforce_assignment_consistency(conv_id, lead_id, phone, expected_name,
     return result
 
 
+def _attendant_is_dashboard_inactive(att_name):
+    """True se o atendente está no dashboard (Supabase) com ativo_inativo != 'Ativo'
+    (folga/inativo). Usado para decidir se uma conversa presa com um humano INATIVO
+    deve ser redistribuída para alguém ativo quando chega mensagem nova.
+
+    Retorna False (NÃO redistribuir) quando:
+      - att_name vazio;
+      - é membro do time de Retenção (Wesley/Danúbia ficam Inativo de propósito,
+        mas continuam donos das retenções — não podem ser "roubados");
+      - está Ativo no painel;
+      - não foi encontrado na tabela (conservador: não mexe em desconhecido).
+    """
+    try:
+        if not att_name:
+            return False
+        parts = _normalize_attendant_name(att_name).split()
+        first = parts[0] if parts else ''
+        if not first:
+            return False
+        for m in RETENTION_TEAM:
+            if _normalize_attendant_name(m).split()[0] == first:
+                return False
+        url = (f'{SUPABASE_URL}/rest/v1/{DISTRIBUICAO_TABLE}'
+               f'?tipo_atendimento=eq.Atendimento&select=responsavel,ativo_inativo')
+        r = requests.get(url, headers=SUPABASE_HEADERS, timeout=10)
+        if r.status_code != 200:
+            return False
+        for row in r.json() or []:
+            rp = _normalize_attendant_name(row.get('responsavel') or '').split()
+            rp_first = rp[0] if rp else ''
+            if rp_first == first:
+                return (row.get('ativo_inativo') or '').strip().lower() != 'ativo'
+        return False
+    except Exception:
+        return False
+
+
 def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude_attendants=None):
     """Distribui o aluno para um atendente humano real.
     1) Verifica horário  2) Escolhe consultor  3) Transfere lead/negócio/chat
@@ -10502,8 +10539,20 @@ def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude
     try:
         ho_motivo, ho_target = _is_handoff_active(conv_id)
         if ho_motivo == 'dispatch':
-            p(f"  [DIST] {conv_id[:12]} ja distribuido para {ho_target} (handoff_active) - skip idempotente")
-            return True
+            # (2026-06-09) Se o alvo do dispatch está INATIVO no dashboard (ex.:
+            # Felipe/Débora de folga), NÃO é idempotente: redistribui p/ ativo.
+            # Limpa o handoff (protect_human=False) para os locks de dispatch não
+            # bloquearem a nova distribuição.
+            if ho_target and _attendant_is_dashboard_inactive(ho_target):
+                p(f"  [DIST] {conv_id[:12]} dispatch p/ {ho_target} INATIVO — vai redistribuir p/ ativo")
+                try:
+                    _mark_handoff_active(conv_id, 'human_unavailable', target='',
+                                         ttl_s=30, protect_human=False)
+                except Exception:
+                    pass
+            else:
+                p(f"  [DIST] {conv_id[:12]} ja distribuido para {ho_target} (handoff_active) - skip idempotente")
+                return True
     except Exception:
         pass
     # Fallback: estado em memoria
@@ -10563,16 +10612,38 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
     try:
         has_h, att_name = _dcz_conv_has_human(conv_id)
         if has_h:
-            p(f"  [DIST] PROTECAO: {conv_id[:12]} ja tem humano ({att_name or '?'}) — abortando distribuicao (motivo='{reason}')")
+            # (2026-06-09) Se o humano atribuído está INATIVO no dashboard e a conv
+            # NÃO está em retenção, NÃO mantemos ela presa com ele: quando chega
+            # mensagem nova, redistribui para um consultor ATIVO (e de quebra
+            # reconcilia chat/lead, que ficam consistentes na distribuição normal).
+            # Caso reportado: Felipe/Débora (de folga) seguravam alunos novos.
+            _in_ret = False
             try:
-                # marca pending como ja em andamento para evitar nova tentativa via fila
-                update_pending_escalation_status(
-                    conv_id, 'in_progress',
-                    note=f'Protecao distribute: conv ja com {att_name or "humano"} — sem redistribuir.',
-                )
+                _in_ret = _is_in_retention(conv_id)
             except Exception:
-                pass
-            return True
+                _in_ret = False
+            _redistrib_inactive = (
+                (not _in_ret) and att_name and _attendant_is_dashboard_inactive(att_name)
+            )
+            if _redistrib_inactive:
+                p(f"  [DIST] {conv_id[:12]} humano atual ({att_name}) INATIVO no dashboard — redistribuindo p/ ativo (motivo='{reason}')")
+                # limpa handoff antigo p/ os locks de dispatch não bloquearem
+                try:
+                    _mark_handoff_active(conv_id, 'human_unavailable', target='',
+                                         ttl_s=30, protect_human=False)
+                except Exception:
+                    pass
+            else:
+                p(f"  [DIST] PROTECAO: {conv_id[:12]} ja tem humano ({att_name or '?'}) ativo/retenção — abortando distribuicao (motivo='{reason}')")
+                try:
+                    # marca pending como ja em andamento para evitar nova tentativa via fila
+                    update_pending_escalation_status(
+                        conv_id, 'in_progress',
+                        note=f'Protecao distribute: conv ja com {att_name or "humano"} — sem redistribuir.',
+                    )
+                except Exception:
+                    pass
+                return True
     except Exception as e_prot1:
         p(f"  [DIST] erro check humano (segue mesmo assim): {e_prot1}")
 

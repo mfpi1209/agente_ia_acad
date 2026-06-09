@@ -7,6 +7,49 @@
 
 ---
 
+### [2026-06-09] - Redistribui conversa presa com humano INATIVO ao chegar mensagem nova
+
+**Decisão**
+`distribute_to_attendant` deixou de **manter** uma conversa presa com um atendente
+que está **Inativo no dashboard** (ex.: Felipe/Débora de folga). Quando chega uma
+mensagem nova e a conversa cai numa rota de distribuição, se o humano atual está
+Inativo no painel **e a conversa NÃO está em retenção**, o agente **redistribui
+para um consultor ATIVO**. Como a distribuição normal força consistência
+(`_enforce_assignment_consistency`), isso também corrige o caso de **chat com um
+atendente e lead com outro** (ex.: chat Débora / lead Danúbia).
+
+Implementação:
+- Novo `_attendant_is_dashboard_inactive(att_name)`: consulta o Supabase e retorna
+  True só se o atendente está com `ativo_inativo != 'Ativo'`. Retorna **False**
+  (mantém) para: membros do time de Retenção (Wesley/Danúbia — Inativo de
+  propósito), atendentes Ativos, nome vazio, ou nome **fora da tabela**
+  (conservador: não mexe em desconhecido/supervisor).
+- Em `_distribute_to_attendant_locked`, a proteção "já tem humano" (`_dcz_conv_has_human`)
+  agora só aborta se o humano está **ativo/retenção**; se está Inativo, libera a
+  redistribuição (limpando o handoff antigo p/ os locks não travarem).
+- A idempotência externa de `dispatch` também libera quando o alvo está Inativo.
+
+**Contexto**
+Felipe e Débora ficam Inativo no painel, mas conversas antigas atribuídas a eles
+seguiam presas; o aluno mandava mensagem nova e continuava sem atendimento real.
+Regra do usuário: redistribuir **apenas** quem manda mensagem agora — NÃO fazer
+varredura em massa de conversas já em filas/atendimento.
+
+**Alternativas descartadas**
+- *Varredura em massa redistribuindo todos os presos com inativos*: já causou
+  problema antes (mover dezenas de conversas em andamento). Mantém-se o gatilho
+  por **mensagem nova do aluno**.
+- *Usar `is_attendant_active_now` (que inclui almoço/expediente)*: descartado para
+  não roubar conversas de quem está só em pausa de almoço; usa-se o flag **hard**
+  `ativo_inativo`.
+
+**Impacto**
+Aluno que volta a falar e estava preso com inativo passa a ser atendido por
+consultor ativo, com chat e lead consistentes. Retenção (Wesley/Danúbia) nunca é
+redistribuída por esse mecanismo.
+
+---
+
 ### [2026-06-08] - Retenção distribuída ao time (Wesley + Danúbia), SEM dashboard
 
 **Decisão**
