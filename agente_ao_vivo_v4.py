@@ -9269,8 +9269,9 @@ def _audit_autofix_assignment_findings(max_age_minutes=AUDIT_AUTOFIX_CUTOFF_MIN,
                     pass
             if expected_crm_id and biz_id:
                 try:
+                    # business exige attendantId (string), não objeto attendant
                     r = requests.patch(f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
-                                       json={'attendant': {'id': expected_crm_id},
+                                       json={'attendantId': expected_crm_id,
                                              'stageId': STAGE_ATENDIMENTO_ID},
                                        timeout=10)
                     if r.status_code in (200, 201, 204):
@@ -10176,7 +10177,7 @@ def _dcz_transfer_business(phone, attendant_name, lead_id=''):
             try:
                 r_new = requests.post(f'{DCZ_CRM}/businesses', headers=H,
                                       json={'leadId': lead_id, 'stageId': STAGE_ATENDIMENTO_ID,
-                                            'attendant': {'id': crm_id}}, timeout=10)
+                                            'attendantId': crm_id}, timeout=10)
                 if r_new.status_code in (200, 201):
                     biz_id = r_new.json().get('id', '')
                     p(f"  [DIST-BIZ] Business criado: {biz_id[:16]} (já no Atendimento)")
@@ -10190,12 +10191,14 @@ def _dcz_transfer_business(phone, attendant_name, lead_id=''):
             p(f"  [DIST-BIZ] Nenhum negócio encontrado/criado")
             return False
 
-        # PATCH 1: responsável (campo attendant com objeto {id: CRM_UUID})
+        # PATCH 1: responsável — o endpoint de BUSINESS exige 'attendantId' (string).
+        # (2026-06-09) Enviar {'attendant': {'id':...}} retorna 200 mas NÃO aplica
+        # — causa raiz do mismatch chat/lead reportado. Só o LEAD aceita o objeto.
         r_resp = requests.patch(
             f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
-            json={'attendant': {'id': crm_id}}, timeout=10
+            json={'attendantId': crm_id}, timeout=10
         )
-        p(f"  [DIST-BIZ] Business {biz_id[:16]} -> attendant.id={crm_id[:12]} (status={r_resp.status_code})")
+        p(f"  [DIST-BIZ] Business {biz_id[:16]} -> attendantId={crm_id[:12]} (status={r_resp.status_code})")
 
         # PATCH 2: pipeline Atendimento
         r_stage = requests.patch(
@@ -10423,7 +10426,7 @@ def _enforce_assignment_consistency(conv_id, lead_id, phone, expected_name,
         if not biz_ok and biz_id:
             try:
                 rB = requests.patch(f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
-                                    json={'attendant': {'id': expected_crm_id},
+                                    json={'attendantId': expected_crm_id,
                                           'stageId': STAGE_ATENDIMENTO_ID},
                                     timeout=10)
                 p(f"  [VERIFY] retry PATCH business -> {expected_crm_id[:8]} status={rB.status_code}")
@@ -11051,7 +11054,7 @@ def trigger_retention(conv_id, lead_id, question, phone=None, target_name=None):
                 if biz_id:
                     rb = requests.patch(
                         f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
-                        json={'attendant': {'id': crm_id}}, timeout=10
+                        json={'attendantId': crm_id}, timeout=10
                     )
                     p(f"  [RETENÇÃO] Negócio attendant -> {alvo} (status={rb.status_code})")
                     rb2 = requests.patch(

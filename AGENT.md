@@ -50,6 +50,37 @@ redistribuída por esse mecanismo.
 
 ---
 
+### [2026-06-09] - CAUSA RAIZ do mismatch chat/lead: business exige `attendantId`
+
+**Decisão / correção**
+O endpoint de **negócio** (`PATCH /businesses/{id}`) **ignora silenciosamente**
+`{'attendant': {'id': ...}}` (responde 200 mas NÃO troca o atendente). Ele exige
+**`{'attendantId': <crm_id>}`** (string). O endpoint de **lead** aceita o objeto
+`attendant` normalmente — por isso o lead trocava e o negócio não, gerando o
+mismatch reportado (chat/lead com uma pessoa, negócio com outra — ex.: lead
+Danúbia / chat Débora).
+
+Corrigido em TODOS os pontos que setam atendente de negócio:
+- `_dcz_transfer_business` (PATCH principal e POST de criação);
+- `_enforce_assignment_consistency` (retry de business);
+- auto-fix de auditoria;
+- `trigger_retention` (negócio de retenção).
+Patches de **lead** seguem com `{'attendant': {'id': ...}}` (correto p/ lead).
+
+Observação: a verificação de conversa (chat) deve ler o campo **`attendants`**
+(lista) do objeto de conversa do messaging — não existe `attendant` singular ali.
+
+**Contexto**
+Investigação dos casos Ana Julia (preso com Felipe inativo) e Alciene (chat
+Débora / negócio Danúbia). Após o fix, ambos ficaram 100% consistentes
+(chat+lead+negócio no mesmo consultor ativo) — corrigidos manualmente também.
+
+**Impacto**
+A reatribuição de negócio passa a funcionar de fato; some o mismatch crônico
+chat/lead/negócio em distribuição, retenção e resgates.
+
+---
+
 ### [2026-06-08] - Retenção distribuída ao time (Wesley + Danúbia), SEM dashboard
 
 **Decisão**
