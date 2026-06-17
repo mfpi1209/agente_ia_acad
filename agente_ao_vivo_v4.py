@@ -4733,16 +4733,49 @@ _RETENTION_CLOSING_MARKERS = (
 )
 
 
+# Pedidos de dado cadastral / status operacional (coleta, nao argumento de retencao)
+_RETENTION_OPERATIONAL_MARKERS = (
+    'abriu a solicitacao', 'abriu solicitacao', 'voce abriu', 'ja abriu',
+    'qual o protocolo', 'numero do protocolo', 'esta em andamento', 'em andamento',
+    'foi aberta', 'foi aberto', 'ja foi aberto', 'ja foi aberta', 'quando foi aberta',
+    'tenta acessar', 'tente acessar', 'consegue acessar', 'me informa seu',
+    'me passa seu', 'me confirma seu', 'pode confirmar seu', 'confirma seu',
+    'encerramos por hoje', 'horario de atendimento', 'meu expediente',
+    'expediente esta se encerrando', 'fora do horario', 'qual o seu nome',
+)
+# Afirmacoes/acks curtos ("Compreendo!", "Entendo, Carol")
+_RETENTION_ACK_MARKERS = (
+    'compreendo', 'compreendi', 'entendo', 'entendi', 'compreendido', 'entendido',
+    'perfeito', 'beleza', 'isso mesmo', 'tudo certo', 'show', 'sim, isso',
+)
+
+
+# Mensagens que NUNCA sao argumento de retencao (descarta independente do tamanho):
+# pesquisa de satisfacao, fim de expediente e status puro de solicitacao.
+_RETENTION_HARD_SKIP = (
+    'avaliar meu atendimento', 'avaliar o atendimento', 'avalie meu atendimento',
+    'avaliar o meu atendimento', 'sua opiniao e muito importante',
+    'sua opiniao e importante', 'poderia avaliar', 'nao requer nenh',
+    'expediente esta se encerrando', 'meu expediente', 'encerramos por hoje',
+    'horario de atendimento chegou', 'no caso de duvidas peco',
+    'solicitacao esta em andamento', 'sua solicitacao esta em andamento',
+    'prazo previsto', 'esta em andamento, o prazo',
+)
+
+
 def _is_retention_skip(text):
     """True se a msg humana NAO eh o argumento/resposta de retencao de fato:
     saudacao/abertura, a pergunta padrao 'por qual motivo deseja cancelar',
-    fechamento/agradecimento curto, ou link/protocolo isolado."""
+    fechamento/agradecimento, pedido de cpf/dado, status operacional, ack curto,
+    pesquisa de satisfacao, fim de expediente ou link/protocolo isolado."""
     if _is_retention_opening(text):
         return True
     import unicodedata
     t = (text or '').strip().lower()
     t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
                      if unicodedata.category(c) != 'Mn')
+    if any(m in t_norm for m in _RETENTION_HARD_SKIP):
+        return True
     if any(m in t_norm for m in _RETENTION_QUESTION_MARKERS):
         return True
     # fechamento/agradecimento: so pula se for CURTO (evita pular conteudo longo
@@ -4754,6 +4787,20 @@ def _is_retention_skip(text):
     # saudacao personalizada curta: "Boa tarde, Carol!" / "Olá, em que posso ajudar?"
     _greet_starts = ('ola', 'oi', 'oie', 'oii', 'opa', 'bom dia', 'boa tarde', 'boa noite')
     if len(t_norm) <= 45 and any(t_norm.startswith(g) for g in _greet_starts):
+        return True
+    # pedido de dado cadastral curto (cpf/rgm/email/nascimento)
+    if len(t_norm) <= 70 and ('cpf' in t_norm or 'rgm' in t_norm
+                              or 'data de nascimento' in t_norm
+                              or 'seu e-mail' in t_norm or 'seu email' in t_norm
+                              or 'sua matricula' in t_norm):
+        return True
+    # status/operacional curto
+    if len(t_norm) <= 70 and any(m in t_norm for m in _RETENTION_OPERATIONAL_MARKERS):
+        return True
+    # afirmacao/ack curto ("Compreendo!", "Entendo, Carol")
+    if len(t_norm) <= 40 and any(t_norm == m or t_norm.startswith(m + ' ')
+                                 or t_norm.startswith(m + ',') or t_norm.startswith(m + '!')
+                                 for m in _RETENTION_ACK_MARKERS):
         return True
     return False
 
@@ -4803,19 +4850,11 @@ def _capture_retention_responses():
                 human_msgs.append(body)
             if not human_msgs:
                 continue
-            chosen = ''
-            for body in human_msgs:
-                if not _is_substantive_student_msg(body):
-                    continue
-                if _is_retention_skip(body):
-                    continue
-                chosen = body
-                break
-            if not chosen:
-                subs = [b for b in human_msgs
-                        if _is_substantive_student_msg(b) and not _is_retention_skip(b)]
-                if subs:
-                    chosen = max(subs, key=len)
+            # Escolhe o ARGUMENTO de retencao: a maior msg humana substantiva que
+            # nao seja saudacao/abertura/pergunta padrao/fechamento/cpf/operacional.
+            cands = [b for b in human_msgs
+                     if _is_substantive_student_msg(b) and not _is_retention_skip(b)]
+            chosen = max(cands, key=len) if cands else ''
             if not chosen:
                 continue
             conn = get_db()
