@@ -4669,10 +4669,13 @@ def _log_retention_interaction(conv_id, phone, name, question, alvo):
 # Marcadores de saudacao/abertura padrao do atendente (nao sao "resposta de fato")
 _RETENTION_OPENING_MARKERS = (
     'tudo bem', 'tudo bom', 'como vai', 'como voce esta', 'como você está',
-    'sou o ', 'sou a ', 'aqui e o ', 'aqui é o ', 'aqui e a ', 'aqui é a ',
+    'sou o ', 'sou a ', 'sou o(a)', 'sou a(o)', 'aqui e o ', 'aqui é o ',
+    'aqui e a ', 'aqui é a ', 'aqui e o(a)', 'aqui é o(a)', 'aqui quem fala',
     'meu nome e', 'meu nome é', 'me chamo', 'falo do', 'falo da',
-    'time de retencao', 'time de retenção', 'setor de retencao', 'setor de retenção',
-    'da retencao', 'da retenção', 'do setor de retencao', 'do setor de retenção',
+    'do time de', 'da equipe de', 'equipe de suporte', 'equipe de atendimento',
+    'time de retencao', 'time de retenção', 'time de suporte', 'time de atendimento',
+    'setor de retencao', 'setor de retenção', 'da retencao', 'da retenção',
+    'do setor de retencao', 'do setor de retenção',
     'como posso te ajudar', 'em que posso ajudar', 'como posso ajudar',
 )
 
@@ -4732,6 +4735,8 @@ def _capture_retention_responses():
                 body = (m.get('body') or m.get('text') or '').strip()
                 if not body or is_bot_message(body):
                     continue
+                if body.startswith('['):
+                    continue  # nota/tag de sistema, nao eh resposta humana
                 human_msgs.append(body)
             if not human_msgs:
                 continue
