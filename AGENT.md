@@ -7,6 +7,93 @@
 
 ---
 
+### [2026-06-17] - Feedback: tema RETENÇÃO, filtro de saudação e captura da resposta da retenção
+
+**Decisão**
+Três ajustes no painel de feedback (`interaction_summary`):
+
+1. **Tema `RETENÇÃO`** — toda conversa encaminhada ao time de Retenção
+   (Wesley/Danúbia) passa a ser registrada com `tema='RETENÇÃO'`, **substituindo**
+   uma linha `DISPARO` da mesma conversa (quando o retorno de disparo virou
+   retenção). Dá ao gestor um filtro próprio para o que vai à retenção.
+2. **Filtro de saudação/filler no DISPARO** — `_log_dispatch_reply_once` só
+   registra o retorno quando há **pergunta/conteúdo de fato**. Saudação pura
+   ("Olá/boa tarde") ou filler ("ok/tudo bem/.") **não** são gravados como
+   pergunta e não marcam o dedup (espera o aluno mandar algo real depois).
+3. **Coluna RESPOSTA da retenção** — `_capture_retention_responses` (roda a cada
+   10 ciclos) busca a **1ª resposta humana substantiva** do time de Retenção e
+   preenche a coluna RESPOSTA da linha `RETENÇÃO`, **pulando saudação/abertura
+   padrão** do atendente (`_is_retention_opening`).
+
+Implementação:
+- Novos helpers: `_is_substantive_student_msg` (+ `_DISPATCH_FILLER_PHRASES`),
+  `_log_retention_interaction` (+ `_RETENCAO_LOGGED_CONVS`), `_is_retention_opening`
+  (+ `_RETENTION_OPENING_MARKERS`), `_capture_retention_responses`.
+- `trigger_retention` (chokepoint único de toda rota de retenção) chama
+  `_log_retention_interaction` antes do `return alvo` → cobre todos os call sites
+  (handle_message, queue_sweep, rescues) de forma sistêmica.
+- Dropdown de TEMA do dashboard (`kb_api.py`) é dinâmico (`by_tema`), então
+  `RETENÇÃO` aparece sozinho quando houver linhas — sem mudança no `kb_api`.
+
+**Contexto**
+Disparo de cancelamento jogava todos os respondentes para a retenção, mas tudo
+ficava misturado em `DISPARO`; e saudações ("Olá/boa tarde/Ok") entravam como
+"pergunta" no feedback. O gestor pediu separar a retenção e ver o que a retenção
+respondeu ao 1º questionamento.
+
+**Alternativas descartadas**
+- Marcar RETENÇÃO **além** de DISPARO (ficar nos dois filtros): descartado — o
+  gestor escolheu substituir para separação limpa.
+- Registrar a saudação e só esconder no front: descartado — decisão foi não
+  registrar nada até haver pergunta real.
+
+**Impacto**
+Feedback fica separado por RETENÇÃO; coluna PERGUNTA só traz questionamento real;
+coluna RESPOSTA mostra o que a retenção de fato respondeu. Custo: 1 chamada
+`identify_student` por novo caso de retenção (baixo volume) e uma varredura leve
+de mensagens a cada 10 ciclos só para linhas RETENÇÃO recentes sem resposta.
+
+---
+
+### [2026-06-17] - Feedback: tema DISPARO separado por TIPO de campanha
+
+**Decisão**
+O tema genérico `DISPARO` foi substituído por `DISPARO · <TIPO>`, classificado
+automaticamente pelo **conteúdo do template** que o aluno respondeu:
+`DISPARO · INADIMPLÊNCIA`, `DISPARO · CANCELAMENTO`, `DISPARO · REMATRÍCULA` ou
+`DISPARO · GERAL` (fallback/ambíguo). Mantém o prefixo `DISPARO · ` para agrupar.
+
+Implementação:
+- `_DISPATCH_TYPE_KEYWORDS`: palavras-âncora por tipo. `_classify_dispatch_type`
+  pontua o **texto do template OUT** (padronizado/previsível, não a resposta do
+  aluno); vence o tipo com mais ocorrências; **empate → GERAL** (não chuta).
+- `_extract_dispatch_template` recupera o corpo do template (msg OUT dispatch-like
+  anterior à resposta), espelhando `_is_dispatch_reply` — **sem chamada extra de API**.
+- `_dispatch_tema`: aplica override manual `DISPATCH_LABEL` (env) quando setado
+  (`DISPARO · <LABEL>`), senão usa a classificação automática.
+- `_log_dispatch_reply_once(..., tema=...)`: grava o tema dinâmico; dedup por
+  conv_id agora usa `tema LIKE 'DISPARO%'` (cobre todos os subtipos).
+- Dropdown de TEMA do dashboard é dinâmico → os subtipos aparecem sozinhos.
+
+**Contexto**
+`DISPARO` único misturava campanhas (inadimplência, cancelamento, rematrícula).
+O gestor pediu separar por disparo, com preocupação explícita de não classificar
+errado.
+
+**Alternativas descartadas**
+- Rótulo manual como ÚNICA fonte: descartado — não há passo de config por disparo
+  (DISPATCH_REF_DATE é env fixa), exigiria redeploy a cada campanha. Mantido só
+  como override opcional.
+- Classificar pela resposta do aluno: descartado — resposta é imprevisível; o
+  template é padronizado e confiável.
+
+**Impacto**
+Cada campanha de disparo fica isolada no feedback (com o filtro de data separando
+a rodada). Risco de erro mitigado por âncoras específicas + empate→GERAL + override
+manual. Para novos tipos, basta adicionar entradas em `_DISPATCH_TYPE_KEYWORDS`.
+
+---
+
 ### [2026-06-09] - Redistribui conversa presa com humano INATIVO ao chegar mensagem nova
 
 **Decisão**

@@ -4421,16 +4421,114 @@ def log_to_db(conv_id, question, response, confidence, action):
 _DISPARO_LOGGED_CONVS: set = set()   # dedup in-memory (limpo a cada rebuild)
 DISPATCH_REF_DATE = os.environ.get('DISPATCH_REF_DATE', '2026-05-25T18:00:00')
 
+# (2026-06-17) Override manual do rotulo da campanha. Se setado (ex.:
+# "INADIMPLENCIA 26/05"), TODA resposta de disparo vira 'DISPARO · <LABEL>',
+# ignorando a deteccao automatica. Vazio => usa deteccao por conteudo.
+DISPATCH_LABEL = (os.environ.get('DISPATCH_LABEL', '') or '').strip()
 
-def _log_dispatch_reply_once(conv_id, phone, name, user_msg, response_msg=''):
+# Palavras-ancora por TIPO de disparo. A classificacao olha o TEXTO DO TEMPLATE
+# (mensagem que saiu), nao a resposta do aluno — o template eh padronizado e
+# previsivel. Cada tipo pontua pelas ocorrencias; vence o maior; empate => GERAL.
+_DISPATCH_TYPE_KEYWORDS = {
+    'INADIMPLÊNCIA': (
+        'em aberto', 'mensalidade', 'mensalidades', 'vencida', 'vencidas',
+        'vencimento', 'venceu', 'boleto', 'fatura', 'regularizar', 'regularize',
+        'inadimpl', 'pagamento pendente', 'pendencia', 'pendência', 'atraso',
+        'em atraso', 'negociar', 'negociacao', 'negociação', 'parcela em aberto',
+        'quitar', 'debito', 'débito',
+    ),
+    'CANCELAMENTO': (
+        'cancelamento', 'cancelar sua matricula', 'cancelar sua matrícula',
+        'reativar', 'reative', 'reativacao', 'reativação', 'voltar a estudar',
+        'retomar seus estudos', 'retomar os estudos', 'retornar ao curso',
+        'trancou', 'trancada', 'desistencia', 'desistência', 'sentimos sua falta',
+        'voltar para a faculdade', 'voltar pra faculdade',
+    ),
+    'REMATRÍCULA': (
+        'rematricula', 'rematrícula', 'renovacao de matricula',
+        'renovação de matrícula', 'renove sua matricula', 'renove sua matrícula',
+        'garanta sua vaga', 'proximo semestre', 'próximo semestre',
+        'matricula 2026', 'matrícula 2026', 'renovar a matricula',
+        'renovar a matrícula',
+    ),
+}
+
+
+def _classify_dispatch_type(template_body):
+    """Classifica o TIPO do disparo pelo texto do template (OUT).
+    Retorna 'INADIMPLÊNCIA'|'CANCELAMENTO'|'REMATRÍCULA' ou 'GERAL' (na duvida)."""
+    if not template_body:
+        return 'GERAL'
+    import unicodedata
+    t = template_body.lower()
+    t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
+                     if unicodedata.category(c) != 'Mn')
+    scores = {}
+    for tipo, kws in _DISPATCH_TYPE_KEYWORDS.items():
+        s = 0
+        for kw in kws:
+            kw_norm = ''.join(c for c in unicodedata.normalize('NFD', kw.lower())
+                              if unicodedata.category(c) != 'Mn')
+            if kw_norm in t_norm:
+                s += 1
+        if s:
+            scores[tipo] = s
+    if not scores:
+        return 'GERAL'
+    ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    if len(ordered) >= 2 and ordered[0][1] == ordered[1][1]:
+        return 'GERAL'  # empate => nao chuta
+    return ordered[0][0]
+
+
+def _dispatch_tema(template_body):
+    """Tema final do retorno de disparo: override manual (DISPATCH_LABEL) tem
+    prioridade; senao classifica pelo conteudo. Sempre prefixa 'DISPARO · '."""
+    if DISPATCH_LABEL:
+        return f'DISPARO · {DISPATCH_LABEL}'
+    return f'DISPARO · {_classify_dispatch_type(template_body)}'
+
+
+def _extract_dispatch_template(msgs, last_user_msg=None):
+    """Retorna o corpo do template (msg OUT dispatch-like imediatamente anterior
+    a resposta do aluno), ou '' se nao achar. Espelha a logica de _is_dispatch_reply."""
+    if not msgs:
+        return ''
+    last_received = last_user_msg if (last_user_msg and last_user_msg.get('received', False)) else None
+    if last_received is None:
+        for m in msgs:
+            if m.get('received', False):
+                last_received = m
+                break
+    if not last_received:
+        return ''
+    recv_ts = _msg_ts(last_received)
+    for m in msgs:
+        if m.get('received', False):
+            continue
+        out_ts = _msg_ts(m)
+        if out_ts and recv_ts and out_ts < recv_ts and _looks_like_dispatch_msg(m):
+            return (m.get('body') or m.get('text') or '').strip()
+    return ''
+
+
+def _log_dispatch_reply_once(conv_id, phone, name, user_msg, response_msg='', tema='DISPARO · GERAL'):
     """Registra resposta de disparo em interaction_summary (idempotente por conv_id)."""
     if conv_id in _DISPARO_LOGGED_CONVS:
+        return False
+    # (2026-06-17) So registra o retorno de disparo quando ha PERGUNTA/conteudo
+    # de fato. Saudacao pura ("Ola"/"boa tarde") ou filler ("ok"/"tudo bem"/".")
+    # NAO entram como pergunta — nao marca no dedup, espera o aluno mandar algo
+    # real numa proxima mensagem.
+    if not _is_substantive_student_msg(user_msg):
         return False
     try:
         conn = get_db()
         cur = conn.cursor()
+        # dedup: qualquer tema de disparo (DISPARO ou 'DISPARO · <TIPO>') ja conta
         cur.execute(
-            "SELECT 1 FROM interaction_summary WHERE conv_id=%s AND tema='DISPARO' LIMIT 1",
+            "SELECT 1 FROM interaction_summary WHERE conv_id=%s "
+            "AND tema LIKE 'DISPARO%%' LIMIT 1",
             (conv_id,)
         )
         if cur.fetchone():
@@ -4441,11 +4539,12 @@ def _log_dispatch_reply_once(conv_id, phone, name, user_msg, response_msg=''):
             INSERT INTO interaction_summary
             (phone, student_name, tema, subtema, sentimento, resolvido,
              nps_implicito, pergunta_aluno, resposta_agente, conv_id, created_at)
-            VALUES (%s, %s, 'DISPARO', 'retorno_disparo', 'neutro', 'parcial',
+            VALUES (%s, %s, %s, 'retorno_disparo', 'neutro', 'parcial',
                     7, %s, %s, %s, NOW())
         """, (
             (phone or '')[-11:],
             (name or '')[:200],
+            tema or 'DISPARO · GERAL',
             (user_msg or '')[:2000],
             (response_msg or '')[:2000],
             conv_id or '',
@@ -4453,11 +4552,215 @@ def _log_dispatch_reply_once(conv_id, phone, name, user_msg, response_msg=''):
         conn.commit()
         cur.close(); conn.close()
         _DISPARO_LOGGED_CONVS.add(conv_id)
-        p(f"  [DISPARO-LOG] retorno registrado conv={conv_id[:12]} '{(user_msg or '')[:40]}'")
+        p(f"  [DISPARO-LOG] retorno registrado conv={conv_id[:12]} tema='{tema}' '{(user_msg or '')[:40]}'")
         return True
     except Exception as e:
         p(f"  [DISPARO-LOG] erro: {e}")
         return False
+
+
+# ============================================================
+# FILTRO DE "PERGUNTA DE FATO" (2026-06-17)
+# Usado para nao registrar saudacao/filler como pergunta no feedback.
+# ============================================================
+# Fillers / acks que NAO sao pergunta (resposta a disparo so com "ok/tudo bem/.")
+_DISPATCH_FILLER_PHRASES = {
+    'ok', 'okay', 'okk', 'okey', 'ok obrigado', 'ok obrigada', 'blz', 'beleza',
+    'sim', 'nao', 'ta', 'ta bom', 'ta bem', 'tah', 'tudo bem', 'tudo bom',
+    'certo', 'entendi', 'obrigado', 'obrigada', 'obg', 'vlw', 'valeu',
+    'grato', 'grata', 'de boa', 'tranquilo', 'show', 'perfeito', 'otimo',
+    'isso', 'aham', 'uhum', 'positivo', 'ciente', 'ok ciente', 'recebido',
+    'agradeco', 'agradecida', 'agradecido',
+}
+
+
+def _is_substantive_student_msg(text):
+    """True se a msg do aluno tem conteudo de PERGUNTA/QUESTIONAMENTO de fato
+    (nao eh apenas saudacao 'ola/boa tarde/bom dia' nem filler 'ok/tudo bem/.')."""
+    if not text or not text.strip():
+        return False
+    if _is_pure_greeting(text):
+        return False
+    import unicodedata
+    t = text.strip().lower()
+    t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
+                     if unicodedata.category(c) != 'Mn')
+    t_clean = ''.join(c for c in t_norm if c.isalnum() or c.isspace()).strip()
+    if not t_clean:
+        return False  # so pontuacao / emoji
+    if t_clean in _DISPATCH_FILLER_PHRASES:
+        return False
+    return True
+
+
+# ============================================================
+# TEMA RETENÇÃO (2026-06-17)
+# Toda conversa encaminhada ao time de Retencao (Wesley/Danubia) e registrada
+# com tema='RETENÇÃO' (substitui uma linha DISPARO da mesma conversa, quando
+# o retorno de disparo virou retencao). Da ao gestor controle/filtro do que vai
+# para a retencao. A coluna RESPOSTA e preenchida depois por
+# _capture_retention_responses (1a resposta humana do time de retencao).
+# ============================================================
+_RETENCAO_LOGGED_CONVS: set = set()
+
+
+def _log_retention_interaction(conv_id, phone, name, question, alvo):
+    """Registra/atualiza a interacao como tema='RETENÇÃO'. Idempotente por conv_id."""
+    if not conv_id or conv_id in _RETENCAO_LOGGED_CONVS:
+        return False
+    try:
+        q = (question or '').strip()
+        if _is_pure_greeting(q):
+            q = ''  # pergunta = motivo real; ignora saudacao pura
+        try:
+            alvo_first = (alvo or '').strip().lower().split()[0]
+        except Exception:
+            alvo_first = ''
+        subt = f"retencao_{alvo_first}" if alvo_first else 'retencao'
+
+        nm = (name or '').strip()
+        if not nm and phone:
+            try:
+                prof = identify_student(
+                    (phone or '').replace('+', '').replace(' ', '').replace('-', ''))
+                if prof and prof.get('name'):
+                    nm = prof['name']
+            except Exception:
+                pass
+
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, tema FROM interaction_summary WHERE conv_id=%s "
+            "ORDER BY created_at DESC LIMIT 1", (conv_id,))
+        row = cur.fetchone()
+        if row:
+            rid, rtema = row[0], row[1]
+            if rtema == 'RETENÇÃO':
+                _RETENCAO_LOGGED_CONVS.add(conv_id)
+                cur.close(); conn.close()
+                return False
+            cur.execute("""
+                UPDATE interaction_summary
+                SET tema='RETENÇÃO', subtema=%s, resolvido='escalado',
+                    pergunta_aluno=COALESCE(NULLIF(%s,''), pergunta_aluno),
+                    student_name=COALESCE(NULLIF(%s,''), student_name)
+                WHERE id=%s
+            """, (subt, q[:2000], nm[:200], rid))
+        else:
+            cur.execute("""
+                INSERT INTO interaction_summary
+                (phone, student_name, tema, subtema, sentimento, resolvido,
+                 nps_implicito, pergunta_aluno, resposta_agente, conv_id, created_at)
+                VALUES (%s, %s, 'RETENÇÃO', %s, 'neutro', 'escalado',
+                        7, %s, '', %s, NOW())
+            """, ((phone or '')[-11:], nm[:200], subt, q[:2000], conv_id))
+        conn.commit()
+        cur.close(); conn.close()
+        _RETENCAO_LOGGED_CONVS.add(conv_id)
+        _DISPARO_LOGGED_CONVS.discard(conv_id)
+        p(f"  [RETENÇÃO-LOG] conv={conv_id[:12]} -> tema=RETENÇÃO ({alvo}) '{q[:40]}'")
+        return True
+    except Exception as e:
+        p(f"  [RETENÇÃO-LOG] erro: {e}")
+        return False
+
+
+# Marcadores de saudacao/abertura padrao do atendente (nao sao "resposta de fato")
+_RETENTION_OPENING_MARKERS = (
+    'tudo bem', 'tudo bom', 'como vai', 'como voce esta', 'como você está',
+    'sou o ', 'sou a ', 'aqui e o ', 'aqui é o ', 'aqui e a ', 'aqui é a ',
+    'meu nome e', 'meu nome é', 'me chamo', 'falo do', 'falo da',
+    'time de retencao', 'time de retenção', 'setor de retencao', 'setor de retenção',
+    'da retencao', 'da retenção', 'do setor de retencao', 'do setor de retenção',
+    'como posso te ajudar', 'em que posso ajudar', 'como posso ajudar',
+)
+
+
+def _is_retention_opening(text):
+    """True se a msg humana parece apenas saudacao/abertura padrao da retencao
+    (sem conteudo de resposta de fato)."""
+    if not text:
+        return True
+    if _is_pure_greeting(text):
+        return True
+    import unicodedata
+    t = text.strip().lower()
+    t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
+                     if unicodedata.category(c) != 'Mn')
+    has_marker = any(m in t_norm for m in _RETENTION_OPENING_MARKERS)
+    return bool(has_marker and len(t_norm) <= 160)
+
+
+def _capture_retention_responses():
+    """Preenche a coluna RESPOSTA das linhas tema='RETENÇÃO' com a 1a resposta
+    HUMANA substantiva do time de Retencao (pula saudacao/abertura padrao deles).
+    Roda periodicamente; so olha linhas recentes (3 dias) ainda sem resposta."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, conv_id FROM interaction_summary
+            WHERE tema='RETENÇÃO'
+              AND (resposta_agente IS NULL OR resposta_agente='')
+              AND conv_id IS NOT NULL AND conv_id != ''
+              AND created_at >= NOW() - INTERVAL '3 days'
+            ORDER BY created_at DESC LIMIT 40
+        """)
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+    except Exception as e:
+        p(f"  [RETENÇÃO-RESP] erro query: {e}")
+        return
+
+    updated = 0
+    for rid, conv_id in rows:
+        try:
+            msgs = get_conversation_messages_api(conv_id, limit=40)
+            if not msgs:
+                continue
+            ordered = sorted(msgs, key=lambda m: _msg_ts(m))
+            human_msgs = []
+            for m in ordered:
+                if m.get('received', False):
+                    continue
+                if m.get('isInternal'):
+                    continue
+                att = m.get('attendant')
+                if not (att and isinstance(att, dict) and att.get('userId')):
+                    continue  # so msg de HUMANO (atendente), nao bot/IA
+                body = (m.get('body') or m.get('text') or '').strip()
+                if not body or is_bot_message(body):
+                    continue
+                human_msgs.append(body)
+            if not human_msgs:
+                continue
+            chosen = ''
+            for body in human_msgs:
+                if not _is_substantive_student_msg(body):
+                    continue
+                if _is_retention_opening(body):
+                    continue
+                chosen = body
+                break
+            if not chosen:
+                subs = [b for b in human_msgs if _is_substantive_student_msg(b)]
+                if subs:
+                    chosen = max(subs, key=len)
+            if not chosen:
+                continue
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("UPDATE interaction_summary SET resposta_agente=%s WHERE id=%s",
+                        (chosen[:2000], rid))
+            conn.commit()
+            cur.close(); conn.close()
+            updated += 1
+        except Exception as e_one:
+            p(f"  [RETENÇÃO-RESP] erro conv={str(conv_id)[:12]}: {e_one}")
+            continue
+    if updated:
+        p(f"  [RETENÇÃO-RESP] respostas da retencao capturadas: {updated}")
 
 
 def _msg_ts(m):
@@ -6419,7 +6722,9 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
             # Aluno respondeu APOS o disparo (timestamp > template) e nao eh robo.
             try:
                 if _is_dispatch_reply(msgs, last_user_msg=last_msg) and not _is_external_bot_input(user_text):
-                    _log_dispatch_reply_once(cid, phone, name, user_text)
+                    _tpl = _extract_dispatch_template(msgs, last_user_msg=last_msg)
+                    _log_dispatch_reply_once(cid, phone, name, user_text,
+                                             tema=_dispatch_tema(_tpl))
             except Exception:
                 pass
 
@@ -11096,6 +11401,15 @@ def trigger_retention(conv_id, lead_id, question, phone=None, target_name=None):
         _conv_states[conv_id]['inactivity_start'] = 0
         _conv_states[conv_id]['followup_stage'] = 0
         _conv_states[conv_id]['_last_responded_ts'] = time.time()
+
+        # (2026-06-17) Registra/atualiza no feedback como tema='RETENÇÃO'
+        # (controle do que vai para a Retenção). Substitui linha DISPARO da
+        # mesma conversa, se houver. A coluna RESPOSTA e preenchida depois.
+        try:
+            _log_retention_interaction(conv_id, phone or _current_phone, None, question, alvo)
+        except Exception:
+            pass
+
         return alvo
 
     except Exception as e:
@@ -14196,6 +14510,12 @@ def main():
                     process_openai_supervisor_loop()
                 except Exception as e_osup:
                     p(f"  [OPENAI-SUP] Erro: {e_osup}")
+                # (2026-06-17) Captura a 1a resposta humana do time de Retenção
+                # para preencher a coluna RESPOSTA do feedback (tema='RETENÇÃO').
+                try:
+                    _capture_retention_responses()
+                except Exception as e_rret:
+                    p(f"  [RETENÇÃO-RESP] Erro: {e_rret}")
 
             if cycle % 2 == 0:
                 active_count = sum(1 for s in _conv_states.values() if s.get('waiting_for_client'))
