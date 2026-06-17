@@ -4680,6 +4680,16 @@ _RETENTION_OPENING_MARKERS = (
 )
 
 
+# Auto-apresentacao FORTE: se aparece, eh abertura padrao INDEPENDENTE do tamanho
+# (as aberturas "Olá, tudo bem? Aqui é o(a) X, faço parte do time de..." sao longas)
+_RETENTION_INTRO_STRONG = (
+    'aqui e o(a)', 'aqui é o(a)', 'aqui e a(o)', 'aqui é a(o)',
+    'faco parte do time', 'faço parte do time', 'faco parte da equipe',
+    'faço parte da equipe', 'sou o(a)', 'sou a(o)', 'me chamo',
+    'meu nome e ', 'meu nome é ', 'aqui quem fala',
+)
+
+
 def _is_retention_opening(text):
     """True se a msg humana parece apenas saudacao/abertura padrao da retencao
     (sem conteudo de resposta de fato)."""
@@ -4691,8 +4701,61 @@ def _is_retention_opening(text):
     t = text.strip().lower()
     t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
                      if unicodedata.category(c) != 'Mn')
+    # auto-apresentacao explicita -> abertura, mesmo que longa
+    if any(m in t_norm for m in _RETENTION_INTRO_STRONG):
+        return True
     has_marker = any(m in t_norm for m in _RETENTION_OPENING_MARKERS)
     return bool(has_marker and len(t_norm) <= 160)
+
+
+# Pergunta padrao de abertura da retencao (NAO eh "resposta de retencao" de fato)
+_RETENTION_QUESTION_MARKERS = (
+    'por qual motivo', 'qual o motivo', 'qual seria o motivo', 'qual e o motivo',
+    'qual é o motivo', 'motivo do cancelamento', 'motivo da desistencia',
+    'motivo da desistência', 'motivo do trancamento', 'por que deseja cancelar',
+    'porque deseja cancelar', 'por que voce deseja cancelar', 'deseja cancelar ?',
+    'deseja cancelar?', 'poderia me dizer o motivo', 'poderia nos dizer o motivo',
+    'pode me dizer o motivo', 'me conta o motivo', 'o que motivou',
+    'gostaria de entender o motivo', 'qual o motivo da', 'motivo da solicitacao',
+    'o que te levou', 'o que aconteceu para',
+)
+# Fechamentos / agradecimentos curtos (NAO sao argumento de retencao)
+_RETENTION_CLOSING_MARKERS = (
+    'por nada', 'disponha', 'estamos a disposicao', 'estou a disposicao',
+    'fico a disposicao', 'ficamos a disposicao', 'qualquer coisa', 'qualquer duvida',
+    'tenha um otimo', 'tenha uma otima', 'tenha um bom', 'tenha uma boa',
+    'obrigado', 'obrigada', 'agradeco', 'combinado', 'ok', 'certo',
+    # follow-ups/checagens genericas (nao sao argumento de retencao)
+    'ainda precisa de ajuda', 'precisa de ajuda', 'ajudo em algo mais',
+    'posso ajudar em algo', 'posso te ajudar em algo', 'ficou com alguma duvida',
+    'ficou alguma duvida', 'ainda esta ai', 'ainda esta por ai',
+    'precisa de mais alguma', 'mais alguma duvida', 'ainda precisa',
+)
+
+
+def _is_retention_skip(text):
+    """True se a msg humana NAO eh o argumento/resposta de retencao de fato:
+    saudacao/abertura, a pergunta padrao 'por qual motivo deseja cancelar',
+    fechamento/agradecimento curto, ou link/protocolo isolado."""
+    if _is_retention_opening(text):
+        return True
+    import unicodedata
+    t = (text or '').strip().lower()
+    t_norm = ''.join(c for c in unicodedata.normalize('NFD', t)
+                     if unicodedata.category(c) != 'Mn')
+    if any(m in t_norm for m in _RETENTION_QUESTION_MARKERS):
+        return True
+    # fechamento/agradecimento: so pula se for CURTO (evita pular conteudo longo
+    # que apenas termina com 'qualquer duvida...')
+    if len(t_norm) <= 90 and any(m in t_norm for m in _RETENTION_CLOSING_MARKERS):
+        return True
+    if t_norm.startswith('link') or t_norm.startswith('http'):
+        return True
+    # saudacao personalizada curta: "Boa tarde, Carol!" / "Olá, em que posso ajudar?"
+    _greet_starts = ('ola', 'oi', 'oie', 'oii', 'opa', 'bom dia', 'boa tarde', 'boa noite')
+    if len(t_norm) <= 45 and any(t_norm.startswith(g) for g in _greet_starts):
+        return True
+    return False
 
 
 def _capture_retention_responses():
@@ -4744,12 +4807,13 @@ def _capture_retention_responses():
             for body in human_msgs:
                 if not _is_substantive_student_msg(body):
                     continue
-                if _is_retention_opening(body):
+                if _is_retention_skip(body):
                     continue
                 chosen = body
                 break
             if not chosen:
-                subs = [b for b in human_msgs if _is_substantive_student_msg(b)]
+                subs = [b for b in human_msgs
+                        if _is_substantive_student_msg(b) and not _is_retention_skip(b)]
                 if subs:
                     chosen = max(subs, key=len)
             if not chosen:
