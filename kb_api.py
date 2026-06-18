@@ -296,6 +296,29 @@ def get_db():
         conn.close()
 
 
+@contextmanager
+def get_other_db(dbname, timeout_ms=15000):
+    """Conexao read-only a outro banco do MESMO servidor Postgres.
+    Usado para 'disparos' (disparador WhatsApp) e 'dcz_sync' (base academica)."""
+    cfg = DB_CONFIG.copy()
+    cfg['dbname'] = dbname
+    cfg['connect_timeout'] = 6
+    cfg['options'] = f'-c statement_timeout={int(timeout_ms)}'
+    conn = psycopg2.connect(**cfg)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _norm_phone_tail(s, n=10):
+    """Ultimos n digitos do telefone (remove pontuacao e DDI 55)."""
+    d = re.sub(r'\D', '', s or '')
+    if len(d) > 11 and d.startswith('55'):
+        d = d[2:]
+    return d[-n:] if len(d) >= n else d
+
+
 def _seed_default_menus(cur):
     """Popula agent_menus com a árvore padrão de menus."""
     def ins(parent_id, level, key, label, text=None, rag=None, order=0):
@@ -3259,6 +3282,212 @@ async def caa_list(
             'per_page': per_page,
             'pages': (total + per_page - 1) // per_page if total else 0,
         }
+
+
+# ===================== DISPARADOR (banco 'disparos') =====================
+# Aba 'Disparador' do cockpit. Le o banco 'disparos' (tabelas activation_*),
+# alimentado pelo disparador externo (banco-dcz-crm-sync / disparador_whatsapp).
+# CPF vem por cruzamento RGM -> mm_matriculados (dcz_sync). SOMENTE LEITURA.
+
+_DISP_SUMMARY_CACHE = {}  # days -> (payload, expiry_ts)
+_DISP_SUMMARY_TTL = 120
+
+
+def _disp_label(category, template_name):
+    """Espelha agente_ao_vivo_v4._dispatch_label (rotulo do dashboard)."""
+    c = (category or '').strip().lower()
+    t = (template_name or '').strip().lower()
+    if c == 'financeiro':
+        return 'INADIMPLÊNCIA'
+    if c == 'docs-pendentes':
+        return 'DOCS PENDENTES'
+    if c == 'processos-caa':
+        return 'CANCELAMENTO' if 'cancel' in t else 'CAA'
+    if c:
+        return (category or '').strip().upper()
+    return 'GERAL'
+
+
+def _cpf_by_rgm(rgms):
+    """Mapa rgm -> cpf via mm_matriculados (dcz_sync). Lote unico."""
+    out = {}
+    rgms = [str(r) for r in rgms if r]
+    if not rgms:
+        return out
+    try:
+        with get_other_db('dcz_sync', timeout_ms=10000) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT rgm, cpf FROM mm_matriculados WHERE rgm = ANY(%s)",
+                        (list(set(rgms)),))
+            for rgm, cpf in cur.fetchall():
+                if rgm and cpf and rgm not in out:
+                    out[str(rgm)] = cpf
+    except Exception as e:
+        print(f"[API] _cpf_by_rgm erro: {e}", flush=True)
+    return out
+
+
+@app.get("/api/dispatch/summary")
+async def dispatch_summary(days: int = Query(30, ge=1, le=180)):
+    """Cards + resumo por template (enviados x responderam) para a aba Disparador."""
+    cached = _DISP_SUMMARY_CACHE.get(days)
+    if cached and cached[1] > time.time():
+        return cached[0]
+    try:
+        with get_other_db('disparos') as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            # enviados por template
+            cur.execute("""
+                SELECT category, template_name,
+                       count(*) AS enviados,
+                       count(DISTINCT datacrazy_lead_id) AS contatos,
+                       max(created_at) AS ultimo
+                FROM activation_dispatch_events
+                WHERE status='sent' AND created_at > now() - make_interval(days => %s)
+                GROUP BY category, template_name
+                ORDER BY ultimo DESC NULLS LAST
+            """, (days,))
+            tpl_rows = cur.fetchall()
+            # respostas no periodo
+            cur.execute("""
+                SELECT datacrazy_lead_id, telefone, received_at
+                FROM activation_responses
+                WHERE received_at > now() - make_interval(days => %s)
+            """, (days,))
+            resp_rows = cur.fetchall()
+            # eventos dos leads que responderam (para atribuir a resposta ao template)
+            lead_ids = list({r['datacrazy_lead_id'] for r in resp_rows if r['datacrazy_lead_id']})
+            ev_by_lead = {}
+            if lead_ids:
+                cur.execute("""
+                    SELECT datacrazy_lead_id, category, template_name, created_at
+                    FROM activation_dispatch_events
+                    WHERE status='sent' AND datacrazy_lead_id = ANY(%s)
+                """, (lead_ids,))
+                for e in cur.fetchall():
+                    ev_by_lead.setdefault(e['datacrazy_lead_id'], []).append(
+                        (e['created_at'], e['category'], e['template_name']))
+            for v in ev_by_lead.values():
+                v.sort(key=lambda x: x[0])
+
+        # atribui cada resposta ao disparo mais recente <= received_at
+        responders_by_tpl = {}   # (category, template) -> set(lead)
+        for r in resp_rows:
+            lead = r['datacrazy_lead_id']
+            evs = ev_by_lead.get(lead)
+            if not evs:
+                continue
+            chosen = None
+            for ts, cat, tpl in evs:
+                if r['received_at'] and ts and ts <= r['received_at']:
+                    chosen = (cat, tpl)
+            if chosen is None:
+                chosen = (evs[-1][1], evs[-1][2])
+            responders_by_tpl.setdefault(chosen, set()).add(lead)
+
+        templates = []
+        tot_env = tot_resp = 0
+        for t in tpl_rows:
+            env = t['enviados'] or 0
+            resp = len(responders_by_tpl.get((t['category'], t['template_name']), set()))
+            tot_env += env
+            tot_resp += resp
+            templates.append({
+                'template': t['template_name'] or '(sem nome)',
+                'category': t['category'],
+                'label': _disp_label(t['category'], t['template_name']),
+                'enviados': env,
+                'contatos': t['contatos'] or 0,
+                'responderam': resp,
+                'taxa': round(100.0 * resp / env, 1) if env else 0.0,
+                'ultimo': t['ultimo'].isoformat() if t['ultimo'] else None,
+            })
+        payload = {
+            'days': days,
+            'cards': {
+                'enviados': tot_env,
+                'responderam': tot_resp,
+                'taxa': round(100.0 * tot_resp / tot_env, 1) if tot_env else 0.0,
+                'templates': len(templates),
+                'respostas_periodo': len(resp_rows),
+            },
+            'templates': templates,
+        }
+        _DISP_SUMMARY_CACHE[days] = (payload, time.time() + _DISP_SUMMARY_TTL)
+        return payload
+    except Exception as e:
+        print(f"[API] dispatch_summary erro: {e}", flush=True)
+        return {'days': days, 'cards': {}, 'templates': [], 'error': str(e)}
+
+
+@app.get("/api/dispatch/contacts")
+async def dispatch_contacts(
+    days: int = Query(30, ge=1, le=180),
+    template: str = Query('', max_length=120),
+    category: str = Query('', max_length=60),
+    responded: str = Query('', max_length=8),   # '', 'sim', 'nao'
+    search: str = Query('', max_length=120),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(25, ge=1, le=100),
+):
+    """Pessoas disparadas (paginado) com flag de resposta e CPF (via RGM)."""
+    offset = (page - 1) * per_page
+    where = ["e.status='sent'", "e.created_at > now() - make_interval(days => %s)"]
+    params = [days]
+    if template:
+        where.append("e.template_name = %s"); params.append(template)
+    if category:
+        where.append("e.category = %s"); params.append(category)
+    if search:
+        digits = re.sub(r'\D', '', search)
+        if len(digits) >= 4:
+            where.append("(regexp_replace(e.telefone,'\\D','','g') LIKE %s OR e.rgm LIKE %s)")
+            params.extend(['%' + digits + '%', '%' + digits + '%'])
+        else:
+            where.append("LOWER(e.nome) LIKE %s"); params.append('%' + search.lower() + '%')
+    resp_exists = ("EXISTS (SELECT 1 FROM activation_responses r "
+                   "WHERE r.datacrazy_lead_id = e.datacrazy_lead_id "
+                   "AND r.received_at >= e.created_at)")
+    if responded == 'sim':
+        where.append(resp_exists)
+    elif responded == 'nao':
+        where.append('NOT ' + resp_exists)
+    w = ' AND '.join(where)
+    try:
+        with get_other_db('disparos') as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(f"SELECT count(*) AS cnt FROM activation_dispatch_events e WHERE {w}", params)
+            total = cur.fetchone()['cnt']
+            cur.execute(f"""
+                SELECT e.nome, e.telefone, e.rgm, e.email, e.category, e.template_name,
+                       e.created_at, {resp_exists} AS respondeu
+                FROM activation_dispatch_events e
+                WHERE {w}
+                ORDER BY e.created_at DESC
+                LIMIT %s OFFSET %s
+            """, params + [per_page, offset])
+            rows = cur.fetchall()
+        cpf_map = _cpf_by_rgm([r['rgm'] for r in rows])
+        items = []
+        for r in rows:
+            items.append({
+                'nome': r['nome'],
+                'telefone': r['telefone'],
+                'rgm': r['rgm'],
+                'cpf': cpf_map.get(str(r['rgm'])) if r['rgm'] else None,
+                'category': r['category'],
+                'label': _disp_label(r['category'], r['template_name']),
+                'template': r['template_name'],
+                'data': r['created_at'].isoformat() if r['created_at'] else None,
+                'respondeu': bool(r['respondeu']),
+            })
+        return {
+            'items': items, 'total': total, 'page': page, 'per_page': per_page,
+            'pages': (total + per_page - 1) // per_page if total else 0,
+        }
+    except Exception as e:
+        print(f"[API] dispatch_contacts erro: {e}", flush=True)
+        return {'items': [], 'total': 0, 'page': page, 'per_page': per_page, 'pages': 0, 'error': str(e)}
 
 
 # ===================== CALENDARIO ACADEMICO 2026 =====================

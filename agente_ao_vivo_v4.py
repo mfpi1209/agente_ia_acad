@@ -4481,11 +4481,101 @@ def _classify_dispatch_type(template_body):
     return ordered[0][0]
 
 
-def _dispatch_tema(template_body):
-    """Tema final do retorno de disparo: override manual (DISPATCH_LABEL) tem
-    prioridade; senao classifica pelo conteudo. Sempre prefixa 'DISPARO · '."""
+# (2026-06-18) Fonte da verdade dos disparos: banco 'disparos' (mesmo servidor),
+# tabela activation_dispatch_events — alimentada pelo disparador externo
+# (banco-dcz-crm-sync / disparador_whatsapp). Cada evento traz datacrazy_lead_id,
+# telefone, rgm, category e template_name. Substitui a adivinhacao por palavra-chave.
+_DISPATCH_LOOKUP_CACHE = {}  # chave -> (resultado|None, expiry_ts)
+_DISPATCH_LOOKUP_TTL = 600   # 10 min (cacheia hit E miss)
+
+
+def _lookup_dispatch(phone=None, lead_id=None, rgm=None, max_days=30):
+    """Retorna o disparo mais recente do contato (category/template_name/created_at)
+    a partir do banco 'disparos'. SOMENTE LEITURA. None se nao achar.
+    Prioridade de chave: datacrazy_lead_id > telefone (sufixo de digitos) > rgm."""
+    if not (phone or lead_id or rgm):
+        return None
+    ck = f"{lead_id or ''}|{phone or ''}|{rgm or ''}"
+    cached = _DISPATCH_LOOKUP_CACHE.get(ck)
+    if cached and cached[1] > time.time():
+        return cached[0]
+    result = None
+    try:
+        cfg = DB_CONFIG.copy()
+        cfg['dbname'] = 'disparos'
+        cfg['connect_timeout'] = 5
+        cfg['options'] = '-c statement_timeout=8000'
+        conn = psycopg2.connect(**cfg)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        row = None
+        if lead_id:
+            cur.execute("""SELECT category, template_name, created_at
+                           FROM activation_dispatch_events
+                           WHERE status='sent' AND datacrazy_lead_id=%s
+                             AND created_at > now() - make_interval(days => %s)
+                           ORDER BY created_at DESC LIMIT 1""", (lead_id, max_days))
+            row = cur.fetchone()
+        if not row and phone:
+            tail = re.sub(r'\D', '', phone or '')
+            if len(tail) > 11 and tail.startswith('55'):
+                tail = tail[2:]
+            tail = tail[-10:]
+            if tail:
+                cur.execute("""SELECT category, template_name, created_at
+                               FROM activation_dispatch_events
+                               WHERE status='sent'
+                                 AND right(regexp_replace(telefone,'\\D','','g'), %s)=%s
+                                 AND created_at > now() - make_interval(days => %s)
+                               ORDER BY created_at DESC LIMIT 1""",
+                            (len(tail), tail, max_days))
+                row = cur.fetchone()
+        if not row and rgm:
+            cur.execute("""SELECT category, template_name, created_at
+                           FROM activation_dispatch_events
+                           WHERE status='sent' AND rgm=%s
+                             AND created_at > now() - make_interval(days => %s)
+                           ORDER BY created_at DESC LIMIT 1""", (str(rgm), max_days))
+            row = cur.fetchone()
+        cur.close(); conn.close()
+        if row:
+            result = {'category': row['category'],
+                      'template_name': row['template_name'],
+                      'created_at': row['created_at']}
+    except Exception as e:
+        p(f"  [DISPARO-LOOKUP] erro: {e}")
+        result = None
+    _DISPATCH_LOOKUP_CACHE[ck] = (result, time.time() + _DISPATCH_LOOKUP_TTL)
+    return result
+
+
+def _dispatch_label(category, template_name):
+    """Mapeia (category, template) do banco de disparos para o rotulo do dashboard.
+    Granularidade hibrida: 'financeiro' separa INADIMPLENCIA x ATIVACAO pelo template."""
+    c = (category or '').strip().lower()
+    t = (template_name or '').strip().lower()
+    if c == 'financeiro':
+        return 'DISPARO · INADIMPLÊNCIA'
+    if c == 'docs-pendentes':
+        return 'DISPARO · DOCS PENDENTES'
+    if c == 'processos-caa':
+        if 'cancel' in t:
+            return 'DISPARO · CANCELAMENTO'
+        return 'DISPARO · CAA'
+    if c:
+        return 'DISPARO · ' + (category or '').strip().upper()
+    return 'DISPARO · GERAL'
+
+
+def _dispatch_tema(template_body, phone=None, lead_id=None, rgm=None):
+    """Tema final do retorno de disparo. Prioridade:
+    1) DISPATCH_LABEL (override manual via env);
+    2) banco 'disparos' (fonte da verdade) via _lookup_dispatch;
+    3) fallback: heuristica por palavra-chave no template (_classify_dispatch_type)."""
     if DISPATCH_LABEL:
         return f'DISPARO · {DISPATCH_LABEL}'
+    hit = _lookup_dispatch(phone=phone, lead_id=lead_id, rgm=rgm)
+    if hit:
+        return _dispatch_label(hit.get('category'), hit.get('template_name'))
     return f'DISPARO · {_classify_dispatch_type(template_body)}'
 
 
@@ -6829,10 +6919,13 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
             # --- DISPARO REPLY TRACKER (2026-05-27) ---
             # Aluno respondeu APOS o disparo (timestamp > template) e nao eh robo.
             try:
-                if _is_dispatch_reply(msgs, last_user_msg=last_msg) and not _is_external_bot_input(user_text):
+                if (_is_dispatch_reply(msgs, last_user_msg=last_msg)
+                        and not _is_external_bot_input(user_text)
+                        and cid not in _DISPARO_LOGGED_CONVS
+                        and _is_substantive_student_msg(user_text)):
                     _tpl = _extract_dispatch_template(msgs, last_user_msg=last_msg)
                     _log_dispatch_reply_once(cid, phone, name, user_text,
-                                             tema=_dispatch_tema(_tpl))
+                                             tema=_dispatch_tema(_tpl, phone=phone))
             except Exception:
                 pass
 

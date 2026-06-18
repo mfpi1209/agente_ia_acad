@@ -7,6 +7,96 @@
 
 ---
 
+### [2026-06-18] - Tabulação de disparo pela fonte da verdade (banco `disparos` / activation_*)
+
+**Decisão**
+O tipo do retorno de disparo passa a ser determinado lendo o **banco oficial do
+disparador** (`disparos`, tabela `activation_dispatch_events`), em vez de adivinhar
+pelo texto do template. Esse banco é alimentado pelo disparador externo
+(`banco-dcz-crm-sync` / app `disparador_whatsapp`), está no **mesmo servidor
+Postgres** que o agente já usa (mesmo host/usuário, só muda o `dbname`) e contém
+`datacrazy_lead_id`, `telefone`, `rgm`, `category` e `template_name` de cada envio.
+
+Implementação (`agente_ao_vivo_v4.py`):
+- `_lookup_dispatch(phone, lead_id, rgm, max_days=30)` — **somente leitura**; busca o
+  disparo mais recente do contato (status `sent`, janela de 30 dias). Prioridade de
+  chave: `datacrazy_lead_id` > telefone (sufixo de dígitos, normaliza `55`) > `rgm`.
+  Cache em memória de 10 min (hit e miss) + `statement_timeout` 8s p/ não travar o loop.
+- `_dispatch_label(category, template_name)` — mapeia para o rótulo do dashboard.
+  `financeiro`→`INADIMPLÊNCIA`; `docs-pendentes`→`DOCS PENDENTES`; `processos-caa`→
+  `CANCELAMENTO` (template com `cancel`) ou `CAA`; categoria nova→`DISPARO · <CATEGORIA>`.
+  (2026-06-18) `ATIVAÇÃO` removida a pedido — `financeiro` agora é sempre `INADIMPLÊNCIA`.
+- `_dispatch_tema` nova ordem: 1) `DISPATCH_LABEL` (override manual) → 2) `_lookup_dispatch`
+  (fonte da verdade) → 3) fallback `_classify_dispatch_type` (heurística antiga).
+- Call site em `process_queue_fast_sweep`: só consulta o banco se a conversa **ainda não
+  foi logada** e a mensagem é **substantiva** (evita query repetida por saudação).
+
+**Contexto**
+Os disparos saem por um sistema externo e **não aparecem no DataCrazy**, então a
+detecção por texto do template era pouco confiável (≈93% caía em "GERAL" no
+retroativo). O gestor pediu tabular por tipo de disparo de forma confiável. Investigando
+o servidor, achei o banco `disparos` com as tabelas `activation_*` vivas (último evento
+17/06, respostas até 18/06) — a fonte oficial. O `lead_id` que o agente já guarda casa
+direto com `datacrazy_lead_id`. Dry-run (somente leitura) em 400 retornos recentes: 50%
+casaram (limitado pelo histórico anterior a 08/06); no fluxo ao vivo o acerto é maior
+porque o `lead_id` está disponível direto no profile.
+
+**Alternativas descartadas**
+- Fingerprint do template observando a mensagem OUT no DCZ: inviável — o disparo não
+  aparece no DCZ.
+- Classificação retroativa por conteúdo dos ~3950 `DISPARO` legados: descartada antes
+  por baixa confiabilidade; mantidos como legado.
+- Acessar o painel web por login: desnecessário e frágil — a fonte está no banco.
+
+**Impacto**
+- Retornos de disparo novos recebem rótulo preciso (`DISPARO · INADIMPLÊNCIA`,
+  `· ATIVAÇÃO`, `· DOCS PENDENTES`, `· CANCELAMENTO`, etc.) direto do dado oficial.
+- Nenhuma dependência/pasta nova; conexão read-only ao `disparos` (padrão do `dcz_sync`).
+- Sem regressão: se não houver match, mantém o comportamento antigo (fallback).
+- Não toca no fluxo de `RETENÇÃO` (rota de cancelamento continua via `_log_retention_interaction`).
+
+---
+
+### [2026-06-18] - Aba "Disparador" no cockpit (kb_api + kb_admin)
+
+**Decisão**
+Nova aba **Disparador** no cockpit, lendo o banco `disparos` (read-only, mesmo
+servidor). Mostra: cards (disparado / responderam / taxa de retorno / nº de
+templates), gráfico de barras enviados×responderam por template, tabela de
+templates do período (com taxa, clicável p/ filtrar) e tabela paginada de pessoas
+disparadas (nome, telefone, RGM, **CPF**, template, tipo, data, **respondeu?**).
+
+Implementação:
+- `kb_api.py`: `get_other_db(dbname)` (ctx manager read-only p/ outros bancos do
+  mesmo servidor) + `_norm_phone_tail` + `_disp_label` (espelha o do agente) +
+  `_cpf_by_rgm` (lote RGM→`mm_matriculados` no `dcz_sync`). Endpoints
+  `GET /api/dispatch/summary` (cache 120s) e `GET /api/dispatch/contacts`
+  (paginado, filtros template/categoria/respondeu/busca). Atribuição de resposta→
+  template pela chave **(category, template)** do disparo mais recente ≤ `received_at`.
+- `kb_admin.html`: tab `disparador` (Chart.js já presente), funções `initDisparador`,
+  `loadDispSummary`/`dispRenderChart`, `loadDispContacts`, filtros por template.
+
+**Contexto**
+O gestor pediu uma visão completa dos disparos (quem recebeu, template, quem
+respondeu, gráfico de retorno). Limitações dos dados, decididas com o gestor:
+- **Texto do template não fica no banco** (templates aprovados ficam na API da
+  Meta; o disparador só guarda o `template_name`). Decisão: exibir só o **nome**
+  do template por enquanto. Evolução possível: integrar com a API da Meta
+  (`/{WABA_ID}/message_templates`) usando WABA ID + token do app disparador.
+- **CPF** não está no disparo → vem por cruzamento RGM→base acadêmica (melhor esforço).
+- **Conteúdo da resposta** do aluno não fica no banco de disparos (só quem/quando).
+
+**Alternativas descartadas**
+- Cadastro manual do texto do template: deixado como opção; gestor preferiu só o nome.
+- Guardar credenciais Meta no cockpit agora: adiado (precisa do token do easypanel).
+
+**Impacto**
+- Validado contra dados reais (summary ~0.3s, contacts ~0.1s): ex. `caa_cancelamento`
+  77,8% de retorno; inadimplência ~1,5–2%. Sem escrita em nenhum banco.
+- Requer rebuild/restart do cockpit para aparecer.
+
+---
+
 ### [2026-06-17] - Feedback: tema RETENÇÃO, filtro de saudação e captura da resposta da retenção
 
 **Decisão**

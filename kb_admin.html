@@ -275,6 +275,7 @@ body.dark-mode .wa-bubble.wa-bot .wa-meta{color:#6b7085;}
   <div class="tab" data-tab="audit" onclick="sw('audit')"><i class="fas fa-shield-halved mr-1.5"></i>Auditoria IA</div>
   <div class="tab" data-tab="afterhours" onclick="sw('afterhours')"><i class="fas fa-moon mr-1.5"></i>Fora do Horário</div>
   <div class="tab" data-tab="caa" onclick="sw('caa')"><i class="fas fa-folder-open mr-1.5"></i>Solicitações CAA</div>
+  <div class="tab" data-tab="disparador" onclick="sw('disparador')"><i class="fas fa-paper-plane mr-1.5"></i>Disparador</div>
   <div class="tab" data-tab="calendar" onclick="sw('calendar')"><i class="fas fa-calendar-days mr-1.5"></i>Calendário 2026</div>
   <div class="tab" data-tab="team" onclick="sw('team')"><i class="fas fa-users-gear mr-1.5"></i>Equipe</div>
   <div class="tab" data-tab="students" onclick="sw('students')"><i class="fas fa-user-graduate mr-1.5"></i>Alunos</div>
@@ -756,6 +757,68 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
     </table>
   </div>
   <div id="aoh-empty" class="hidden p-8 text-center text-gray-400 text-sm">Nenhum registro neste filtro.</div>
+</div>
+</div>
+
+<!-- ===== DISPARADOR ===== -->
+<div id="tab-disparador" class="tc hidden fade">
+<div class="flex flex-wrap items-center justify-between gap-3 mt-5">
+  <div>
+    <h2 class="text-lg font-bold text-gray-800"><i class="fas fa-paper-plane mr-2 text-emerald-500"></i>Disparador</h2>
+    <p class="text-xs text-gray-500">Disparos enviados pelo Disparador WhatsApp e o retorno de cada campanha.</p>
+  </div>
+  <div class="flex items-center gap-2">
+    <select id="disp-days" class="inp btn-sm" style="width:auto;" onchange="initDisparador()">
+      <option value="7">Últimos 7 dias</option>
+      <option value="15">Últimos 15 dias</option>
+      <option value="30" selected>Últimos 30 dias</option>
+      <option value="60">Últimos 60 dias</option>
+      <option value="90">Últimos 90 dias</option>
+    </select>
+    <button onclick="initDisparador()" class="btn btn-g btn-sm"><i class="fas fa-rotate mr-1"></i>Atualizar</button>
+  </div>
+</div>
+
+<div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
+  <div class="card p-5 border-l-4 border-emerald-400"><div class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Disparado</div><div class="text-3xl font-extrabold text-gray-800 tabular-nums" id="disp-c-env">0</div><div class="text-xs text-gray-400 mt-1">mensagens enviadas</div></div>
+  <div class="card p-5 border-l-4 border-blue-400"><div class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Responderam</div><div class="text-3xl font-extrabold text-gray-800 tabular-nums" id="disp-c-resp">0</div><div class="text-xs text-gray-400 mt-1">contatos que responderam</div></div>
+  <div class="card p-5 border-l-4 border-amber-400"><div class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Taxa de retorno</div><div class="text-3xl font-extrabold text-gray-800 tabular-nums" id="disp-c-taxa">0%</div><div class="text-xs text-gray-400 mt-1">respostas / enviados</div></div>
+  <div class="card p-5 border-l-4 border-indigo-400"><div class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Campanhas</div><div class="text-3xl font-extrabold text-gray-800 tabular-nums" id="disp-c-tpl">0</div><div class="text-xs text-gray-400 mt-1">templates no período</div></div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+  <div class="card p-5"><h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Retorno por template (enviados × responderam)</h3><div style="height:300px;"><canvas id="disp-chart"></canvas></div></div>
+  <div class="card">
+    <div class="p-4 border-b"><h3 class="text-sm font-semibold text-gray-700"><i class="fas fa-layer-group mr-1.5 text-emerald-500"></i>Templates do período</h3><p class="text-xs text-gray-400 mt-0.5">Clique num template para filtrar as pessoas abaixo.</p></div>
+    <div class="overflow-x-auto" style="max-height:300px;overflow-y:auto;">
+      <table class="w-full text-sm"><thead class="bg-gray-50 text-xs text-gray-500 uppercase sticky top-0"><tr>
+        <th class="text-left p-3">Template</th><th class="text-left p-3">Tipo</th>
+        <th class="text-right p-3">Enviados</th><th class="text-right p-3">Resp.</th><th class="text-right p-3">Taxa</th>
+      </tr></thead><tbody id="disp-tpl-tbody"></tbody></table>
+    </div>
+  </div>
+</div>
+
+<div class="card mt-4">
+  <div class="p-4 border-b flex flex-wrap items-center gap-3">
+    <h3 class="text-sm font-semibold text-gray-700"><i class="fas fa-users mr-1.5 text-emerald-500"></i>Pessoas disparadas</h3>
+    <span id="disp-filter-badge" class="badge b-gray hidden"></span>
+    <button onclick="dispClearTplFilter()" id="disp-clear-tpl" class="btn btn-sm hidden"><i class="fas fa-xmark mr-1"></i>Limpar filtro</button>
+    <div class="flex-1 min-w-0 relative" style="min-width:180px;"><i class="fas fa-search absolute left-3 top-2.5 text-gray-400 text-xs"></i><input type="text" id="disp-search" placeholder="Nome, telefone ou RGM..." class="inp pl-8 btn-sm" onkeyup="deb(dispSearch,400)()"></div>
+    <select id="disp-filter-resp" class="inp btn-sm" style="width:auto;" onchange="dispSearch()">
+      <option value="">Todos</option><option value="sim">Só quem respondeu</option><option value="nao">Só quem não respondeu</option>
+    </select>
+    <button onclick="dispSearch()" class="btn btn-g btn-sm"><i class="fas fa-rotate mr-1"></i>Atualizar</button>
+  </div>
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm"><thead class="bg-gray-50 text-xs text-gray-500 uppercase"><tr>
+      <th class="text-left p-3">Nome</th><th class="text-left p-3">Telefone</th><th class="text-left p-3">RGM</th>
+      <th class="text-left p-3">CPF</th><th class="text-left p-3">Template</th><th class="text-left p-3">Tipo</th>
+      <th class="text-left p-3">Enviado</th><th class="text-center p-3">Respondeu</th>
+    </tr></thead><tbody id="disp-tbody"></tbody></table>
+  </div>
+  <div id="disp-empty" class="hidden p-8 text-center text-gray-400 text-sm">Nenhuma pessoa.</div>
+  <div class="p-3 border-t flex items-center justify-between text-xs text-gray-500"><span id="disp-count">—</span><div id="disp-pag" class="flex gap-1.5"></div></div>
 </div>
 </div>
 
@@ -1955,7 +2018,7 @@ async function aiaCorrSave(){
 
 // ==== TABS ====
 function sw(t){document.querySelectorAll('.tc').forEach(e=>e.classList.add('hidden'));document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));document.getElementById('tab-'+t).classList.remove('hidden');document.querySelector(`.tab[data-tab="${t}"]`).classList.add('active');
-if(t==='dashboard')loadDash();if(t==='qa')loadQA();if(t==='logs')loadLogs();if(t==='prompts')loadPrompts();if(t==='playground')initPG();if(t==='agentia')initAgentIA();if(t==='audit')initAudit();if(t==='afterhours')initAfterHours();if(t==='team')loadTeam();if(t==='students')loadStudents();if(t==='alerts')loadAlerts();if(t==='menus')loadMenus();if(t==='agentcfg')loadAgentConfig();if(t==='conversations')loadConversations();if(t==='caa')initCaa();if(t==='calendar')initCalendar();}
+if(t==='dashboard')loadDash();if(t==='qa')loadQA();if(t==='logs')loadLogs();if(t==='prompts')loadPrompts();if(t==='playground')initPG();if(t==='agentia')initAgentIA();if(t==='audit')initAudit();if(t==='afterhours')initAfterHours();if(t==='team')loadTeam();if(t==='students')loadStudents();if(t==='alerts')loadAlerts();if(t==='menus')loadMenus();if(t==='agentcfg')loadAgentConfig();if(t==='conversations')loadConversations();if(t==='caa')initCaa();if(t==='calendar')initCalendar();if(t==='disparador')initDisparador();}
 
 // ==== DASHBOARD ====
 async function loadDash(){
@@ -2669,6 +2732,75 @@ async function loadCaaList(){
     paginate('caa-pag',d.page,d.pages,p=>{caaPage=p;loadCaaList();});
   }catch(e){console.error('loadCaaList',e);toast('Erro ao carregar lista CAA','error');}
 }
+// ==== DISPARADOR ====
+let dispPage=1, dispTplFilter='', dispCatFilter='', dispChart=null;
+function dispDays(){return document.getElementById('disp-days')?.value||'30';}
+function dispSearch(){dispPage=1;loadDispContacts();}
+async function initDisparador(){await loadDispSummary();dispPage=1;await loadDispContacts();}
+function dispCatCls(label){label=(label||'').toUpperCase();if(label.indexOf('CANCEL')>=0)return 'b-red';if(label.indexOf('INADIMPL')>=0)return 'b-yellow';if(label.indexOf('DOCS')>=0)return 'b-blue';if(label.indexOf('CAA')>=0)return 'b-purple';return 'b-gray';}
+async function loadDispSummary(){
+  try{
+    const d=await(await fetch(A+'/api/dispatch/summary?days='+dispDays())).json();
+    const c=d.cards||{};
+    document.getElementById('disp-c-env').textContent=(c.enviados||0).toLocaleString('pt-BR');
+    document.getElementById('disp-c-resp').textContent=(c.responderam||0).toLocaleString('pt-BR');
+    document.getElementById('disp-c-taxa').textContent=(c.taxa||0)+'%';
+    document.getElementById('disp-c-tpl').textContent=(c.templates||0);
+    const tpls=d.templates||[];
+    const tb=document.getElementById('disp-tpl-tbody');
+    tb.innerHTML=tpls.length?tpls.map(t=>`<tr class="border-t hover:bg-gray-50 cursor-pointer" onclick="dispSetTplFilter('${esc(t.template)}','${esc(t.category||'')}')">
+      <td class="p-3 text-xs font-mono">${esc(t.template)}</td>
+      <td class="p-3"><span class="badge ${dispCatCls(t.label)}">${esc(t.label)}</span></td>
+      <td class="p-3 text-right tabular-nums">${(t.enviados||0).toLocaleString('pt-BR')}</td>
+      <td class="p-3 text-right tabular-nums">${(t.responderam||0).toLocaleString('pt-BR')}</td>
+      <td class="p-3 text-right font-semibold ${t.taxa>=20?'text-green-600':(t.taxa>=5?'text-amber-600':'text-gray-500')}">${t.taxa}%</td>
+    </tr>`).join(''):'<tr><td colspan="5" class="p-6 text-center text-gray-400 text-sm">Sem disparos no período.</td></tr>';
+    dispRenderChart(tpls);
+  }catch(e){console.error('loadDispSummary',e);toast('Erro ao carregar resumo de disparos','error');}
+}
+function dispRenderChart(tpls){
+  if(dispChart){dispChart.destroy();dispChart=null;}
+  const el=document.getElementById('disp-chart');if(!el)return;
+  const top=tpls.slice(0,10);
+  dispChart=new Chart(el,{type:'bar',data:{labels:top.map(t=>t.template),datasets:[
+    {label:'Enviados',data:top.map(t=>t.enviados),backgroundColor:'#a7f3d0',borderRadius:4},
+    {label:'Responderam',data:top.map(t=>t.responderam),backgroundColor:'#10b981',borderRadius:4}
+  ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{font:{size:10},usePointStyle:true}}},scales:{y:{beginAtZero:true}}}});
+}
+function dispSetTplFilter(t,c){dispTplFilter=t;dispCatFilter=c;dispPage=1;
+  const b=document.getElementById('disp-filter-badge');b.textContent='Template: '+t;b.classList.remove('hidden');
+  document.getElementById('disp-clear-tpl').classList.remove('hidden');loadDispContacts();}
+function dispClearTplFilter(){dispTplFilter='';dispCatFilter='';dispPage=1;
+  document.getElementById('disp-filter-badge').classList.add('hidden');
+  document.getElementById('disp-clear-tpl').classList.add('hidden');loadDispContacts();}
+async function loadDispContacts(){
+  const p=new URLSearchParams({days:dispDays(),page:dispPage,per_page:25});
+  if(dispTplFilter)p.set('template',dispTplFilter);
+  if(dispCatFilter)p.set('category',dispCatFilter);
+  const s=document.getElementById('disp-search')?.value;if(s)p.set('search',s);
+  const r=document.getElementById('disp-filter-resp')?.value;if(r)p.set('responded',r);
+  try{
+    const d=await(await fetch(A+'/api/dispatch/contacts?'+p)).json();
+    const tb=document.getElementById('disp-tbody'),empty=document.getElementById('disp-empty');
+    if(!d.items||!d.items.length){tb.innerHTML='';empty.classList.remove('hidden');}
+    else{empty.classList.add('hidden');
+      tb.innerHTML=d.items.map(x=>{const dt=x.data?new Date(x.data).toLocaleDateString('pt-BR'):'-';
+        const resp=x.respondeu?'<span class="badge b-green">Sim</span>':'<span class="badge b-gray">Não</span>';
+        return `<tr class="border-t hover:bg-gray-50">
+          <td class="p-3"><div class="text-sm font-medium">${esc(x.nome||'-')}</div></td>
+          <td class="p-3 text-xs font-mono">${esc(x.telefone||'-')}</td>
+          <td class="p-3 text-xs font-mono">${esc(x.rgm||'-')}</td>
+          <td class="p-3 text-xs font-mono">${esc(x.cpf||'-')}</td>
+          <td class="p-3 text-xs font-mono">${esc(x.template||'-')}</td>
+          <td class="p-3"><span class="badge ${dispCatCls(x.label)}">${esc(x.label)}</span></td>
+          <td class="p-3 text-xs">${dt}</td>
+          <td class="p-3 text-center">${resp}</td>
+        </tr>`;}).join('');}
+    document.getElementById('disp-count').textContent=`${(d.total||0).toLocaleString('pt-BR')} pessoas`;
+    paginate('disp-pag',d.page,d.pages,pg=>{dispPage=pg;loadDispContacts();});
+  }catch(e){console.error('loadDispContacts',e);toast('Erro ao carregar pessoas','error');}
+}
+
 async function caaUpload(){
   const inp=document.getElementById('caa-file');
   const msg=document.getElementById('caa-upload-msg');
