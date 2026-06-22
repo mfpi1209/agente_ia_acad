@@ -7,6 +7,95 @@
 
 ---
 
+### [2026-06-22] - Retenção deixa de ser distribuída: agente só aciona a automação "Retenção IA" (tag RET-IA)
+
+**Decisão**
+Quando o agente detecta retenção (mesmas regras de `is_retention_intent`), ele **não distribui
+mais** para Wesley/Danúbia, **não transfere o chat**, **não muda etapa do negócio** e **não envia
+nenhuma mensagem ao aluno**. Ele apenas:
+1. adiciona a tag **`RET-IA`** (`18a49003-449b-473f-964f-1e0d2935b8e0`) no lead — que dispara a
+   automação **"Retenção IA"** no DataCrazy (gatilho "tag adicionada");
+2. registra a **nota interna** (para o consultor entender o que o aluno disse);
+3. silencia o bot na conversa (`_mark_handoff_active('retention')` + flags) — a automação assume.
+
+`trigger_retention` foi reescrita para esse comportamento e é **idempotente** (se o lead já tem a
+tag RET-IA, não re-aplica nem re-posta a nota). Não registra mais no feedback (tema RETENÇÃO).
+A mudança vale **dentro e fora do horário** (removido o ramo after-hours de mensagem).
+
+Call sites ajustados (todos deixaram de enviar mensagem ao aluno): fluxo principal, in-hours-rescue,
+queue-sweep, post-close-rescue e low-conf-D4. Os dois pontos "sticky" (in-hours e queue-sweep)
+continuam chamando `trigger_retention`, agora idempotente.
+
+**Contexto**
+Pedido do gestor: a retenção passa a ser conduzida pela automação "Retenção IA" (retenção
+executada por IA) no DataCrazy, em vez de distribuir para um consultor humano. O agente só precisa
+"acender o gatilho" (a tag) e sair de cena, mantendo a nota interna como contexto. A tag RET-IA já
+existia no CRM (criada 2026-06-17, descrição "retenção executada por IA").
+
+**Alternativas descartadas**
+- *Executar a automação via API do DataCrazy*: não há endpoint conhecido/confiável no projeto para
+  rodar automação manual; a automação estava com gatilho "execução manual". Optou-se por mudar o
+  gatilho para "tag adicionada" e o agente apenas adiciona a tag (mecanismo que o agente já domina).
+- *Manter registro no feedback (tema RETENÇÃO)*: descartado a pedido do gestor (só nota interna).
+- *Manter mensagem/distribuição fora do horário*: descartado — comportamento uniforme (sempre só
+  aciona a automação), para "nunca errar".
+
+**Impacto**
+Retenção fica 100% a cargo da automação "Retenção IA"; o agente não ocupa consultor nem fala com o
+aluno nesses casos. Constantes antigas (`RETENTION_MSG`, `RETENTION_AFTER_HOURS_MSG`,
+`RETENTION_WESLEY_CRM_ID`) permanecem definidas mas deixam de ser usadas no caminho de retenção.
+Pré-requisito operacional: a automação "Retenção IA" precisa estar com o gatilho configurado para a
+tag **RET-IA** e **ligada**. Mudança restrita a `agente_ao_vivo_v4.py`.
+
+---
+
+### [2026-06-22] - Re-avaliação de retenção no retorno pós-encerramento (sticky deixa de ser cego)
+
+**Decisão**
+No fluxo de **resgate pós-encerramento** (`process_queue_fast_sweep` / POST-CLOSE-RESCUE),
+o sticky de retenção deixa de re-mandar o aluno para a Retenção (Wesley/Danúbia) só porque
+houve algum evento de retenção nos últimos 7 dias. Agora a conversa **só é mantida em
+retenção** se uma de duas condições for verdadeira:
+- **(a)** existe handoff de retenção **ATIVO agora** (`_is_handoff_active(cid)` com
+  `motivo == 'retention'` ou `target` contendo `wesley`) — aluno no meio da conversa com a Retenção; ou
+- **(b)** a **mensagem atual** do aluno tem intenção de cancelar/trancar
+  (`is_retention_intent(user_text)`).
+
+Se nenhuma vale (ex.: retorno só com "Olá" após retenção antiga), o caso cai no **fluxo
+normal de atendimento** já existente: volta para o consultor anterior se ele estiver ativo
+(`is_attendant_active_now`), senão redistribui para um consultor ativo
+(`get_available_consultant`). A nota interna agora registra o motivo (`handoff de retencao
+ativo` ou `intencao de cancelamento na msg atual`).
+
+**Contexto**
+Caso reportado (Bruna Grazielle, lead #178521): a aluna voltou dizendo apenas "Olá" após o
+encerramento e foi transferida automaticamente para Wesley (Retenção) com a nota "manifestou
+intenção de cancelamento/trancamento". A causa: `_is_in_retention` retornava `True` por
+evidência de retenção dentro da janela de `_RETENTION_RECENT_HOURS = 168` (7 dias), e o
+sticky disparava `trigger_retention` independente do conteúdo da mensagem. A verificação de
+consultor ativo já existia para o caminho de atendimento; o furo era só a retenção não
+re-avaliar "ainda é retenção ou virou atendimento?".
+
+**Alternativas descartadas**
+- *LLM classificando todo retorno (ou só o caso ambíguo)*: mais flexível, mas adiciona
+  custo/latência num sweep de background e risco de erro num ponto crítico de roteamento.
+  O pipeline normal já classifica intenção, então a abordagem determinística entrega o
+  objetivo sem o LLM. (Opção A escolhida pelo gestor.)
+- *Reduzir `_RETENTION_RECENT_HOURS`*: trataria sintoma (encurtar janela) sem resolver a
+  causa (sticky cego). Descartado.
+- *Aplicar a mudança também no sticky de "retenção em andamento" (conversa aberta)*:
+  descartado a pedido do gestor — escopo restrito a pós-encerramento para **não** correr o
+  risco de tirar/redistribuir aluno no meio de um atendimento em andamento.
+
+**Impacto**
+Aluno que volta após encerramento sem intenção real de cancelar não é mais jogado na
+Retenção por engano; retenção genuína em andamento (handoff ativo) ou novo pedido de
+cancelamento continuam indo certo. Mudança restrita a um único call site
+(`agente_ao_vivo_v4.py`, bloco POST-CLOSE-RESCUE ~L8189). `_is_in_retention` permanece
+inalterada e segue valendo nos demais pontos (não tocados).
+
+---
+
 ### [2026-06-18] - Tabulação de disparo pela fonte da verdade (banco `disparos` / activation_*)
 
 **Decisão**
