@@ -7,6 +7,36 @@
 
 ---
 
+### [2026-06-23] - Detecção de retenção fica negation-aware + sticky consistente (caso Caio)
+
+**Decisão**
+1. **(B) Negação na detecção** — `is_retention_intent` agora ignora a keyword quando há negação
+   próxima antes dela (`não/nao/nunca/jamais`, janela ~5 palavras), via helper
+   `_kw_present_unnegated`. Ex.: "o estudante **não** tentou trancar", "**não** vou cancelar" deixam
+   de ser retenção.
+2. **(A) Sticky consistente** — os caminhos `in-hours-rescue` e `queue-sweep` deixaram de usar
+   `_is_in_retention` (que varria o histórico por palavra-chave) e passam a usar o novo helper
+   `_retention_still_active(conv_id, msg_atual)`: só re-aciona retenção se houver **handoff de
+   retenção ativo** OU a **mensagem atual** tiver intenção real de cancelar/trancar. Mesma regra já
+   aplicada no `post-close-rescue` em 22/06.
+
+**Contexto**
+Após a virada da retenção para automação, um aluno (Caio) enviou só "Sim" e foi marcado como
+retenção: o `_is_in_retention` varria o histórico e batia em "não tentou trancar a matrícula"
+(match ingênuo de substring, sem entender negação) num caminho sticky que ainda não tinha a
+re-avaliação. Gerava falso positivo e acionava RET-IA indevidamente.
+
+**Alternativas descartadas**
+- Só corrigir negação (B) sem unificar o sticky (A): manteria os caminhos divergentes e o risco de
+  outro falso positivo por palavra antiga no histórico (ex.: "Sim" após menção antiga a "trancar").
+- IA/LLM para classificar negação: custo/latência desnecessários para um caso resolvível com regra.
+
+**Impacto**
+`_is_in_retention` permanece só no guard de redistribuição (11102, sem `msgs`, checa handoff).
+Detecção de retenção mais precisa em todos os pontos; menos acionamentos indevidos da automação.
+
+---
+
 ### [2026-06-22] - Retenção deixa de ser distribuída: agente só aciona a automação "Retenção IA" (tag RET-IA)
 
 **Decisão**

@@ -6588,15 +6588,16 @@ def process_in_hours_rescue():
             except Exception:
                 _lead_chk = None
             try:
-                if _is_in_retention(cid, lead_id=_lead_chk, msgs=_conv_msgs):
-                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} em RETENCAO — NAO redistribui (mantem time de Retenção)")
-                    # Garante que negocio/lead/chat seguem com o membro de retencao
-                    # (sticky: trigger_retention reusa o alvo ja atribuido).
+                # (2026-06-23) usa _retention_still_active (handoff ativo OU intent
+                # da msg atual) em vez de _is_in_retention — evita falso positivo por
+                # palavra solta/negada no historico (caso Caio: 'não tentou trancar').
+                if _retention_still_active(cid, _last_aluno_body or ''):
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} em RETENCAO — aciona automação RET-IA (nao redistribui)")
                     try:
                         _alvo_stk = trigger_retention(cid, _lead_chk, _last_aluno_body or '[retencao em andamento]', phone=phone)
                         update_pending_escalation_status(
                             cid, 'distributed_retention',
-                            note=f'In-hours rescue: conv em retencao mantida com {_alvo_stk or "time de Retenção"} (sticky)',
+                            note=f'In-hours rescue: retencao -> automação RET-IA ({_alvo_stk or "ok"})',
                         )
                     except Exception as e_rstk:
                         p(f"  [IN-HOURS-RESCUE] erro sticky retencao: {e_rstk}")
@@ -7061,10 +7062,11 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
                     except Exception:
                         _lead_chk_qs = None
                     try:
-                        if _is_in_retention(cid, lead_id=_lead_chk_qs, msgs=msgs):
-                            p(f"  [QUEUE-SWEEP] Conv {cid[:12]} em RETENCAO — mantem time de Retenção (nao distribui)")
+                        # (2026-06-23) _retention_still_active em vez de _is_in_retention
+                        # (evita falso positivo por palavra solta/negada no historico).
+                        if _retention_still_active(cid, user_text or ''):
+                            p(f"  [QUEUE-SWEEP] Conv {cid[:12]} em RETENCAO — aciona automação RET-IA (nao distribui)")
                             try:
-                                # sticky: trigger_retention reusa o alvo ja atribuido
                                 trigger_retention(cid, _lead_chk_qs, user_text or '[retencao em andamento]', phone=phone)
                             except Exception as e_qsr:
                                 p(f"  [QUEUE-SWEEP] erro sticky retencao: {e_qsr}")
@@ -7919,6 +7921,27 @@ def _is_in_retention(cid, lead_id=None, msgs=None):
     # Tag fica "para sempre" no CRM e gerava falsos positivos. Use apenas
     # handoff_active OU evento recente no historico.
     return False
+
+
+def _retention_still_active(conv_id, current_msg=''):
+    """(2026-06-23) Decide se um caminho 'sticky' deve re-acionar retenção AGORA.
+
+    Substitui o uso solto de `_is_in_retention` (que varria o histórico por
+    palavra-chave e dava falso positivo — ex.: 'não tentou trancar' do caso Caio,
+    ou um 'Sim' depois de uma menção antiga a 'trancar'). Só considera retenção se:
+      (a) há handoff de retenção ATIVO agora, OU
+      (b) a MENSAGEM ATUAL tem intenção real de cancelar/trancar (sem negação).
+    """
+    try:
+        _mot, _tgt = _is_handoff_active(conv_id)
+        if _mot == 'retention' or (_tgt and 'wesley' in (_tgt or '').lower()):
+            return True
+    except Exception:
+        pass
+    try:
+        return is_retention_intent(current_msg or '')
+    except Exception:
+        return False
 
 
 def _had_attendant_left_after_handoff(conv_id, msgs):
@@ -11551,18 +11574,38 @@ RETENTION_URGENCY_PHRASES = [
     'procon', 'reclame aqui', 'advogado', 'processo judicial',
 ]
 
+# (2026-06-23) Palavras de negação consideradas perto do termo de retenção.
+# Evita falso positivo do tipo "o estudante NÃO tentou trancar", "ele NÃO trancou",
+# "NÃO vou cancelar" (caso Caio) — onde a keyword aparece mas a intenção é o oposto.
+_RETENTION_NEG_WORDS = ('nao', 'não', 'nunca', 'jamais')
+
+def _kw_present_unnegated(t, kw):
+    """True se `kw` ocorre em `t` SEM negação próxima antes (até ~5 palavras).
+    Se TODAS as ocorrências forem negadas, retorna False."""
+    start = 0
+    while True:
+        i = t.find(kw, start)
+        if i < 0:
+            return False
+        ctx = t[max(0, i - 35):i].replace(',', ' ').replace(';', ' ').replace('.', ' ')
+        ctx_words = ctx.split()
+        if not any(n in ctx_words[-5:] for n in _RETENTION_NEG_WORDS):
+            return True  # ocorrência sem negação por perto -> intenção válida
+        start = i + len(kw)  # ocorrência negada -> procura próxima
+
 def is_retention_intent(text):
-    """Detecta intenção REAL de cancelar/trancar. Ignora perguntas sobre o processo."""
+    """Detecta intenção REAL de cancelar/trancar. Ignora perguntas sobre o processo
+    e mensagens com negação perto do termo (ex.: 'não vou trancar')."""
     t = text.lower().strip()
     if any(u in t for u in RETENTION_URGENCY_PHRASES):
         return True
     if any(q in t for q in RETENTION_QUESTION_WORDS):
         return False
     for phrase in RETENTION_PHRASES:
-        if phrase in t:
+        if _kw_present_unnegated(t, phrase):
             return True
     for word in RETENTION_SINGLE_WORDS:
-        if word in t:
+        if _kw_present_unnegated(t, word):
             return True
     return False
 
