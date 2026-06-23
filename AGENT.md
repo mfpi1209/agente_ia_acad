@@ -7,6 +7,30 @@
 
 ---
 
+### [2026-06-23] - REVERTIDO: retenção volta a ser DISTRIBUÍDA (removida a regra automação/tag RET-IA)
+
+**Decisão**
+Revertido o `agente_ao_vivo_v4.py` para o estado anterior à regra de automação/tag (commit
+`e6ae0ca`). O agente **volta a distribuir** retenção para o time (Wesley/Danúbia, rodízio + sticky
+por disponibilidade), com nota interna, transferência de chat e mensagem ao aluno — exatamente como
+funcionava antes de 22/06.
+
+Ficam **desfeitas** (no código) as duas mudanças abaixo desta entrada:
+- "Retenção deixa de ser distribuída… (tag RET-IA)" (commit `0ad02f3`);
+- "Detecção negation-aware + sticky consistente (caso Caio)" (commit `45fd901`).
+
+**Contexto**
+Decisão do gestor: voltar ao modelo de distribuição direta de retenção. A automação "Retenção IA"
+disparada por tag não ficou confiável de validar (a API do DataCrazy não expõe execução/erros das
+automações) e optou-se por retomar o fluxo conhecido. As entradas [2026-06-22] e a de
+negation-aware/sticky abaixo ficam **apenas como registro histórico** do que foi testado.
+
+**Impacto**
+Próximo passo combinado: revisar a fila de "Não iniciados" e redistribuir corretamente (lead + chat)
+para os consultores de retenção que estiverem ativos.
+
+---
+
 ### [2026-06-23] - Detecção de retenção fica negation-aware + sticky consistente (caso Caio)
 
 **Decisão**

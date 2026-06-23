@@ -1358,10 +1358,6 @@ ESCALATION_MSG = "Entendi! Vou te conectar com um dos nossos atendentes que vai 
 
 RETENTION_TAG_ID = '6fcefbd5-3c33-4e5c-b139-7f89718f6f0c'
 RETENTION_WESLEY_CRM_ID = 'dd6cbed7-7666-45d1-bd90-368c8b97e217'
-# (2026-06-22) Tag que DISPARA a automacao 'Retenção IA' no DataCrazy (gatilho
-# 'tag adicionada'). Ao detectar retencao, o agente apenas adiciona esta tag no
-# lead + nota interna — NAO distribui, NAO transfere e NAO envia mensagem ao aluno.
-RET_IA_TAG_ID = '18a49003-449b-473f-964f-1e0d2935b8e0'
 RETENTION_PHRASES = [
     'quero cancelar', 'quero trancar', 'vou cancelar', 'vou trancar',
     'cancelar meu curso', 'cancelar minha matrícula', 'cancelar minha matricula',
@@ -6397,16 +6393,32 @@ def process_in_hours_rescue():
                     continue
 
                 # SE ALUNO MANIFESTOU CANCELAMENTO/TRANCAMENTO (retencao):
-                # (2026-06-22) NAO distribui nem responde — apenas aciona a
-                # automacao 'Retenção IA' (tag RET-IA) + nota interna.
+                # nao distribui para qualquer atendente — passa para Wesley.
+                # Caso reportado: "Mas eu cancelei minha matricula" -> foi para
+                # Marilia em vez de Wesley.
                 if _last_aluno_body and is_retention_intent(_last_aluno_body):
-                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} retencao detectada ('{_last_aluno_body[:40]}') — acionando automação RET-IA")
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} retencao detectada ('{_last_aluno_body[:40]}') — distribuindo p/ time de Retenção")
                     try:
-                        _ok = trigger_retention(cid, None, _last_aluno_body, phone=phone)
-                        update_pending_escalation_status(
-                            cid, 'distributed_retention',
-                            note=f'In-hours rescue: retencao -> automação RET-IA (msg: {_last_aluno_body[:60]})',
-                        )
+                        # (2026-06-08) trigger_retention escolhe Wesley/Danúbia por
+                        # disponibilidade e marca o handoff. So manda a msg/distribui
+                        # se houver alguem ativo; senao segura e re-tenta no proximo ciclo.
+                        _alvo = trigger_retention(cid, None, _last_aluno_body, phone=phone)
+                        if _alvo:
+                            _greet = (f", *{first}*" if first else '')
+                            _hum = (f"Oi{_greet}! Desculpa a demora 🙏 Entendi sua situação. "
+                                    f"Vou te conectar com o nosso *time de Retenção*, "
+                                    f"que vai te ajudar com isso, tá? Um momento!")
+                            send_and_track(cid, _hum)
+                            log_to_db(cid, _last_aluno_body, _hum, 1.0, 'retention')
+                            _register_signature(cid, 'retention', _hum)
+                            update_pending_escalation_status(
+                                cid, 'distributed_retention',
+                                note=f'In-hours rescue: retencao -> {_alvo} (msg: {_last_aluno_body[:60]})',
+                            )
+                            _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                            continue
+                        else:
+                            p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} retencao SEM membro ativo — segura p/ proximo ciclo")
                     except Exception as e_ret:
                         p(f"  [IN-HOURS-RESCUE] erro retencao: {e_ret}")
                     _IN_HOURS_RESCUE_RECENT[cid] = now_ts
@@ -6588,16 +6600,15 @@ def process_in_hours_rescue():
             except Exception:
                 _lead_chk = None
             try:
-                # (2026-06-23) usa _retention_still_active (handoff ativo OU intent
-                # da msg atual) em vez de _is_in_retention — evita falso positivo por
-                # palavra solta/negada no historico (caso Caio: 'não tentou trancar').
-                if _retention_still_active(cid, _last_aluno_body or ''):
-                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} em RETENCAO — aciona automação RET-IA (nao redistribui)")
+                if _is_in_retention(cid, lead_id=_lead_chk, msgs=_conv_msgs):
+                    p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} em RETENCAO — NAO redistribui (mantem time de Retenção)")
+                    # Garante que negocio/lead/chat seguem com o membro de retencao
+                    # (sticky: trigger_retention reusa o alvo ja atribuido).
                     try:
                         _alvo_stk = trigger_retention(cid, _lead_chk, _last_aluno_body or '[retencao em andamento]', phone=phone)
                         update_pending_escalation_status(
                             cid, 'distributed_retention',
-                            note=f'In-hours rescue: retencao -> automação RET-IA ({_alvo_stk or "ok"})',
+                            note=f'In-hours rescue: conv em retencao mantida com {_alvo_stk or "time de Retenção"} (sticky)',
                         )
                     except Exception as e_rstk:
                         p(f"  [IN-HOURS-RESCUE] erro sticky retencao: {e_rstk}")
@@ -7031,13 +7042,23 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
                 acted += 1
                 continue
 
-            # --- RETENCAO / CANCELAMENTO -> AUTOMAÇÃO RET-IA ---
-            # (2026-06-22) NAO distribui nem responde — apenas aciona a automacao
-            # 'Retenção IA' (tag RET-IA) + nota interna.
+            # --- RETENCAO / CANCELAMENTO -> TIME DE RETENÇÃO (Wesley/Danúbia) ---
             if is_retention_intent(user_text):
                 try:
-                    _ok_qs = trigger_retention(cid, None, user_text, phone=phone)
-                    p(f"  [QUEUE-SWEEP] retencao conv={cid[:12]} ...{phone[-4:]} '{user_text[:40]}' -> automação RET-IA ({'ok' if _ok_qs else 'falhou'})")
+                    # (2026-06-08) trigger_retention escolhe o membro ativo e marca
+                    # o handoff. So envia a msg se houver alguem ativo; senao segura.
+                    _alvo_qs = trigger_retention(cid, None, user_text, phone=phone)
+                    if _alvo_qs:
+                        p(f"  [QUEUE-SWEEP] retencao conv={cid[:12]} ...{phone[-4:]} '{user_text[:40]}' -> {_alvo_qs}")
+                        _greet = (f", *{first}*" if first else '')
+                        _hum = (f"Oi{_greet}! Desculpa a demora 🙏 Entendi sua situação. "
+                                f"Vou te conectar com o nosso *time de Retenção*, "
+                                f"que vai te ajudar com isso, tá? Um momento!")
+                        send_and_track(cid, _hum, force=True)
+                        log_to_db(cid, user_text, _hum, 1.0, 'retention')
+                        _register_signature(cid, 'retention', _hum)
+                    else:
+                        p(f"  [QUEUE-SWEEP] retencao conv={cid[:12]} SEM membro ativo — segura p/ proximo ciclo")
                 except Exception as e_ret:
                     p(f"  [QUEUE-SWEEP] erro retencao: {e_ret}")
                 if last_msg and last_msg.get('id'):
@@ -7062,11 +7083,10 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
                     except Exception:
                         _lead_chk_qs = None
                     try:
-                        # (2026-06-23) _retention_still_active em vez de _is_in_retention
-                        # (evita falso positivo por palavra solta/negada no historico).
-                        if _retention_still_active(cid, user_text or ''):
-                            p(f"  [QUEUE-SWEEP] Conv {cid[:12]} em RETENCAO — aciona automação RET-IA (nao distribui)")
+                        if _is_in_retention(cid, lead_id=_lead_chk_qs, msgs=msgs):
+                            p(f"  [QUEUE-SWEEP] Conv {cid[:12]} em RETENCAO — mantem time de Retenção (nao distribui)")
                             try:
+                                # sticky: trigger_retention reusa o alvo ja atribuido
                                 trigger_retention(cid, _lead_chk_qs, user_text or '[retencao em andamento]', phone=phone)
                             except Exception as e_qsr:
                                 p(f"  [QUEUE-SWEEP] erro sticky retencao: {e_qsr}")
@@ -7923,27 +7943,6 @@ def _is_in_retention(cid, lead_id=None, msgs=None):
     return False
 
 
-def _retention_still_active(conv_id, current_msg=''):
-    """(2026-06-23) Decide se um caminho 'sticky' deve re-acionar retenção AGORA.
-
-    Substitui o uso solto de `_is_in_retention` (que varria o histórico por
-    palavra-chave e dava falso positivo — ex.: 'não tentou trancar' do caso Caio,
-    ou um 'Sim' depois de uma menção antiga a 'trancar'). Só considera retenção se:
-      (a) há handoff de retenção ATIVO agora, OU
-      (b) a MENSAGEM ATUAL tem intenção real de cancelar/trancar (sem negação).
-    """
-    try:
-        _mot, _tgt = _is_handoff_active(conv_id)
-        if _mot == 'retention' or (_tgt and 'wesley' in (_tgt or '').lower()):
-            return True
-    except Exception:
-        pass
-    try:
-        return is_retention_intent(current_msg or '')
-    except Exception:
-        return False
-
-
 def _had_attendant_left_after_handoff(conv_id, msgs):
     """Detecta se o atendente que estava no handoff_active dessa conv SAIU
     (finalizou/foi removido) depois do handoff_active ser registrado.
@@ -8187,37 +8186,44 @@ def process_post_close_rescue():
             last_attendant_first = _extract_last_attendant_from_history(msgs)
             consultant_used = None
 
-            # (2026-06-22) RE-AVALIACAO NO RETORNO (opcao A, escopo: pos-encerramento).
-            # Antes: qualquer evidencia de retencao nos ultimos 7 dias (_is_in_retention)
-            # re-mandava o aluno pra Wesley, mesmo voltando so com "Ola" (caso Bruna).
-            # Agora so MANTEM em retencao se: (a) ha handoff de retencao ATIVO agora
-            # (aluno no meio da conversa com Wesley/Danubia) OU (b) a mensagem ATUAL
-            # traz intencao de cancelar/trancar. Senao, trata como ATENDIMENTO normal
-            # e cai no fluxo de consultor (volta pro anterior se ativo, senao redistribui).
+            # (2026-05-28) PROTECAO RETENCAO: se conv passou por /retencao
+            # (consultor mandou pra Wesley), NUNCA devolver para consultor
+            # original. Caso reportado: Beatriz -> /retencao Wesley -> aluna
+            # voltava para Beatriz. Forca sticky em Wesley.
             try:
                 _lead_for_ret, _, _ = _ensure_lead_for_rescue(phone, name)
             except Exception:
                 _lead_for_ret = None
-            _ret_handoff_active = False
-            try:
-                _mot_pc, _tgt_pc = _is_handoff_active(cid)
-                if _mot_pc == 'retention' or (_tgt_pc and 'wesley' in (_tgt_pc or '').lower()):
-                    _ret_handoff_active = True
-            except Exception:
-                pass
-            try:
-                _ret_intent_now = is_retention_intent(user_text or '')
-            except Exception:
-                _ret_intent_now = False
-            if _ret_handoff_active or _ret_intent_now:
-                # (2026-06-22) retencao = aciona automacao RET-IA (tag + nota),
-                # NAO distribui e NAO envia mensagem ao aluno (a automacao assume).
-                _ret_motivo = 'handoff de retencao ativo' if _ret_handoff_active else 'intencao de cancelamento na msg atual'
-                p(f"  [POST-CLOSE-RESCUE] Conv {cid[:12]} em RETENCAO ({_ret_motivo}) — acionando automação RET-IA")
+            if _is_in_retention(cid, lead_id=_lead_for_ret, msgs=msgs):
+                # (2026-06-08) sticky: mantem com o membro de retencao ja atribuido
+                # (Wesley OU Danúbia); choose_retention_target resolve via handoff.
+                _alvo_pc = choose_retention_target(cid)
+                p(f"  [POST-CLOSE-RESCUE] Conv {cid[:12]} em RETENCAO — sticky {_alvo_pc or 'time de Retenção'}")
+                msg = (
+                    f"Oii{first_part}! Vi que voltou para falar com a gente 😊\n\n"
+                    f"Vou pedir para o nosso *time de Retenção*, que cuida do seu caso, "
+                    f"dar continuidade ao seu atendimento. Em pouquinho alguém assume aqui."
+                )
+                try:
+                    meta_typing_on()
+                    send_and_track(cid, msg)
+                except Exception:
+                    pass
                 try:
                     trigger_retention(cid, _lead_for_ret, user_text, phone=phone)
                 except Exception as e_rt:
-                    p(f"  [POST-CLOSE-RESCUE] erro retention: {e_rt}")
+                    p(f"  [POST-CLOSE-RESCUE] erro retention sticky: {e_rt}")
+                try:
+                    note = (
+                        f"🔴 *Sticky retencao* — aluno voltou apos encerramento. "
+                        f"Conv ja estava em retencao. Mantido com {_alvo_pc or 'time de Retenção'}."
+                    )
+                    requests.post(
+                        f'{DCZ_API}/api/v1/conversations/{cid}/messages',
+                        headers=H, json={'body': note, 'isInternal': True}, timeout=10,
+                    )
+                except Exception:
+                    pass
                 _POST_CLOSE_RESCUE_RECENT[cid] = now_ts
                 rescued += 1
                 continue
@@ -11461,23 +11467,27 @@ def choose_retention_target(conv_id):
 
 
 def trigger_retention(conv_id, lead_id, question, phone=None, target_name=None):
-    """(2026-06-22) NOVO MODELO — retenção NÃO é mais distribuída pelo agente.
+    """Aciona Retenção: tag + responsável (Wesley OU Danúbia) no lead + business
+    -> ATENDIMENTO + nota interna + transfere o chat. STICKY e por disponibilidade.
 
-    Ao detectar retenção, o agente apenas:
-      1) adiciona a tag RET-IA no lead -> DISPARA a automação 'Retenção IA' (DCZ);
-      2) registra a nota interna (para o consultor entender o que o aluno disse);
-      3) silencia o bot nessa conversa (a automação assume o atendimento).
+    target_name: se informado, usa esse membro do time; senão escolhe via
+    choose_retention_target (sticky + menor fila entre ativos).
 
-    NÃO atribui consultor, NÃO move etapa do negócio, NÃO transfere o chat,
-    NÃO envia mensagem ao aluno e NÃO registra no feedback.
+    Retorna o nome do atendente atribuído (str) ou None se ninguém do time
+    estiver ativo (caller deve segurar e re-tentar).
 
-    Idempotente: se o lead já tem a tag RET-IA, não re-aplica nem re-posta a nota.
-    Retorna 'RET-IA' em sucesso; None se não conseguiu resolver/criar o lead.
-
-    target_name: ignorado (mantido só por compatibilidade dos call sites).
+    (2026-05-27) Se lead_id=None, tenta resolver via telefone (identify_student)
+    e, se ainda assim falhar, cria lead+business novos.
     """
+    # (0) Decide o alvo
+    alvo = target_name or choose_retention_target(conv_id)
+    if not alvo:
+        p(f"  [RETENÇÃO] Nenhum membro do time ativo agora — segurando (sem forçar)")
+        return None
+    crm_id = _lookup_attendant_id(alvo, CRM_ATTENDANT_MAP) or RETENTION_WESLEY_CRM_ID
+    p(f"  [RETENÇÃO] Alvo escolhido: {alvo} (crm_id={crm_id[:8]}...)")
     try:
-        # (1) Resolve lead_id se nao veio (a tag precisa de um lead). Cria se faltar.
+        # (1) Resolve lead_id se nao veio
         if not lead_id:
             ph = (phone or _current_phone or '').replace('+','').replace(' ','').replace('-','')
             if ph:
@@ -11497,68 +11507,111 @@ def trigger_retention(conv_id, lead_id, question, phone=None, target_name=None):
                 except Exception as e_cr:
                     p(f"  [RETENÇÃO] create_lead_and_business erro: {e_cr}")
 
-        if not lead_id:
-            p(f"  [RETENÇÃO] Sem lead_id e nao conseguiu criar — automação RET-IA NAO acionada")
-            return None
-
-        # (2) Le tags atuais. Se ja tem RET-IA, eh idempotente (automacao ja acionada).
-        existing_tags = []
-        already = False
-        try:
+        if lead_id:
             r_lead = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
+            existing_tags = []
             if r_lead.status_code == 200:
-                for t in (r_lead.json().get('tags') or []):
+                lead_data = r_lead.json()
+                for t in (lead_data.get('tags') or []):
                     tid = t.get('id', '')
                     if tid:
                         existing_tags.append({'id': tid})
-                        if tid == RET_IA_TAG_ID:
-                            already = True
-        except Exception as e_gt:
-            p(f"  [RETENÇÃO] erro lendo tags do lead: {e_gt}")
 
-        if already:
-            p(f"  [RETENÇÃO] lead {lead_id} ja tem tag RET-IA — idempotente (sem re-nota)")
+            tag_already = any(t.get('id') == RETENTION_TAG_ID for t in existing_tags)
+            if not tag_already:
+                existing_tags.append({'id': RETENTION_TAG_ID})
+
+            r = requests.patch(
+                f'{DCZ_CRM}/leads/{lead_id}', headers=H,
+                json={'tags': existing_tags, 'attendant': {'id': crm_id}},
+                timeout=10
+            )
+            p(f"  [RETENÇÃO] Lead: tag + attendant {alvo} (status={r.status_code})")
+
+            try:
+                # Busca business: primeiro sub-recurso /leads/{id}/businesses (mais confiavel)
+                biz_id = None
+                try:
+                    rb_sub = requests.get(f'{DCZ_CRM}/leads/{lead_id}/businesses',
+                                          headers=H, timeout=10)
+                    if rb_sub.status_code == 200:
+                        bd = rb_sub.json()
+                        bl = bd.get('data', bd) if isinstance(bd, dict) else bd
+                        if isinstance(bl, list) and bl:
+                            biz_id = (bl[0] or {}).get('id')
+                except Exception:
+                    pass
+                # Fallback: search por telefone
+                if not biz_id:
+                    ph_search = (phone or _current_phone or PHONE_TO_MONITOR)
+                    r_biz = requests.get(
+                        f'{DCZ_CRM}/businesses', headers=H,
+                        params={'search': ph_search, 'limit': 5}, timeout=10
+                    )
+                    if r_biz.status_code == 200:
+                        biz_data = r_biz.json()
+                        biz_list = biz_data.get('data', biz_data) if isinstance(biz_data, dict) else biz_data
+                        for biz in (biz_list if isinstance(biz_list, list) else []):
+                            biz_lead = biz.get('lead', {})
+                            biz_lead_id = biz_lead.get('id', '') if isinstance(biz_lead, dict) else str(biz_lead)
+                            if biz_lead_id == lead_id:
+                                biz_id = biz.get('id')
+                                break
+                if biz_id:
+                    rb = requests.patch(
+                        f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+                        json={'attendantId': crm_id}, timeout=10
+                    )
+                    p(f"  [RETENÇÃO] Negócio attendant -> {alvo} (status={rb.status_code})")
+                    rb2 = requests.patch(
+                        f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+                        json={'stageId': STAGE_ATENDIMENTO_ID}, timeout=10
+                    )
+                    p(f"  [RETENÇÃO] Negócio -> Atendimento (status={rb2.status_code})")
+                else:
+                    p(f"  [RETENÇÃO] Nenhum negocio encontrado para lead={lead_id}")
+            except Exception as e2:
+                p(f"  [RETENÇÃO] Erro ao atualizar negócio: {e2}")
         else:
-            existing_tags.append({'id': RET_IA_TAG_ID})
-            try:
-                r = requests.patch(
-                    f'{DCZ_CRM}/leads/{lead_id}', headers=H,
-                    json={'tags': existing_tags}, timeout=10
-                )
-                p(f"  [RETENÇÃO] tag RET-IA adicionada no lead (status={r.status_code}) -> aciona automação 'Retenção IA'")
-            except Exception as e_pt:
-                p(f"  [RETENÇÃO] erro ao adicionar tag RET-IA: {e_pt}")
+            p(f"  [RETENÇÃO] Sem lead_id e nao conseguiu criar — transferindo chat mesmo assim")
 
-            # (3) Nota interna (somente na primeira vez, p/ o consultor entender o caso)
-            try:
-                note = (
-                    f"🔴 *Retenção - Agente IA*\n"
-                    f"O aluno manifestou intenção de cancelamento/trancamento.\n"
-                    f"Mensagem: \"{(question or '')[:120]}\"\n"
-                    f"Acionada a automação de Retenção (tag RET-IA). O agente NÃO distribuiu nem respondeu."
-                )
-                requests.post(
-                    f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
-                    headers=H, json={'body': note, 'isInternal': True}, timeout=10
-                )
-                p(f"  [RETENÇÃO] Nota interna enviada na conversa")
-            except Exception as e_nt:
-                p(f"  [RETENÇÃO] erro ao enviar nota interna: {e_nt}")
+        note = (
+            f"🔴 *Retenção - Agente IA*\n"
+            f"O aluno manifestou intenção de cancelamento/trancamento.\n"
+            f"Mensagem: \"{question[:120]}\"\n"
+            f"Transferido automaticamente para {alvo} (Retenção)."
+        )
+        requests.post(
+            f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+            headers=H, json={'body': note, 'isInternal': True}, timeout=10
+        )
+        p(f"  [RETENÇÃO] Nota interna enviada na conversa")
 
-        # (4) Silencia o bot nessa conversa — a automacao 'Retenção IA' assume.
+        _dcz_transfer_chat(conv_id, alvo)
+        p(f"  [RETENÇÃO] Chat transferido para {alvo}")
+
+        # Marca handoff STICKY com o alvo real (evita bouncing entre membros).
         try:
-            _mark_handoff_active(conv_id, 'retention', target='',
-                                 ttl_s=8 * 3600, body='Automação RET-IA acionada')
+            _mark_handoff_active(conv_id, 'retention', target=alvo,
+                                 ttl_s=8 * 3600, body=note)
         except Exception:
             pass
-        st = _conv_states.setdefault(conv_id, _default_conv_state())
-        st['_human_took_over'] = True
-        st['waiting_for_client'] = False
-        st['inactivity_start'] = 0
-        st['followup_stage'] = 0
-        st['_last_responded_ts'] = time.time()
 
-        return 'RET-IA'
+        _conv_states.setdefault(conv_id, _default_conv_state())['_human_took_over'] = True
+        _conv_states[conv_id]['waiting_for_client'] = False
+        _conv_states[conv_id]['inactivity_start'] = 0
+        _conv_states[conv_id]['followup_stage'] = 0
+        _conv_states[conv_id]['_last_responded_ts'] = time.time()
+
+        # (2026-06-17) Registra/atualiza no feedback como tema='RETENÇÃO'
+        # (controle do que vai para a Retenção). Substitui linha DISPARO da
+        # mesma conversa, se houver. A coluna RESPOSTA e preenchida depois.
+        try:
+            _log_retention_interaction(conv_id, phone or _current_phone, None, question, alvo)
+        except Exception:
+            pass
+
+        return alvo
 
     except Exception as e:
         p(f"  [RETENÇÃO] Erro: {e}")
@@ -11574,38 +11627,18 @@ RETENTION_URGENCY_PHRASES = [
     'procon', 'reclame aqui', 'advogado', 'processo judicial',
 ]
 
-# (2026-06-23) Palavras de negação consideradas perto do termo de retenção.
-# Evita falso positivo do tipo "o estudante NÃO tentou trancar", "ele NÃO trancou",
-# "NÃO vou cancelar" (caso Caio) — onde a keyword aparece mas a intenção é o oposto.
-_RETENTION_NEG_WORDS = ('nao', 'não', 'nunca', 'jamais')
-
-def _kw_present_unnegated(t, kw):
-    """True se `kw` ocorre em `t` SEM negação próxima antes (até ~5 palavras).
-    Se TODAS as ocorrências forem negadas, retorna False."""
-    start = 0
-    while True:
-        i = t.find(kw, start)
-        if i < 0:
-            return False
-        ctx = t[max(0, i - 35):i].replace(',', ' ').replace(';', ' ').replace('.', ' ')
-        ctx_words = ctx.split()
-        if not any(n in ctx_words[-5:] for n in _RETENTION_NEG_WORDS):
-            return True  # ocorrência sem negação por perto -> intenção válida
-        start = i + len(kw)  # ocorrência negada -> procura próxima
-
 def is_retention_intent(text):
-    """Detecta intenção REAL de cancelar/trancar. Ignora perguntas sobre o processo
-    e mensagens com negação perto do termo (ex.: 'não vou trancar')."""
+    """Detecta intenção REAL de cancelar/trancar. Ignora perguntas sobre o processo."""
     t = text.lower().strip()
     if any(u in t for u in RETENTION_URGENCY_PHRASES):
         return True
     if any(q in t for q in RETENTION_QUESTION_WORDS):
         return False
     for phrase in RETENTION_PHRASES:
-        if _kw_present_unnegated(t, phrase):
+        if phrase in t:
             return True
     for word in RETENTION_SINGLE_WORDS:
-        if _kw_present_unnegated(t, word):
+        if word in t:
             return True
     return False
 
@@ -13497,29 +13530,92 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         return
 
     # === RETENÇÃO (cancelamento / trancamento) — ANTES de is_first ===
-    # (2026-06-22) NOVO MODELO: ao detectar retenção, o agente NÃO distribui e
-    # NÃO responde ao aluno — apenas aciona a automação 'Retenção IA' (via tag
-    # RET-IA no lead) + nota interna. Vale dentro E fora do horário (a automação
-    # assume a conversa). Regras de detecção (is_retention_intent) inalteradas.
     if is_retention_intent(question):
         p(f"  [RETENÇÃO] Intenção detectada: \"{question[:80]}\"")
-        if _signature_recently_sent(conv_id, 'retention', window_s=24 * 3600):
-            p(f"  [RETENÇÃO] dedup: automação RET-IA já acionada nas últimas 24h - não re-aciona")
-        else:
-            lead_id = student_profile.get('lead_id') if student_profile else None
-            _ok_ret = trigger_retention(conv_id, lead_id, question, phone=_current_phone)
-            if _ok_ret:
-                _register_signature(conv_id, 'retention', 'RET-IA')
-                p(f"  [RETENÇÃO] Automação RET-IA acionada (tag + nota) — sem distribuição e sem mensagem ao aluno")
+
+        # Fora do horário: NÃO orientar passos de cancelamento, apenas avisar do Wesley
+        if not is_within_business_hours():
+            retorno = next_human_available_label()
+            name_prefix = _student_first_name_prefix(conv_id)
+            msg_after = RETENTION_AFTER_HOURS_MSG.format(name=name_prefix, retorno_label=retorno)
+            # DEDUP: nao reenvia mesma mensagem de retencao-fora-do-horario na conv (24h)
+            if _signature_recently_sent(conv_id, 'retention_after_hours', window_s=24 * 3600):
+                p(f"  [RETENÇÃO] dedup: ja enviado retention_after_hours nas ultimas 24h - suprimindo reenvio")
             else:
-                p(f"  [RETENÇÃO] Falha ao acionar automação RET-IA (lead não resolvido)")
+                meta_typing_on()
+                send_and_track(conv_id, msg_after)
+                conversation_messages.append({'role': 'bot', 'text': msg_after})
+                log_to_db(conv_id, question, msg_after, 1.0, 'retention_after_hours')
+                _register_signature(conv_id, 'retention_after_hours', msg_after)
+                # (2026-06-08) target='' (pendente): quando o expediente abrir, o
+                # in_hours_rescue re-detecta e distribui via trigger_retention para
+                # o membro ativo (Wesley OU Danúbia).
+                _mark_handoff_active(conv_id, 'retention_after_hours', target='',
+                                     ttl_s=14 * 3600, body=msg_after)
+                try:
+                    requests.post(
+                        f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                        headers=H,
+                        json={'body': f'🤝 *Retenção fora do horário* — IA orientou aluno; time de Retenção deve retomar {retorno}.',
+                              'isInternal': True},
+                        timeout=10,
+                    )
+                except Exception:
+                    pass
+            try:
+                summary = generate_conversation_summary(conversation_messages)
+                save_memory(cur_phone, student_profile, 'retencao_after_hours', summary, sentiment)
+            except Exception as e_ret:
+                p(f"  [RETENÇÃO] Erro na memória (after_hours): {e_ret}")
+            record_pending_escalation(conv_id, 'retention_after_hours', tier='insist',
+                                    retorno_label=retorno, question=question)
+            p(f"  [RETENÇÃO] [MODE] after_hours — sem trigger_retention, retorno {retorno} (time de Retenção)")
+            waiting_for_client = True; inactivity_start = time.time()
+            return
+
+        if _signature_recently_sent(conv_id, 'retention', window_s=24 * 3600):
+            p(f"  [RETENÇÃO] dedup: retention ja enviada nas ultimas 24h - suprimindo reenvio")
+        else:
+            # (2026-06-08) trigger_retention escolhe Wesley/Danúbia por disponibilidade
+            # e marca o handoff. Só envia mensagens se houver alguem ativo.
+            lead_id = student_profile.get('lead_id') if student_profile else None
+            _alvo_ret = trigger_retention(conv_id, lead_id, question, phone=_current_phone)
+            if _alvo_ret:
+                meta_typing_on()
+                send_and_track(conv_id, RETENTION_MSG)
+                conversation_messages.append({'role': 'bot', 'text': RETENTION_MSG})
+                log_to_db(conv_id, question, RETENTION_MSG, 1.0, 'retention')
+                _register_signature(conv_id, 'retention', RETENTION_MSG)
+
+                # Apresentação do consultor de retenção (Wesley OU Danúbia)
+                _fname = (student_profile.get('first_name') or '').strip() if student_profile else ''
+                _ret_first = _alvo_ret.split()[0]
+                _ret_intro = (f"Olá{', *' + _fname + '*' if _fname else ''}! "
+                              f"Sou {_ret_first} e irei seguir com o seu atendimento 😊")
+                time.sleep(1)
+                send_and_track(conv_id, _ret_intro)
+                _register_signature(conv_id, 'retention_intro', _ret_intro)
+                p(f"  [RETENÇÃO] Apresentação de {_ret_first} enviada pelo agente")
+            else:
+                # Ninguém do time ativo agora: segura com msg neutra; in_hours_rescue
+                # / queue_sweep re-tentam quando alguém ficar ativo.
+                meta_typing_on()
+                send_and_track(conv_id, RETENTION_MSG)
+                conversation_messages.append({'role': 'bot', 'text': RETENTION_MSG})
+                log_to_db(conv_id, question, RETENTION_MSG, 1.0, 'retention')
+                _register_signature(conv_id, 'retention', RETENTION_MSG)
+                _mark_handoff_active(conv_id, 'retention', target='', ttl_s=8 * 3600, body=RETENTION_MSG)
+                record_pending_escalation(conv_id, 'retention', tier='insist',
+                                          retorno_label=next_human_available_label(), question=question)
+                p(f"  [RETENÇÃO] Nenhum membro ativo — segurando p/ re-tentativa nos ciclos")
+
         try:
             summary = generate_conversation_summary(conversation_messages)
             save_memory(cur_phone, student_profile, 'retencao', summary, sentiment)
         except Exception as e_ret:
             p(f"  [RETENÇÃO] Erro na memória: {e_ret}")
         waiting_for_client = False; inactivity_start = 0
-        p(f"  [RETENÇÃO] Conversa entregue à automação RET-IA - follow-ups desativados")
+        p(f"  [RETENÇÃO] Conversa encaminhada para time de Retenção - follow-ups desativados")
         return
 
     # === A1 / PROVA REGIMENTAL ===
@@ -14219,12 +14315,20 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                     pass
                 waiting_for_client = False; inactivity_start = 0
                 return
-            # 4) Retencao (cancelamento) -> automação RET-IA
-            # (2026-06-22) NAO distribui nem responde — apenas aciona a automacao.
+            # 4) Retencao (cancelamento) -> time de Retenção (Wesley/Danúbia)
             if is_retention_intent(question):
-                p(f"  [LOW-CONF-D4] cancelado: msg eh retencao -> automação RET-IA")
+                p(f"  [LOW-CONF-D4] cancelado: msg eh retencao -> time de Retenção")
+                _fname = (student_profile.get('first_name') or '').strip() if student_profile else ''
+                _greet = (f", *{_fname}*" if _fname else '')
+                _msg_ret = (f"Entendi sua situação{_greet}. Vou te encaminhar para o nosso "
+                            f"*time de Retenção*, que vai te ajudar com isso. Um momento, por favor! 😊")
+                send_and_track(conv_id, _msg_ret, force=True)
+                conversation_messages.append({'role': 'bot', 'text': _msg_ret})
+                log_to_db(conv_id, question, _msg_ret, 1.0, 'retention')
+                _register_signature(conv_id, 'retention', _msg_ret)
                 try:
                     lead_id_loc = student_profile.get('lead_id') if student_profile else None
+                    # trigger_retention escolhe o membro ativo e marca o handoff (sticky)
                     trigger_retention(conv_id, lead_id_loc, question, phone=_current_phone)
                 except Exception as e_lc_ret:
                     p(f"  [LOW-CONF-D4] erro trigger_retention: {e_lc_ret}")
