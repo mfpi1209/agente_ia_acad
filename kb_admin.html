@@ -37,6 +37,7 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
 .fade{animation:fadeIn .25s ease-out;} @keyframes fadeIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
 .ld{display:inline-block;width:16px;height:16px;border:2.5px solid #e5e7eb;border-top-color:var(--p);border-radius:50%;animation:spin .5s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
+@keyframes calBadgePulse{0%,100%{transform:scale(1);box-shadow:0 0 0 2px var(--card,#fff),0 0 0 0 rgba(239,68,68,.5);}50%{transform:scale(1.12);box-shadow:0 0 0 2px var(--card,#fff),0 0 0 5px rgba(239,68,68,0);}}
 .sbar{height:8px;border-radius:99px;background:#f3f4f6;overflow:hidden;}
 .sfill{height:100%;border-radius:99px;transition:width .4s ease;}
 .trunc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
@@ -276,7 +277,7 @@ body.dark-mode .wa-bubble.wa-bot .wa-meta{color:#6b7085;}
   <div class="tab" data-tab="afterhours" onclick="sw('afterhours')"><i class="fas fa-moon mr-1.5"></i>Fora do Horário</div>
   <div class="tab" data-tab="caa" onclick="sw('caa')"><i class="fas fa-folder-open mr-1.5"></i>Solicitações CAA</div>
   <div class="tab" data-tab="disparador" onclick="sw('disparador')"><i class="fas fa-paper-plane mr-1.5"></i>Disparador</div>
-  <div class="tab" data-tab="calendar" onclick="sw('calendar')"><i class="fas fa-calendar-days mr-1.5"></i>Calendário 2026</div>
+  <div class="tab" data-tab="calendar" onclick="sw('calendar')" style="position:relative;"><i class="fas fa-calendar-days mr-1.5"></i>Calendário 2026<span id="cal-tab-badge" class="hidden" style="position:absolute;top:-4px;right:-4px;min-width:16px;height:16px;padding:0 4px;border-radius:9999px;background:#ef4444;color:#fff;font-size:10px;font-weight:700;line-height:16px;text-align:center;box-shadow:0 0 0 2px var(--card,#fff);animation:calBadgePulse 1.6s infinite;"></span></div>
   <div class="tab" data-tab="team" onclick="sw('team')"><i class="fas fa-users-gear mr-1.5"></i>Equipe</div>
   <div class="tab" data-tab="menus" onclick="sw('menus')"><i class="fas fa-bars-staggered mr-1.5"></i>Menus</div>
   <div class="tab" data-tab="agentcfg" onclick="sw('agentcfg')"><i class="fas fa-sliders mr-1.5"></i>Config Agente</div>
@@ -2855,6 +2856,7 @@ async function loadCalendarSummary(){
       const df=r.data_fim?(' até '+fmtDate(r.data_fim)):'';
       return `<div class="border-l-2 border-indigo-200 pl-2"><div class="font-semibold text-indigo-700">${di}${df}</div><div class="text-gray-600 truncate">${escapeHtml(r.titulo)}</div></div>`;
     }).join('') || '<div class="text-xs text-gray-400">Sem eventos futuros.</div>';
+    checkCalendarAlerts();
   }catch(e){console.error('loadCalendarSummary',e);}
 }
 
@@ -3408,7 +3410,37 @@ function updateDisplayHint() {
 document.addEventListener('DOMContentLoaded', () => {
   const sel = document.getElementById('alert-display-mode');
   if (sel) sel.addEventListener('change', updateDisplayHint);
+  // Aviso na aba Calendário quando há evento a <=2 dias (nao perder disparos)
+  checkCalendarAlerts();
+  setInterval(checkCalendarAlerts, 30*60*1000);
 });
+
+// Janela (em dias) para alertar sobre um proximo evento na aba Calendário.
+const CAL_ALERT_DAYS = 2;
+function _calDaysUntil(iso){
+  if(!iso) return null;
+  const p=String(iso).split('T')[0].split('-');
+  if(p.length!==3) return null;
+  const target=new Date(+p[0], +p[1]-1, +p[2], 12,0,0);
+  const n=new Date(); const today=new Date(n.getFullYear(),n.getMonth(),n.getDate(),12,0,0);
+  return Math.round((target-today)/86400000);
+}
+async function checkCalendarAlerts(){
+  const badge=document.getElementById('cal-tab-badge');
+  if(!badge) return;
+  try{
+    const d=await(await fetch(A+'/api/calendar/summary')).json();
+    const soon=(d.proximos||[]).filter(r=>{const dd=_calDaysUntil(r.data_inicio);return dd!==null&&dd>=0&&dd<=CAL_ALERT_DAYS;});
+    if(soon.length){
+      badge.textContent=soon.length;
+      const lines=soon.map(r=>{const dd=_calDaysUntil(r.data_inicio);const q=dd===0?'hoje':(dd===1?'amanhã':'em '+dd+' dias');return '• '+(r.titulo||'evento')+' ('+q+')';}).join('\n');
+      badge.title='Eventos próximos (≤'+CAL_ALERT_DAYS+' dias):\n'+lines;
+      badge.classList.remove('hidden');
+    }else{
+      badge.classList.add('hidden');
+    }
+  }catch(e){console.error('checkCalendarAlerts',e);}
+}
 
 async function saveAlert() {
   const editId = document.getElementById('alert-edit-id').value;
