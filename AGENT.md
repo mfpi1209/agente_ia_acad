@@ -7,6 +7,30 @@
 
 ---
 
+### [2026-06-25] - Rollout GLOBAL: retenção passa a acionar a automação "Retenção IA" (tag RET-IA) para todos
+
+**Decisão**
+Após o teste pelo telefone validar o fluxo, removida a trava por telefone: agora **TODA** retenção
+detectada apenas **aciona a automação RET-IA** (tag no lead → n8n) e **silencia o bot** — não
+distribui (Wesley/Danúbia), não transfere chat, não fala com o aluno. Controlado pela flag
+`RET_IA_ALL = True` (em `agente_ao_vivo_v4.py`). A função foi renomeada de `_is_ret_ia_test_phone`
+para `_use_ret_ia_automation`.
+
+Todos os pontos de retenção ficaram silenciosos: fluxo principal, in-hours-rescue, queue-sweep
+(short-circuit → `_trigger_retention_tag_only`), sticky in-hours/queue-sweep (já eram silenciosos),
+e post-close-rescue / low-conf-D4 (mensagem ao aluno suprimida quando automação ativa).
+
+**Contexto**
+O gestor corrigiu o erro de flow no n8n que motivou a reversão de 23/06 e validou o disparo pelo
+próprio telefone. Agora a retenção é conduzida pela automação, não pela distribuição.
+
+**Impacto / como reverter**
+`RET_IA_ALL = False` volta ao modelo de distribuição (e, se quiser, manter só telefones de teste
+em `RET_IA_TEST_PHONES`). A tag RET-IA é idempotente; a automação no DataCrazy consome/remove a tag
+após rodar. Cada acionamento silencia a conversa por ~8h (handoff de retenção).
+
+---
+
 ### [2026-06-25] - TESTE pontual: fluxo RET-IA (tag/automação) só para telefone de teste
 
 **Decisão**

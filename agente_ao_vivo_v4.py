@@ -1359,16 +1359,23 @@ ESCALATION_MSG = "Entendi! Vou te conectar com um dos nossos atendentes que vai 
 RETENTION_TAG_ID = '6fcefbd5-3c33-4e5c-b139-7f89718f6f0c'
 RETENTION_WESLEY_CRM_ID = 'dd6cbed7-7666-45d1-bd90-368c8b97e217'
 
-# (2026-06-25) TESTE pontual do fluxo da automação "Retenção IA" (tag RET-IA + n8n).
-# SOMENTE os telefones abaixo, em vez de distribuir, acionam a automação via tag e
-# silenciam o bot. Todos os demais alunos seguem a DISTRIBUIÇÃO normal (Wesley/Danúbia).
-# Esvaziar este set desliga o teste e volta 100% à distribuição.
+# (2026-06-25) Modelo de retenção via automação "Retenção IA" (tag RET-IA + n8n).
+#  RET_IA_ALL=True  -> TODOS os alunos: retenção apenas ACIONA a automação (tag) e o
+#                      bot SILENCIA (NÃO distribui, NÃO transfere, NÃO fala com o aluno).
+#  RET_IA_ALL=False -> só os telefones em RET_IA_TEST_PHONES usam a automação; o
+#                      restante segue a DISTRIBUIÇÃO normal (Wesley/Danúbia).
+# Para reverter ao modelo de distribuição: defina RET_IA_ALL = False (e, se quiser,
+# limpe RET_IA_TEST_PHONES).
 RET_IA_TAG_ID = '18a49003-449b-473f-964f-1e0d2935b8e0'
+RET_IA_ALL = True
 RET_IA_TEST_PHONES = {'5511970617878', '11970617878'}
 
 
-def _is_ret_ia_test_phone(phone):
-    """True se o telefone está na lista de teste do fluxo RET-IA (compara últimos 11 dígitos)."""
+def _use_ret_ia_automation(phone):
+    """True se a retenção deste telefone deve ACIONAR a automação RET-IA (em vez de
+    distribuir). Com RET_IA_ALL=True vale para todos; senão só p/ RET_IA_TEST_PHONES."""
+    if RET_IA_ALL:
+        return True
     pn = ''.join(ch for ch in str(phone or '') if ch.isdigit())
     if not pn:
         return False
@@ -6413,9 +6420,9 @@ def process_in_hours_rescue():
                 # Marilia em vez de Wesley.
                 if _last_aluno_body and is_retention_intent(_last_aluno_body):
                     # (2026-06-25) TESTE: telefone de teste -> só tag RET-IA, silencio
-                    if _is_ret_ia_test_phone(phone):
+                    if _use_ret_ia_automation(phone):
                         _trigger_retention_tag_only(cid, None, _last_aluno_body, phone=phone)
-                        p(f"  [IN-HOURS-RESCUE] [TESTE RET-IA] tag acionada, sem distribuir/mensagem")
+                        p(f"  [IN-HOURS-RESCUE] [RET-IA] tag acionada, sem distribuir/mensagem")
                         _IN_HOURS_RESCUE_RECENT[cid] = now_ts
                         continue
                     p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} retencao detectada ('{_last_aluno_body[:40]}') — distribuindo p/ time de Retenção")
@@ -7066,9 +7073,9 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
             # --- RETENCAO / CANCELAMENTO -> TIME DE RETENÇÃO (Wesley/Danúbia) ---
             if is_retention_intent(user_text):
                 # (2026-06-25) TESTE: telefone de teste -> só tag RET-IA, silencio
-                if _is_ret_ia_test_phone(phone):
+                if _use_ret_ia_automation(phone):
                     _trigger_retention_tag_only(cid, None, user_text, phone=phone)
-                    p(f"  [QUEUE-SWEEP] [TESTE RET-IA] tag acionada, sem distribuir/mensagem")
+                    p(f"  [QUEUE-SWEEP] [RET-IA] tag acionada, sem distribuir/mensagem")
                     if last_msg and last_msg.get('id'):
                         processed_msg_ids.add(last_msg['id'])
                     _QUEUE_SWEEP_RECENT[cid] = now_ts
@@ -8234,11 +8241,13 @@ def process_post_close_rescue():
                     f"Vou pedir para o nosso *time de Retenção*, que cuida do seu caso, "
                     f"dar continuidade ao seu atendimento. Em pouquinho alguém assume aqui."
                 )
-                try:
-                    meta_typing_on()
-                    send_and_track(cid, msg)
-                except Exception:
-                    pass
+                # (2026-06-25) modo automação RET-IA: não fala com o aluno (silêncio)
+                if not _use_ret_ia_automation(phone):
+                    try:
+                        meta_typing_on()
+                        send_and_track(cid, msg)
+                    except Exception:
+                        pass
                 try:
                     trigger_retention(cid, _lead_for_ret, user_text, phone=phone)
                 except Exception as e_rt:
@@ -11559,7 +11568,7 @@ def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
 
             try:
                 note = (
-                    f"🔴 *Retenção - Agente IA (TESTE RET-IA)*\n"
+                    f"🔴 *Retenção - Agente IA*\n"
                     f"O aluno manifestou intenção de cancelamento/trancamento.\n"
                     f"Mensagem: \"{(question or '')[:120]}\"\n"
                     f"Acionada a automação de Retenção (tag RET-IA). O agente NÃO distribuiu nem respondeu."
@@ -11606,7 +11615,7 @@ def trigger_retention(conv_id, lead_id, question, phone=None, target_name=None):
     """
     # (2026-06-25) TESTE: só para o(s) telefone(s) de teste, aciona a automação
     # RET-IA (tag) em vez de distribuir. Demais alunos seguem o fluxo normal abaixo.
-    if _is_ret_ia_test_phone(phone or _current_phone):
+    if _use_ret_ia_automation(phone or _current_phone):
         p(f"  [RETENÇÃO] telefone de TESTE -> fluxo RET-IA (tag/automação), sem distribuir")
         return _trigger_retention_tag_only(conv_id, lead_id, question, phone=phone)
 
@@ -13666,10 +13675,10 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
 
         # (2026-06-25) TESTE: telefone de teste -> apenas aciona a automação RET-IA
         # (tag) e silencia o bot. Ignora after-hours, dedup, distribuição e mensagem.
-        if _is_ret_ia_test_phone(_current_phone):
+        if _use_ret_ia_automation(_current_phone):
             _lead_test = student_profile.get('lead_id') if student_profile else None
             _trigger_retention_tag_only(conv_id, _lead_test, question, phone=_current_phone)
-            p(f"  [RETENÇÃO] [TESTE RET-IA] tag/automação acionada e bot silenciado (sem distribuir/mensagem)")
+            p(f"  [RETENÇÃO] [RET-IA] tag/automação acionada e bot silenciado (sem distribuir/mensagem)")
             waiting_for_client = True; inactivity_start = time.time()
             return
 
@@ -14462,10 +14471,12 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
                 _greet = (f", *{_fname}*" if _fname else '')
                 _msg_ret = (f"Entendi sua situação{_greet}. Vou te encaminhar para o nosso "
                             f"*time de Retenção*, que vai te ajudar com isso. Um momento, por favor! 😊")
-                send_and_track(conv_id, _msg_ret, force=True)
-                conversation_messages.append({'role': 'bot', 'text': _msg_ret})
-                log_to_db(conv_id, question, _msg_ret, 1.0, 'retention')
-                _register_signature(conv_id, 'retention', _msg_ret)
+                # (2026-06-25) modo automação RET-IA: não fala com o aluno (silêncio)
+                if not _use_ret_ia_automation(_current_phone):
+                    send_and_track(conv_id, _msg_ret, force=True)
+                    conversation_messages.append({'role': 'bot', 'text': _msg_ret})
+                    log_to_db(conv_id, question, _msg_ret, 1.0, 'retention')
+                    _register_signature(conv_id, 'retention', _msg_ret)
                 try:
                     lead_id_loc = student_profile.get('lead_id') if student_profile else None
                     # trigger_retention escolhe o membro ativo e marca o handoff (sticky)
