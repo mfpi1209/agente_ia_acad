@@ -7,6 +7,36 @@
 
 ---
 
+### [2026-06-25] - RET-IA: dedup por conversa (6h) + toggle da tag p/ re-disparar automação
+
+**Decisão**
+`_trigger_retention_tag_only` deixou de ser idempotente pelo **estado permanente do lead**
+(tag presente) e passou a deduplicar por **conversa**: só suprime se já acionou RET-IA
+naquela conversa nas **últimas 6h** (`_signature_recently_sent(conv_id, 'ret_ia', 6h)`).
+Fora dessa janela, re-aciona a automação via **toggle da tag** (PATCH removendo a RET-IA →
+`sleep 1.5s` → PATCH re-adicionando, com retry 3x no add) e re-posta a nota interna.
+
+**Contexto**
+Caso "Gestão de Recursos Humanos": aluno disparou retenção em 23/06 (tag RET-IA aplicada),
+voltou em 25/06 com nova intenção de cancelar. O agente reconhecia a retenção mas, como a
+tag já estava no lead, caía no `already=True` → não re-aplicava tag, não re-postava nota e a
+automação do DataCrazy (gatilho "tag adicionada") **não re-disparava**. Resultado: "só a tag",
+sem atendimento. Não era problema do n8n — era a regra do agente.
+
+**Alternativas descartadas**
+- *Remover a tag ao encerrar o atendimento*: o agente não sabe com segurança quando o
+  consultor resolveu o caso (acontece fora dele) — frágil.
+- *Só janela de tempo, sem toggle*: inviável, pois re-adicionar uma tag já presente não
+  gera novo evento "tag adicionada" no DataCrazy → automação não re-dispara.
+
+**Impacto**
+- Aluno que volta dias depois com nova retenção volta a acionar a automação + nota.
+- Repetições dentro da mesma sessão (≤6h) continuam suprimidas (sem spam).
+- Risco residual: janela curta sem a tag entre os dois PATCH; mitigado por retry no re-add
+  e log de ALERTA se o re-add falhar após o remove.
+
+---
+
 ### [2026-06-25] - Rollout GLOBAL: retenção passa a acionar a automação "Retenção IA" (tag RET-IA) para todos
 
 **Decisão**

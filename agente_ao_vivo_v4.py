@@ -11512,7 +11512,10 @@ def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
       2) registra nota interna (para o consultor entender o caso);
       3) silencia o bot nessa conversa (a automação assume).
     NÃO atribui consultor, NÃO move etapa, NÃO transfere chat, NÃO fala com o aluno.
-    Idempotente: se o lead já tem a tag RET-IA, não re-aplica nem re-posta a nota.
+    Dedup por CONVERSA (6h): só suprime se já acionou RET-IA nesta conversa nas
+    últimas 6h. Fora dessa janela, re-aciona via TOGGLE da tag (remove+add) para
+    gerar um novo evento "tag adicionada" e re-disparar a automação (caso de aluno
+    que volta dias depois — ex.: "Gestão RH").
     Retorna 'RET-IA' em sucesso; None se não conseguiu resolver/criar o lead.
     """
     try:
@@ -11539,32 +11542,62 @@ def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
             p(f"  [RET-IA] Sem lead_id e nao conseguiu criar — automação RET-IA NAO acionada")
             return None
 
-        existing_tags = []
-        already = False
-        try:
-            r_lead = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
-            if r_lead.status_code == 200:
-                for t in (r_lead.json().get('tags') or []):
-                    tid = t.get('id', '')
-                    if tid:
-                        existing_tags.append({'id': tid})
+        # (2026-06-25) Dedup por CONVERSA, não pelo estado permanente do lead.
+        # Antes: se a tag RET-IA já existia no lead, NADA acontecia — aluno que
+        # voltava dias depois com nova intenção de cancelar não re-acionava a
+        # automação (caso "Gestão RH"). Agora só suprime se já acionamos RET-IA
+        # NESTA conversa nas últimas 6h; fora disso, re-aciona (toggle da tag) +
+        # re-posta a nota.
+        if _signature_recently_sent(conv_id, 'ret_ia', window_s=6 * 3600):
+            p(f"  [RET-IA] dedup: RET-IA ja acionada nesta conversa nas ultimas 6h — apenas silencia")
+        else:
+            other_tags = []
+            already = False
+            try:
+                r_lead = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
+                if r_lead.status_code == 200:
+                    for t in (r_lead.json().get('tags') or []):
+                        tid = t.get('id', '')
+                        if not tid:
+                            continue
                         if tid == RET_IA_TAG_ID:
                             already = True
-        except Exception as e_gt:
-            p(f"  [RET-IA] erro lendo tags do lead: {e_gt}")
+                        else:
+                            other_tags.append({'id': tid})
+            except Exception as e_gt:
+                p(f"  [RET-IA] erro lendo tags do lead: {e_gt}")
 
-        if already:
-            p(f"  [RET-IA] lead {lead_id} ja tem tag RET-IA — idempotente (sem re-nota)")
-        else:
-            existing_tags.append({'id': RET_IA_TAG_ID})
-            try:
-                r = requests.patch(
-                    f'{DCZ_CRM}/leads/{lead_id}', headers=H,
-                    json={'tags': existing_tags}, timeout=10
-                )
-                p(f"  [RET-IA] tag RET-IA adicionada no lead (status={r.status_code}) -> aciona automação 'Retenção IA'")
-            except Exception as e_pt:
-                p(f"  [RET-IA] erro ao adicionar tag RET-IA: {e_pt}")
+            # A automação do DataCrazy dispara no gatilho "tag RET-IA adicionada".
+            # Se a tag já existe, re-enviá-la NÃO gera novo evento; por isso
+            # fazemos toggle: remove e re-adiciona, criando um "tag adicionada" novo.
+            if already:
+                try:
+                    requests.patch(
+                        f'{DCZ_CRM}/leads/{lead_id}', headers=H,
+                        json={'tags': other_tags}, timeout=10
+                    )
+                    p(f"  [RET-IA] tag RET-IA removida (toggle) p/ re-disparar automação")
+                    time.sleep(1.5)
+                except Exception as e_rm:
+                    p(f"  [RET-IA] erro ao remover tag (toggle): {e_rm}")
+
+            # adiciona RET-IA com retry -> não pode ficar sem a tag se o remove passou
+            add_ok = False
+            for _try in range(3):
+                try:
+                    r = requests.patch(
+                        f'{DCZ_CRM}/leads/{lead_id}', headers=H,
+                        json={'tags': other_tags + [{'id': RET_IA_TAG_ID}]}, timeout=10
+                    )
+                    add_ok = r.status_code in (200, 201, 204)
+                    p(f"  [RET-IA] tag RET-IA {'re-' if already else ''}adicionada (status={r.status_code}) -> aciona automação 'Retenção IA'")
+                    if add_ok:
+                        break
+                except Exception as e_pt:
+                    p(f"  [RET-IA] erro ao adicionar tag RET-IA (try {_try + 1}): {e_pt}")
+                time.sleep(1)
+            if already and not add_ok:
+                p(f"  [RET-IA] ALERTA: toggle removeu a tag mas o re-add FALHOU no lead {lead_id}")
 
             try:
                 note = (
@@ -11580,6 +11613,8 @@ def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
                 p(f"  [RET-IA] Nota interna enviada na conversa")
             except Exception as e_nt:
                 p(f"  [RET-IA] erro ao enviar nota interna: {e_nt}")
+
+            _register_signature(conv_id, 'ret_ia', question or 'ret_ia')
 
         try:
             _mark_handoff_active(conv_id, 'retention', target='',
