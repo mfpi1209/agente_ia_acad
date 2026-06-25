@@ -1358,6 +1358,21 @@ ESCALATION_MSG = "Entendi! Vou te conectar com um dos nossos atendentes que vai 
 
 RETENTION_TAG_ID = '6fcefbd5-3c33-4e5c-b139-7f89718f6f0c'
 RETENTION_WESLEY_CRM_ID = 'dd6cbed7-7666-45d1-bd90-368c8b97e217'
+
+# (2026-06-25) TESTE pontual do fluxo da automação "Retenção IA" (tag RET-IA + n8n).
+# SOMENTE os telefones abaixo, em vez de distribuir, acionam a automação via tag e
+# silenciam o bot. Todos os demais alunos seguem a DISTRIBUIÇÃO normal (Wesley/Danúbia).
+# Esvaziar este set desliga o teste e volta 100% à distribuição.
+RET_IA_TAG_ID = '18a49003-449b-473f-964f-1e0d2935b8e0'
+RET_IA_TEST_PHONES = {'5511970617878', '11970617878'}
+
+
+def _is_ret_ia_test_phone(phone):
+    """True se o telefone está na lista de teste do fluxo RET-IA (compara últimos 11 dígitos)."""
+    pn = ''.join(ch for ch in str(phone or '') if ch.isdigit())
+    if not pn:
+        return False
+    return pn[-11:] in {p[-11:] for p in RET_IA_TEST_PHONES}
 RETENTION_PHRASES = [
     'quero cancelar', 'quero trancar', 'vou cancelar', 'vou trancar',
     'cancelar meu curso', 'cancelar minha matrícula', 'cancelar minha matricula',
@@ -11466,6 +11481,101 @@ def choose_retention_target(conv_id):
     return RETENTION_TEAM[idx]
 
 
+def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
+    """(2026-06-25) Fluxo de TESTE da automação "Retenção IA": em vez de distribuir,
+    apenas:
+      1) adiciona a tag RET-IA no lead -> dispara a automação (n8n) no DataCrazy;
+      2) registra nota interna (para o consultor entender o caso);
+      3) silencia o bot nessa conversa (a automação assume).
+    NÃO atribui consultor, NÃO move etapa, NÃO transfere chat, NÃO fala com o aluno.
+    Idempotente: se o lead já tem a tag RET-IA, não re-aplica nem re-posta a nota.
+    Retorna 'RET-IA' em sucesso; None se não conseguiu resolver/criar o lead.
+    """
+    try:
+        if not lead_id:
+            ph = (phone or _current_phone or '').replace('+', '').replace(' ', '').replace('-', '')
+            if ph:
+                try:
+                    prof = identify_student(ph)
+                    if prof and prof.get('lead_id'):
+                        lead_id = prof['lead_id']
+                        p(f"  [RET-IA] lead_id resolvido via phone -> {lead_id}")
+                except Exception as e_id:
+                    p(f"  [RET-IA] identify_student erro: {e_id}")
+            if not lead_id and ph:
+                try:
+                    new_lead_id, _ = create_lead_and_business(ph, '')
+                    if new_lead_id:
+                        lead_id = new_lead_id
+                        p(f"  [RET-IA] lead+business criados -> {lead_id}")
+                except Exception as e_cr:
+                    p(f"  [RET-IA] create_lead_and_business erro: {e_cr}")
+
+        if not lead_id:
+            p(f"  [RET-IA] Sem lead_id e nao conseguiu criar — automação RET-IA NAO acionada")
+            return None
+
+        existing_tags = []
+        already = False
+        try:
+            r_lead = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
+            if r_lead.status_code == 200:
+                for t in (r_lead.json().get('tags') or []):
+                    tid = t.get('id', '')
+                    if tid:
+                        existing_tags.append({'id': tid})
+                        if tid == RET_IA_TAG_ID:
+                            already = True
+        except Exception as e_gt:
+            p(f"  [RET-IA] erro lendo tags do lead: {e_gt}")
+
+        if already:
+            p(f"  [RET-IA] lead {lead_id} ja tem tag RET-IA — idempotente (sem re-nota)")
+        else:
+            existing_tags.append({'id': RET_IA_TAG_ID})
+            try:
+                r = requests.patch(
+                    f'{DCZ_CRM}/leads/{lead_id}', headers=H,
+                    json={'tags': existing_tags}, timeout=10
+                )
+                p(f"  [RET-IA] tag RET-IA adicionada no lead (status={r.status_code}) -> aciona automação 'Retenção IA'")
+            except Exception as e_pt:
+                p(f"  [RET-IA] erro ao adicionar tag RET-IA: {e_pt}")
+
+            try:
+                note = (
+                    f"🔴 *Retenção - Agente IA (TESTE RET-IA)*\n"
+                    f"O aluno manifestou intenção de cancelamento/trancamento.\n"
+                    f"Mensagem: \"{(question or '')[:120]}\"\n"
+                    f"Acionada a automação de Retenção (tag RET-IA). O agente NÃO distribuiu nem respondeu."
+                )
+                requests.post(
+                    f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
+                    headers=H, json={'body': note, 'isInternal': True}, timeout=10
+                )
+                p(f"  [RET-IA] Nota interna enviada na conversa")
+            except Exception as e_nt:
+                p(f"  [RET-IA] erro ao enviar nota interna: {e_nt}")
+
+        try:
+            _mark_handoff_active(conv_id, 'retention', target='',
+                                 ttl_s=8 * 3600, body='Automação RET-IA acionada')
+        except Exception:
+            pass
+        st = _conv_states.setdefault(conv_id, _default_conv_state())
+        st['_human_took_over'] = True
+        st['waiting_for_client'] = False
+        st['inactivity_start'] = 0
+        st['followup_stage'] = 0
+        st['_last_responded_ts'] = time.time()
+
+        return 'RET-IA'
+
+    except Exception as e:
+        p(f"  [RET-IA] Erro: {e}")
+        return None
+
+
 def trigger_retention(conv_id, lead_id, question, phone=None, target_name=None):
     """Aciona Retenção: tag + responsável (Wesley OU Danúbia) no lead + business
     -> ATENDIMENTO + nota interna + transfere o chat. STICKY e por disponibilidade.
@@ -11479,6 +11589,12 @@ def trigger_retention(conv_id, lead_id, question, phone=None, target_name=None):
     (2026-05-27) Se lead_id=None, tenta resolver via telefone (identify_student)
     e, se ainda assim falhar, cria lead+business novos.
     """
+    # (2026-06-25) TESTE: só para o(s) telefone(s) de teste, aciona a automação
+    # RET-IA (tag) em vez de distribuir. Demais alunos seguem o fluxo normal abaixo.
+    if _is_ret_ia_test_phone(phone or _current_phone):
+        p(f"  [RETENÇÃO] telefone de TESTE -> fluxo RET-IA (tag/automação), sem distribuir")
+        return _trigger_retention_tag_only(conv_id, lead_id, question, phone=phone)
+
     # (0) Decide o alvo
     alvo = target_name or choose_retention_target(conv_id)
     if not alvo:

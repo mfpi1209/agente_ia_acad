@@ -7,6 +7,24 @@
 
 ---
 
+### [2026-06-25] - TESTE pontual: fluxo RET-IA (tag/automação) só para telefone de teste
+
+**Decisão**
+Reativado o fluxo da automação "Retenção IA" (tag **RET-IA** → n8n) **apenas** para os telefones
+em `RET_IA_TEST_PHONES` (hoje: `11970617878`). Para esses números, `trigger_retention` chama
+`_trigger_retention_tag_only` (adiciona tag RET-IA, posta nota interna, silencia o bot) **em vez de
+distribuir**. Todos os demais alunos seguem a **distribuição normal** (Wesley/Danúbia).
+
+**Contexto**
+O modelo de automação foi revertido em 23/06 por erros no flow do n8n. O gestor quer revalidar o
+n8n sem impactar a operação, então o teste fica restrito ao próprio telefone.
+
+**Impacto / como desligar**
+Esvaziar o set `RET_IA_TEST_PHONES` (ou remover o número) volta 100% à distribuição — sem mexer em
+mais nada. Trava por telefone compara os últimos 11 dígitos (`_is_ret_ia_test_phone`).
+
+---
+
 ### [2026-06-23] - REVERTIDO: retenção volta a ser DISTRIBUÍDA (removida a regra automação/tag RET-IA)
 
 **Decisão**
