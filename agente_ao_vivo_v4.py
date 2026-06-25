@@ -6412,6 +6412,12 @@ def process_in_hours_rescue():
                 # Caso reportado: "Mas eu cancelei minha matricula" -> foi para
                 # Marilia em vez de Wesley.
                 if _last_aluno_body and is_retention_intent(_last_aluno_body):
+                    # (2026-06-25) TESTE: telefone de teste -> só tag RET-IA, silencio
+                    if _is_ret_ia_test_phone(phone):
+                        _trigger_retention_tag_only(cid, None, _last_aluno_body, phone=phone)
+                        p(f"  [IN-HOURS-RESCUE] [TESTE RET-IA] tag acionada, sem distribuir/mensagem")
+                        _IN_HOURS_RESCUE_RECENT[cid] = now_ts
+                        continue
                     p(f"  [IN-HOURS-RESCUE] Conv {cid[:12]} ...{phone[-4:]} retencao detectada ('{_last_aluno_body[:40]}') — distribuindo p/ time de Retenção")
                     try:
                         # (2026-06-08) trigger_retention escolhe Wesley/Danúbia por
@@ -7059,6 +7065,15 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
 
             # --- RETENCAO / CANCELAMENTO -> TIME DE RETENÇÃO (Wesley/Danúbia) ---
             if is_retention_intent(user_text):
+                # (2026-06-25) TESTE: telefone de teste -> só tag RET-IA, silencio
+                if _is_ret_ia_test_phone(phone):
+                    _trigger_retention_tag_only(cid, None, user_text, phone=phone)
+                    p(f"  [QUEUE-SWEEP] [TESTE RET-IA] tag acionada, sem distribuir/mensagem")
+                    if last_msg and last_msg.get('id'):
+                        processed_msg_ids.add(last_msg['id'])
+                    _QUEUE_SWEEP_RECENT[cid] = now_ts
+                    acted += 1
+                    continue
                 try:
                     # (2026-06-08) trigger_retention escolhe o membro ativo e marca
                     # o handoff. So envia a msg se houver alguem ativo; senao segura.
@@ -13648,6 +13663,15 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     # === RETENÇÃO (cancelamento / trancamento) — ANTES de is_first ===
     if is_retention_intent(question):
         p(f"  [RETENÇÃO] Intenção detectada: \"{question[:80]}\"")
+
+        # (2026-06-25) TESTE: telefone de teste -> apenas aciona a automação RET-IA
+        # (tag) e silencia o bot. Ignora after-hours, dedup, distribuição e mensagem.
+        if _is_ret_ia_test_phone(_current_phone):
+            _lead_test = student_profile.get('lead_id') if student_profile else None
+            _trigger_retention_tag_only(conv_id, _lead_test, question, phone=_current_phone)
+            p(f"  [RETENÇÃO] [TESTE RET-IA] tag/automação acionada e bot silenciado (sem distribuir/mensagem)")
+            waiting_for_client = True; inactivity_start = time.time()
+            return
 
         # Fora do horário: NÃO orientar passos de cancelamento, apenas avisar do Wesley
         if not is_within_business_hours():

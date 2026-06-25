@@ -23,6 +23,16 @@ n8n sem impactar a operação, então o teste fica restrito ao próprio telefone
 Esvaziar o set `RET_IA_TEST_PHONES` (ou remover o número) volta 100% à distribuição — sem mexer em
 mais nada. Trava por telefone compara os últimos 11 dígitos (`_is_ret_ia_test_phone`).
 
+**Correção (mesmo dia)**
+No 1º teste o agente não adicionou a tag e ficou em silêncio: a conversa tinha assinatura
+`retention` das últimas 24h (distribuição anterior), e o **dedup de 24h** no fluxo principal
+(linha ~13692) suprimia tudo *antes* de chamar `trigger_retention`. Além disso, mesmo sem dedup, o
+call site enviaria mensagem ao aluno (não seria silencioso). Solução: desvio do telefone de teste
+**no topo de cada ponto de detecção** (fluxo principal, in-hours-rescue, queue-sweep) chamando
+`_trigger_retention_tag_only` direto e dando `return`/`continue` — ignora dedup/after-hours,
+não distribui e não fala com o aluno. A trava dentro de `trigger_retention` segue como defesa para
+os demais call sites.
+
 ---
 
 ### [2026-06-23] - REVERTIDO: retenção volta a ser DISTRIBUÍDA (removida a regra automação/tag RET-IA)
