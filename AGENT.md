@@ -7,6 +7,50 @@
 
 ---
 
+### [2026-06-25] - Interceptador RET-IA p/ retenção que cai em Atendimento (tag-only)
+
+**Decisão**
+Novo helper `_retention_intercept_for_attendant_conv(cf)` chamado no **filtro de
+fetch** (onde conversas com atendente são descartadas). Quando uma conversa já tem
+atendente (foi para Atendimento via menu/distribuição n8n) mas a **última mensagem
+do aluno é intenção de retenção**, o agente aciona **SOMENTE** a automação RET-IA
+(tag + nota + silêncio via `_trigger_retention_tag_only`). NÃO fala com o aluno e
+NÃO remove o atendente — quem move para Retenção é a automação (via tag).
+
+Guardas de segurança (só age se TODAS valerem):
+- atendente atribuído NÃO é do time de Retenção (Wesley/Danúbia);
+- há mensagem recebida não respondida (`lastReceived > lastSended`);
+- existe telefone do contato (evita resolver lead errado via `_current_phone`);
+- o atendente humano AINDA não falou na conversa (`_human_attendant_active_recently`
+  6h = False) — respeita quem já está atuando;
+- a última recebida é retenção (negation-aware via `is_retention_intent`);
+- dedup de 6h garantido dentro de `_trigger_retention_tag_only`.
+
+**Contexto**
+Caso Estela: "Ola" + menu rotearam a conversa para o departamento Atendimento e a
+distribuição n8n atribuiu a Camila. O agente exclui do processamento qualquer
+conversa com atendente (filtro de fetch `if _cf.get('attendants')` + guard no loop),
+então a "Qro cancelar a matrícula" nunca foi avaliada como retenção — sem tag, sem
+automação. A correção p/ Wesley (16:24) veio da automação/manual.
+
+**Alternativas descartadas**
+- *Deixar o agente processar normalmente conversas com atendente*: arriscado, o bot
+  poderia falar por cima de um humano. Por isso o tag-only (não fala/não remove).
+- *Só corrigir no n8n/menu (rotear cancelamento p/ Retenção)*: é o fix de causa raiz
+  mais limpo (e elimina o churn Atendimento→Retenção), mas é trabalho no n8n; fica
+  como melhoria paralela recomendada. O interceptador é a mitigação no agente.
+
+**Impacto**
+- Retenção que cai em Atendimento passa a acionar a tag/automação mesmo com atendente.
+- Sem mensagem ao aluno e sem remover atendente → preserva a regra D1/D2.
+- Se o consultor de Atendimento já respondeu, o agente NÃO age (respeita o humano).
+- Persiste o "churn" Atendimento→Retenção (n8n atribui Atendimento e a tag move depois);
+  só some com o fix de origem no n8n/menu.
+- Custo: 1 fetch de mensagens por conversa-candidata (apenas as não respondidas e com
+  atendente fora do time de Retenção).
+
+---
+
 ### [2026-06-25] - RET-IA: dedup por conversa (6h) + toggle da tag p/ re-disparar automação
 
 **Decisão**

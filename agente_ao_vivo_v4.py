@@ -12359,6 +12359,77 @@ def _human_attendant_active_recently(conv_id, window_s=30 * 60):
         return False, ''
 
 
+def _retention_intercept_for_attendant_conv(cf):
+    """(2026-06-25) Conversa que JÁ tem atendente (caiu em Atendimento via
+    menu/distribuição n8n), mas a última mensagem do aluno é intenção de
+    cancelamento/trancamento. Aciona SOMENTE a automação RET-IA (tag + nota +
+    silêncio) — NÃO fala com o aluno e NÃO remove o atendente. Quem move para
+    Retenção é a automação (via tag).
+
+    Só age se TODAS as condições valerem (defesa em profundidade):
+      - o atendente atribuído NÃO é do time de Retenção (Wesley/Danúbia);
+      - há mensagem recebida não respondida (lastReceived > lastSended);
+      - existe telefone do contato (evita resolver lead errado via _current_phone);
+      - o atendente humano AINDA não falou na conversa (respeita quem já atua);
+      - a última mensagem recebida é intenção de retenção (negation-aware);
+      - dedup de 6h é garantido dentro de _trigger_retention_tag_only.
+    Caso de origem: Estela — "Qro cancelar a matrícula" caiu na Camila (Atendimento).
+    Retorna True se acionou a tag RET-IA.
+    """
+    try:
+        cid = cf.get('id')
+        if not cid:
+            return False
+
+        atts = cf.get('attendants', []) or []
+        att_names = [(a.get('name') if isinstance(a, dict) else str(a)) or '' for a in atts]
+        for an in att_names:
+            al = an.strip().lower()
+            if al and any(rt.lower() in al for rt in RETENTION_TEAM):
+                return False  # já está com o time de Retenção — nada a fazer
+
+        # precisa haver mensagem recebida MAIS NOVA que a última enviada (não respondida)
+        _recv = cf.get('lastReceivedMessageDate', '') or ''
+        _sent = cf.get('lastSendedMessageDate', '') or ''
+        if not _recv or (_sent and _recv <= _sent):
+            return False
+
+        _ct = cf.get('contact', {}) or {}
+        _ph = (_ct.get('phone') or cf.get('phone') or '').replace('+', '').strip()
+        if not _ph:
+            return False  # sem telefone confiável — não arrisca resolver lead errado
+
+        # o atendente humano já falou? então respeita e NÃO age
+        try:
+            _h_active, _ = _human_attendant_active_recently(cid, window_s=6 * 3600)
+            if _h_active:
+                return False
+        except Exception:
+            pass
+
+        # última mensagem recebida do aluno é intenção de retenção?
+        msgs = _cached_msgs.get(cid) or get_conversation_messages_api(cid, limit=10) or []
+        last_body = ''
+        for m in msgs:
+            if not isinstance(m, dict) or not _message_has_thread_payload(m):
+                continue
+            if m.get('received', False):
+                last_body = (m.get('body') or '').strip()
+                break
+        if not last_body or not is_retention_intent(last_body):
+            return False
+
+        res = _trigger_retention_tag_only(cid, None, last_body, phone=_ph)
+        if res:
+            _att_disp = ', '.join([a for a in att_names if a]) or '?'
+            p(f"  [RET-INTERCEPT] {cid[:12]} retenção em Atendimento (att={_att_disp}) — tag RET-IA acionada (tag-only, sem falar/remover)")
+            return True
+        return False
+    except Exception as e:
+        p(f"  [RET-INTERCEPT] erro: {e}")
+        return False
+
+
 def _human_closed_conversation(conv_id, msgs=None, window_s=_HUMAN_GUARD_WINDOW_S):
     """Retorna (True, nome) se na conv existe '<Nome> finalizou o atendimento'
     vindo de attendant humano nas ultimas window_s segundos. Cobre o caso da
@@ -14960,6 +15031,14 @@ def main():
                     continue
                 if _cf.get('attendants', []):
                     _with_attendant += 1
+                    # (2026-06-25) Interceptador RET-IA: se a conversa caiu em
+                    # Atendimento (menu/n8n) mas a última msg do aluno é retenção,
+                    # aciona SÓ a automação (tag) — sem falar com o aluno nem
+                    # remover o atendente. Regras de segurança no helper.
+                    try:
+                        _retention_intercept_for_attendant_conv(_cf)
+                    except Exception:
+                        pass
                     continue
                 _ct = _cf.get('contact', {}) or {}
                 _ext = _ct.get('externalInfo', {}) or {}
