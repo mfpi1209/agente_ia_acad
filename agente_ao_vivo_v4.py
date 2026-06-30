@@ -11707,6 +11707,80 @@ def _ret_ia_ensure_business_atendimento(lead_id, phone=None):
     return biz_id
 
 
+def _ret_ia_phone_variants(phone):
+    """(2026-06-30) Normaliza o telefone para a convenção do DataCrazy.
+    O contato/lead da conversa é guardado em formato NACIONAL (sem o DDI 55),
+    ex.: '15997582595'. Buscar/criar com '55...' não encontra nem vincula o lead
+    à conversa. Retorna (national, [variações p/ busca])."""
+    d = re.sub(r'\D', '', phone or '')
+    if d.startswith('55') and len(d) in (12, 13):
+        national = d[2:]
+    else:
+        national = d
+    variants = []
+    for v in (national, d, national[-11:] if len(national) >= 11 else national):
+        if v and v not in variants:
+            variants.append(v)
+    return national, variants
+
+
+def _lead_exists(lead_id):
+    """Confirma que o lead_id realmente existe no CRM (evita usar lead 'fantasma')."""
+    if not lead_id:
+        return False
+    try:
+        r = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _ret_ia_ensure_lead(lead_id=None, phone=None):
+    """(2026-06-30) Garante um LEAD válido (existente ou criado) ANTES de tagear/notar,
+    para garantir que a automação 'Retenção IA' acione e o lead apareça vinculado à
+    conversa (sem 'Lead não encontrado'). Corrige o bug do DDI 55: normaliza o
+    telefone p/ NACIONAL ao buscar E ao criar, casando com o contato da conversa.
+    Retorna lead_id válido ou None."""
+    # 1) lead_id recebido: só usa se REALMENTE existir no CRM
+    if lead_id and _lead_exists(lead_id):
+        return lead_id
+    if lead_id:
+        p(f"  [RET-IA] lead_id {lead_id} recebido NAO existe no CRM — resolvendo/criando")
+        lead_id = None
+
+    national, variants = _ret_ia_phone_variants(phone or _current_phone or '')
+    if not national:
+        return None
+    tail = national[-9:] if len(national) >= 9 else national
+
+    # 2) procura lead existente por telefone (validando sufixo p/ evitar match errado)
+    for term in variants:
+        try:
+            r = requests.get(f'{DCZ_CRM}/leads', headers=H,
+                             params={'search': term, 'limit': 10}, timeout=12)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            leads = data.get('data', data) if isinstance(data, dict) else data
+            for ld in (leads if isinstance(leads, list) else []):
+                lph = re.sub(r'\D', '', str(ld.get('rawPhone') or ld.get('phone') or ''))
+                if tail and lph.endswith(tail):
+                    p(f"  [RET-IA] lead existente localizado p/ ...{tail[-4:]}: {ld.get('id')}")
+                    return ld.get('id')
+        except Exception as e:
+            p(f"  [RET-IA] erro buscando lead ({term}): {e}")
+
+    # 3) não existe -> cria com telefone NACIONAL (casa com o contato da conversa)
+    try:
+        new_lead_id, _ = create_lead_and_business(national, '')
+        if new_lead_id:
+            p(f"  [RET-IA] lead criado (nacional) p/ ...{tail[-4:]}: {new_lead_id}")
+            return new_lead_id
+    except Exception as e:
+        p(f"  [RET-IA] erro criando lead: {e}")
+    return None
+
+
 def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
     """(2026-06-25) Fluxo de TESTE da automação "Retenção IA": em vez de distribuir,
     apenas:
@@ -11721,27 +11795,16 @@ def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
     Retorna 'RET-IA' em sucesso; None se não conseguiu resolver/criar o lead.
     """
     try:
-        if not lead_id:
-            ph = (phone or _current_phone or '').replace('+', '').replace(' ', '').replace('-', '')
-            if ph:
-                try:
-                    prof = identify_student(ph)
-                    if prof and prof.get('lead_id'):
-                        lead_id = prof['lead_id']
-                        p(f"  [RET-IA] lead_id resolvido via phone -> {lead_id}")
-                except Exception as e_id:
-                    p(f"  [RET-IA] identify_student erro: {e_id}")
-            if not lead_id and ph:
-                try:
-                    new_lead_id, _ = create_lead_and_business(ph, '')
-                    if new_lead_id:
-                        lead_id = new_lead_id
-                        p(f"  [RET-IA] lead+business criados -> {lead_id}")
-                except Exception as e_cr:
-                    p(f"  [RET-IA] create_lead_and_business erro: {e_cr}")
+        # (2026-06-30) GARANTE o lead ANTES de tag/nota — regra: o lead deve ser
+        # criado (se não existir) antes de adicionar a tag e a nota, para a
+        # automação 'Retenção IA' sempre acionar. _ret_ia_ensure_lead valida o
+        # lead_id recebido, busca por telefone (normalizando o DDI 55 -> nacional)
+        # e cria com o formato nacional p/ casar com o contato da conversa
+        # (evita 'Lead não encontrado' no painel).
+        lead_id = _ret_ia_ensure_lead(lead_id=lead_id, phone=phone)
 
         if not lead_id:
-            p(f"  [RET-IA] Sem lead_id e nao conseguiu criar — automação RET-IA NAO acionada")
+            p(f"  [RET-IA] Sem lead válido e nao conseguiu criar — automação RET-IA NAO acionada")
             return None
 
         # (2026-06-25) Dedup por CONVERSA, não pelo estado permanente do lead.

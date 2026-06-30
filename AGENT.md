@@ -7,6 +7,47 @@
 
 ---
 
+### [2026-06-30] - RET-IA: garantir lead válido (DDI 55 → nacional) antes da tag/nota
+
+**Decisão**
+Em `_trigger_retention_tag_only`, antes de adicionar a tag RET-IA e a nota, o
+agente passa a **garantir um lead válido** via `_ret_ia_ensure_lead`:
+1. valida o `lead_id` recebido (`GET /leads/{id}`) — descarta "lead fantasma";
+2. busca lead existente por telefone testando variações (nacional sem `55`,
+   com `55`, últimos 11) e validando o **sufixo** do telefone p/ não casar com
+   outra pessoa;
+3. se não existir, **cria** o lead com o telefone em **formato nacional**
+   (sem DDI 55), casando com o contato da conversa.
+Só com lead válido segue para tag + nota; sem lead, não tagueia (loga e silencia).
+
+**Contexto**
+Caso Francieli: a nota de retenção chegou mas o painel mostrava "Lead não
+encontrado" e a automação não acionava. Diagnóstico confirmado via API: o
+DataCrazy guarda o contato/lead da conversa em **formato nacional** (ex.:
+`15997582595`), mas o agente buscava/criava com `5515997582595` (com DDI 55).
+Resultado: `identify_student` não achava o lead existente e
+`create_lead_and_business` criava um lead com telefone `55...` que **não vincula**
+ao contato da conversa → "Lead não encontrado" e automação não disparava.
+(Busca por `5515997582595` → 0; por `15997582595` → 1 lead.)
+
+**Alternativas descartadas**
+- *Vincular lead↔conversa por endpoint dedicado*: o DataCrazy vincula
+  contato↔lead automaticamente pelo telefone (`contact.externalId`); basta o
+  telefone do lead casar. Não há necessidade (nem endpoint claro) de associação
+  manual.
+- *Manter `identify_student` (busca só com o telefone cru)*: continuaria
+  falhando para números com DDI 55.
+- *Normalizar o telefone globalmente*: risco de efeito colateral em outros
+  fluxos; mantive a normalização contida no fluxo de retenção.
+
+**Impacto**
+- Retenção sempre acaba com um lead válido e vinculado à conversa antes de
+  tag/nota → automação 'Retenção IA' aciona de forma confiável.
+- Evita leads duplicados (acha o existente por sufixo de telefone).
+- Helpers novos: `_ret_ia_phone_variants`, `_lead_exists`, `_ret_ia_ensure_lead`.
+
+---
+
 ### [2026-06-30] - RGM no painel do Disparador para casos RET-IA (CAA_IA)
 
 **Decisão**
