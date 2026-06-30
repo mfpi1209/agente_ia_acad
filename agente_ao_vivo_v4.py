@@ -11505,6 +11505,146 @@ def choose_retention_target(conv_id):
     return RETENTION_TEAM[idx]
 
 
+def _fetch_rgm(phone=None, cpf=None):
+    """(2026-06-30) Resolve o RGM do aluno em dcz_sync.mm_matriculados por CPF/telefone.
+    Retorna a string do RGM ou None. Prioriza matriculados ativos / série mais alta.
+    (fetch_academic_data NÃO traz o rgm, por isso este helper dedicado.)"""
+    if not phone and not cpf:
+        return None
+    try:
+        cfg = DB_CONFIG.copy()
+        cfg['dbname'] = 'dcz_sync'
+        cfg['connect_timeout'] = 5
+        cfg['options'] = '-c statement_timeout=8000'
+        conn = psycopg2.connect(**cfg)
+        cur = conn.cursor()
+        rgm = None
+        if cpf:
+            clean = re.sub(r'\D', '', str(cpf))
+            if clean and len(clean) < 11:
+                clean = clean.zfill(11)
+            if len(clean) >= 9:
+                cur.execute("""SELECT rgm FROM mm_matriculados
+                    WHERE cpf = %s AND rgm IS NOT NULL AND rgm <> ''
+                    ORDER BY (situacao = 'Matriculado') DESC, serie DESC LIMIT 1""", (clean,))
+                row = cur.fetchone()
+                if row:
+                    rgm = row[0]
+        if not rgm and phone:
+            cp = re.sub(r'\D', '', str(phone))[-11:]
+            if len(cp) >= 10:
+                cur.execute("""SELECT rgm FROM mm_matriculados
+                    WHERE (fone_cel LIKE %s OR fone_res LIKE %s OR fone_com LIKE %s)
+                      AND rgm IS NOT NULL AND rgm <> ''
+                    ORDER BY (situacao = 'Matriculado') DESC, serie DESC LIMIT 1""",
+                    (f'%{cp}', f'%{cp}', f'%{cp}'))
+                row = cur.fetchone()
+                if row:
+                    rgm = row[0]
+        cur.close()
+        conn.close()
+        return str(rgm).strip() if rgm else None
+    except Exception as e:
+        p(f"  [RGM] erro resolvendo rgm: {e}")
+        return None
+
+
+def _ret_ia_fill_rgm_disparador(lead_id=None, phone=None, rgm=None):
+    """(2026-06-30) (A) Preenche o RGM no painel do Disparador
+    (disparos.activation_responses) para os registros 'Processos CAA_IA'
+    (origem_ativacao='caa_ia') deste aluno que estejam sem RGM. Cruza por
+    datacrazy_lead_id e/ou telefone. SÓ escreve quando há RGM resolvido.
+    Escopo restrito a caa_ia — NUNCA toca em caa_atm/caa/financeiro/etc.
+    Retorna nº de linhas atualizadas."""
+    if not rgm or not (lead_id or phone):
+        return 0
+    try:
+        cfg = DB_CONFIG.copy()
+        cfg['dbname'] = 'disparos'
+        cfg['connect_timeout'] = 5
+        cfg['options'] = '-c statement_timeout=8000'
+        conn = psycopg2.connect(**cfg)
+        cur = conn.cursor()
+        n = 0
+        if lead_id:
+            cur.execute("""UPDATE activation_responses SET rgm = %s
+                WHERE category = 'processos-caa' AND origem_ativacao = 'caa_ia'
+                  AND datacrazy_lead_id = %s
+                  AND (rgm IS NULL OR rgm = '' OR lower(rgm) = 'undefined')""",
+                (str(rgm), str(lead_id)))
+            n += cur.rowcount
+        if phone:
+            tail = re.sub(r'\D', '', str(phone))[-8:]
+            if len(tail) >= 8:
+                cur.execute("""UPDATE activation_responses SET rgm = %s
+                    WHERE category = 'processos-caa' AND origem_ativacao = 'caa_ia'
+                      AND telefone LIKE %s
+                      AND (rgm IS NULL OR rgm = '' OR lower(rgm) = 'undefined')""",
+                    (str(rgm), f'%{tail}'))
+                n += cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        if n:
+            p(f"  [RET-IA] RGM {rgm} preenchido no painel Disparador ({n} registro(s) caa_ia)")
+        return n
+    except Exception as e:
+        p(f"  [RET-IA] erro preenchendo rgm no disparador: {e}")
+        return 0
+
+
+_RGM_BACKFILL_LAST = 0
+
+
+def _ret_ia_backfill_rgm_disparador(max_phones=200, max_days=30):
+    """(2026-06-30) (B) Backfill: preenche o RGM dos registros 'Processos CAA_IA'
+    (origem_ativacao='caa_ia') que ficaram sem RGM no painel do Disparador,
+    cruzando o telefone com dcz_sync.mm_matriculados. Cobre o caso em que a linha
+    em activation_responses é criada pelo disparador DEPOIS de o agente tagear
+    (race), e limpa o passivo já existente. Throttle interno de 10 min.
+    Escopo restrito a caa_ia — NUNCA toca em caa_atm/caa/financeiro/etc."""
+    global _RGM_BACKFILL_LAST
+    now = time.time()
+    if now - _RGM_BACKFILL_LAST < 600:
+        return
+    _RGM_BACKFILL_LAST = now
+    try:
+        cfg = DB_CONFIG.copy()
+        cfg['dbname'] = 'disparos'
+        cfg['connect_timeout'] = 5
+        cfg['options'] = '-c statement_timeout=15000'
+        conn = psycopg2.connect(**cfg)
+        cur = conn.cursor()
+        cur.execute("""SELECT DISTINCT telefone FROM activation_responses
+            WHERE category = 'processos-caa' AND origem_ativacao = 'caa_ia'
+              AND (rgm IS NULL OR rgm = '' OR lower(rgm) = 'undefined')
+              AND telefone IS NOT NULL AND telefone <> ''
+              AND received_at > now() - make_interval(days => %s)
+            LIMIT %s""", (max_days, max_phones))
+        phones = [r[0] for r in cur.fetchall()]
+        filled = 0
+        for ph in phones:
+            rgm = _fetch_rgm(phone=ph)
+            if not rgm:
+                continue
+            tail = re.sub(r'\D', '', str(ph))[-8:]
+            if len(tail) < 8:
+                continue
+            cur.execute("""UPDATE activation_responses SET rgm = %s
+                WHERE category = 'processos-caa' AND origem_ativacao = 'caa_ia'
+                  AND telefone LIKE %s
+                  AND (rgm IS NULL OR rgm = '' OR lower(rgm) = 'undefined')""",
+                (str(rgm), f'%{tail}'))
+            filled += cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        if filled:
+            p(f"  [RGM-BACKFILL] {filled} registro(s) caa_ia preenchidos no painel Disparador")
+    except Exception as e:
+        p(f"  [RGM-BACKFILL] erro: {e}")
+
+
 def _ret_ia_ensure_business_atendimento(lead_id, phone=None):
     """(2026-06-30) Garante que o lead tem um negócio (deal) e o coloca na etapa
     *Atendimento* (pipeline Base de Alunos), independente do pipeline atual
@@ -11702,6 +11842,17 @@ def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
         st['inactivity_start'] = 0
         st['followup_stage'] = 0
         st['_last_responded_ts'] = time.time()
+
+        # (2026-06-30) (A) Garante o RGM no painel do Disparador (caa_ia):
+        # resolve o RGM por telefone (dcz_sync.mm_matriculados) e preenche os
+        # registros 'Processos CAA_IA' deste aluno que estejam sem RGM. O backfill
+        # periódico (B) cobre as linhas criadas pelo disparador após esta tag.
+        try:
+            _rgm = _fetch_rgm(phone=(phone or _current_phone))
+            if _rgm:
+                _ret_ia_fill_rgm_disparador(lead_id=lead_id, phone=(phone or _current_phone), rgm=_rgm)
+        except Exception as e_rgm:
+            p(f"  [RET-IA] erro no fill de RGM: {e_rgm}")
 
         return 'RET-IA'
 
@@ -15039,6 +15190,13 @@ def main():
                     process_after_hours_rescue()
                 except Exception as e_rescue:
                     p(f"  [AH-RESCUE] Erro: {e_rescue}")
+                # (2026-06-30) (B) Backfill de RGM no painel do Disparador para os
+                # 'Processos CAA_IA' sem RGM (throttle interno de 10 min). Cobre o
+                # race (linha criada pelo disparador após a tag) e o passivo atual.
+                try:
+                    _ret_ia_backfill_rgm_disparador()
+                except Exception as e_rgmbf:
+                    p(f"  [RGM-BACKFILL] Erro: {e_rgmbf}")
                 try:
                     process_supervisor_loop()
                 except Exception as e_sup:

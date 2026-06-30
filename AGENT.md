@@ -7,6 +7,48 @@
 
 ---
 
+### [2026-06-30] - RGM no painel do Disparador para casos RET-IA (CAA_IA)
+
+**Decisão**
+Sempre que o agente aciona a tag RET-IA, ele passa a garantir o RGM no painel
+"Leads para marcar" do Disparador (banco `disparos`, tabela
+`activation_responses`, coluna `rgm`). Duas frentes:
+1. **(A) Imediata** — em `_trigger_retention_tag_only`, resolve o RGM via
+   `_fetch_rgm` (telefone/CPF → `dcz_sync.mm_matriculados`) e atualiza
+   (`_ret_ia_fill_rgm_disparador`) os registros do aluno com
+   `origem_ativacao='caa_ia'` e `rgm` nulo/`undefined`.
+2. **(B) Backfill periódico** — `_ret_ia_backfill_rgm_disparador` roda no laço
+   principal (a cada 10 ciclos, com throttle interno de 10 min), cruzando por
+   telefone os `caa_ia` ainda sem RGM dos últimos 30 dias.
+Escopo **restrito a `origem_ativacao='caa_ia'`** (distribuídos pelo agente);
+nunca toca em `caa_atm`/`caa`/`financeiro`/`rematricula`/etc.
+
+**Contexto**
+No painel do Disparador, leads de retenção do fluxo da IA (BASE "Processos
+CAA_IA") apareciam com RGM `undefined` (77 de 79). O RGM em
+`activation_responses` só é preenchido quando a mensagem chega com
+`master_key='RGM:xxxx'` (disparos já chaveados por RGM) — o que não acontece no
+inbound espontâneo/IA. Porém o RGM existe e é recuperável por telefone em
+`dcz_sync.mm_matriculados` (confirmado: telefone 11966153426 → RGM 47535229).
+
+**Alternativas descartadas**
+- *Preencher o campo customizado RGM no lead do DataCrazy*: o disparador resolve
+  o RGM via `master_key` do inbound, não pelo lead nem pela tabela `students`
+  (telefone testado não existe em `students`); não corrigiria o painel.
+- *Só (A)*: sujeito a race — a linha em `activation_responses` costuma ser criada
+  pelo disparador após a tag; ficaria `undefined`. Por isso (A)+(B).
+- *Backfill em qualquer category*: rejeitado a pedido — manter escopo só `caa_ia`
+  para não alterar dados de outras origens (ex.: `caa_atm` manual).
+
+**Impacto**
+- Novos casos RET-IA sobem no painel já com RGM (ou são corrigidos em ≤10 min).
+- Limpa o passivo de `caa_ia` sem RGM (escopo: últimos 30 dias por execução).
+- Helper `_fetch_rgm` criado (o `fetch_academic_data` não retornava `rgm`).
+- Escrita somente-RGM e idempotente no banco `disparos` (sistema externo do
+  disparador); só atualiza linhas `caa_ia` com RGM ausente.
+
+---
+
 ### [2026-06-30] - RET-IA: garantir deal + etapa Atendimento antes da tag (qualquer pipeline)
 
 **Decisão**
