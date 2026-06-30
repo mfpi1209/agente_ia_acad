@@ -11505,6 +11505,68 @@ def choose_retention_target(conv_id):
     return RETENTION_TEAM[idx]
 
 
+def _ret_ia_ensure_business_atendimento(lead_id, phone=None):
+    """(2026-06-30) Garante que o lead tem um negócio (deal) e o coloca na etapa
+    *Atendimento* (pipeline Base de Alunos), independente do pipeline atual
+    (Encerramento/Perdido). Necessário para a automação 'Retenção IA' acionar: a
+    tag dispara o fluxo, mas o deal precisa estar num pipeline que a automação
+    atenda. Cobre dois casos reportados:
+      - aluno em Encerramento: tag/nota chegavam mas a automação não acionava;
+      - aluno sem deal criado: idem.
+    Retorna biz_id (existente, movido ou criado) ou None.
+    """
+    biz_id = None
+    # 1) sub-recurso /leads/{id}/businesses (mais confiável)
+    try:
+        rb_sub = requests.get(f'{DCZ_CRM}/leads/{lead_id}/businesses', headers=H, timeout=10)
+        if rb_sub.status_code == 200:
+            bd = rb_sub.json()
+            bl = bd.get('data', bd) if isinstance(bd, dict) else bd
+            if isinstance(bl, list) and bl:
+                biz_id = (bl[0] or {}).get('id')
+    except Exception as e:
+        p(f"  [RET-IA] erro buscando business do lead: {e}")
+    # 2) fallback: search por telefone
+    if not biz_id:
+        try:
+            ph_search = (phone or _current_phone or '')
+            if ph_search:
+                r_biz = requests.get(f'{DCZ_CRM}/businesses', headers=H,
+                                     params={'search': ph_search, 'limit': 5}, timeout=10)
+                if r_biz.status_code == 200:
+                    bdj = r_biz.json()
+                    bl = bdj.get('data', bdj) if isinstance(bdj, dict) else bdj
+                    for biz in (bl if isinstance(bl, list) else []):
+                        bl_lead = biz.get('lead', {})
+                        bl_lead_id = bl_lead.get('id', '') if isinstance(bl_lead, dict) else str(bl_lead)
+                        if bl_lead_id == lead_id:
+                            biz_id = biz.get('id')
+                            break
+        except Exception as e:
+            p(f"  [RET-IA] erro search business: {e}")
+    # 3) não tem deal -> cria já em Atendimento
+    if not biz_id:
+        try:
+            r_new = requests.post(f'{DCZ_CRM}/businesses', headers=H,
+                                  json={'leadId': lead_id, 'stageId': STAGE_ATENDIMENTO_ID}, timeout=12)
+            if r_new.status_code in (200, 201):
+                biz_id = (r_new.json() or {}).get('id')
+                p(f"  [RET-IA] business criado p/ lead {lead_id} já em Atendimento -> {biz_id}")
+            else:
+                p(f"  [RET-IA] falha ao criar business (status={r_new.status_code})")
+        except Exception as e:
+            p(f"  [RET-IA] erro criando business: {e}")
+        return biz_id
+    # 4) já existe deal -> garante etapa Atendimento (tira de Encerramento/Perdido)
+    try:
+        r_mv = requests.patch(f'{DCZ_CRM}/businesses/{biz_id}', headers=H,
+                              json={'stageId': STAGE_ATENDIMENTO_ID}, timeout=10)
+        p(f"  [RET-IA] business {biz_id} -> etapa Atendimento (status={r_mv.status_code})")
+    except Exception as e:
+        p(f"  [RET-IA] erro movendo business p/ Atendimento: {e}")
+    return biz_id
+
+
 def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
     """(2026-06-25) Fluxo de TESTE da automação "Retenção IA": em vez de distribuir,
     apenas:
@@ -11551,6 +11613,15 @@ def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
         if _signature_recently_sent(conv_id, 'ret_ia', window_s=6 * 3600):
             p(f"  [RET-IA] dedup: RET-IA ja acionada nesta conversa nas ultimas 6h — apenas silencia")
         else:
+            # (2026-06-30) ANTES de marcar a tag, garante que o lead tem deal e o
+            # move p/ Atendimento (Base de Alunos), independente do pipeline atual
+            # (Encerramento/Perdido). Assim a automação 'Retenção IA' aciona mesmo
+            # para aluno em Encerramento ou sem deal criado.
+            try:
+                _ret_ia_ensure_business_atendimento(lead_id, phone=phone)
+            except Exception as e_bz:
+                p(f"  [RET-IA] ensure business/Atendimento erro: {e_bz}")
+
             other_tags = []
             already = False
             try:

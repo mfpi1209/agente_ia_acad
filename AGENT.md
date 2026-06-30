@@ -7,6 +7,40 @@
 
 ---
 
+### [2026-06-30] - RET-IA: garantir deal + etapa Atendimento antes da tag (qualquer pipeline)
+
+**Decisão**
+Novo helper `_ret_ia_ensure_business_atendimento(lead_id, phone)` chamado em
+`_trigger_retention_tag_only` ANTES de aplicar a tag RET-IA. Ele:
+1. busca o negócio (deal) do lead (`/leads/{id}/businesses`, fallback search por telefone);
+2. se não existe, **cria** um deal já em `STAGE_ATENDIMENTO_ID`;
+3. se existe, **move** o deal para `STAGE_ATENDIMENTO_ID` (pipeline Base de Alunos),
+   tirando-o de Encerramento/Perdido.
+Só roda no caminho de disparo real (fora do dedup de 6h) e antes da tag, para a
+automação 'Retenção IA' acionar já com o deal no pipeline correto.
+
+**Contexto**
+Dois casos reportados de retenção real (aluno mandou "quero cancelar/trancar") em que
+a automação NÃO acionava mesmo com tag+nota:
+- Aline Jenefer (#56108): deal em pipeline **Encerramento** — a automação não atende
+  esse pipeline, então a tag entrava mas nada acontecia.
+- Alunos **sem deal criado**: tag/nota na conversa, mas sem negócio para a automação agir.
+
+**Alternativas descartadas**
+- *Ajustar só no n8n (remover filtro de pipeline)*: a automação ficaria atendendo
+  qualquer pipeline, inclusive casos não desejados; é trabalho no n8n e fora do controle
+  do agente. Mover o deal para Atendimento é determinístico e replica o que a antiga
+  distribuição já fazia (`trigger_retention` setava `STAGE_ATENDIMENTO_ID`).
+
+**Impacto**
+- Retenção real passa a acionar a automação independente do pipeline de origem.
+- Salvaguarda: só acontece quando a mensagem ATUAL é intenção de retenção
+  (`is_retention_intent`), então não "ressuscita" cancelamentos antigos sem novo pedido.
+- Risco residual: um aluno em Encerramento/Perdido que mande novo "quero cancelar" é
+  movido para Atendimento — comportamento desejado pelo pedido ("independente do pipeline").
+
+---
+
 ### [2026-06-30] - Agente não encerra mais conversa em RETENÇÃO (RET-IA)
 
 **Decisão**
