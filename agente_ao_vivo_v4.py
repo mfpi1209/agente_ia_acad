@@ -11617,8 +11617,12 @@ def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
             _register_signature(conv_id, 'ret_ia', question or 'ret_ia')
 
         try:
+            # (2026-06-30) TTL 72h (era 8h): o handoff protege a conversa do
+            # follow-up/auto-close enquanto o time/automação de Retenção assume.
+            # Com 8h ele expirava antes do atendimento (caso Maria Clara: fechada
+            # ~16h depois esperando o consultor).
             _mark_handoff_active(conv_id, 'retention', target='',
-                                 ttl_s=8 * 3600, body='Automação RET-IA acionada')
+                                 ttl_s=72 * 3600, body='Automação RET-IA acionada')
         except Exception:
             pass
         st = _conv_states.setdefault(conv_id, _default_conv_state())
@@ -13785,7 +13789,11 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             _lead_test = student_profile.get('lead_id') if student_profile else None
             _trigger_retention_tag_only(conv_id, _lead_test, question, phone=_current_phone)
             p(f"  [RETENÇÃO] [RET-IA] tag/automação acionada e bot silenciado (sem distribuir/mensagem)")
-            waiting_for_client = True; inactivity_start = time.time()
+            # (2026-06-30) NÃO marcar 'waiting_for_client': a conversa foi entregue à
+            # automação/time de Retenção. Marcar como aguardando a tornava elegível ao
+            # loop de follow-up/auto-close — caso Maria Clara: fechada após ~16h
+            # esperando o consultor. Fica silenciada (handoff), sem follow-up/close.
+            waiting_for_client = False; inactivity_start = 0
             return
 
         # Fora do horário: NÃO orientar passos de cancelamento, apenas avisar do Wesley
@@ -15487,6 +15495,18 @@ def main():
                     if st.get('followup_stage', 0) == 2:
                         if _closes_this_cycle >= _MAX_CLOSES_PER_CYCLE:
                             continue
+                        # (2026-06-30) Rede de segurança: não finalizar conversa em RETENÇÃO.
+                        try:
+                            _ho_dc, _ = _is_handoff_active(cid)
+                            if _ho_dc:
+                                p(f"  [DIRECT-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] handoff_active={_ho_dc} - skip")
+                                continue
+                            _rmsgs_dc = _cached_msgs.get(cid) or get_conversation_messages_api(cid, limit=15)
+                            if _rmsgs_dc and _is_in_retention(cid, msgs=_rmsgs_dc):
+                                p(f"  [DIRECT-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] EM RETENÇÃO - nao encerra")
+                                continue
+                        except Exception:
+                            pass
                         p(f"  [DIRECT-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] Msg encerramento ja enviada ({int(elapsed)}s) -> finalizando")
                         _closes_this_cycle += 1
                         close_conversation_crm(cid, phone=cur_phone)
@@ -15602,6 +15622,17 @@ def main():
                             ho_motivo_cl_main, _ = _is_handoff_active(cid)
                             if ho_motivo_cl_main:
                                 p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] handoff_active={ho_motivo_cl_main} - skip")
+                                continue
+                        except Exception:
+                            pass
+                        # (2026-06-30) Rede de segurança: NUNCA encerrar conversa em
+                        # RETENÇÃO. O handoff pode ter expirado (TTL); confirma via
+                        # histórico recente (aluno pediu cancelar/trancar nos últimos
+                        # dias). Caso Maria Clara: fechada após handoff expirar.
+                        try:
+                            _rmsgs_cl = _cached_msgs.get(cid) or get_conversation_messages_api(cid, limit=15)
+                            if _rmsgs_cl and _is_in_retention(cid, msgs=_rmsgs_cl):
+                                p(f"  [AUTO-CLOSE] [{cur_phone[-4:] if cur_phone else '????'}] EM RETENÇÃO - nao encerra")
                                 continue
                         except Exception:
                             pass

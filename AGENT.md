@@ -7,6 +7,42 @@
 
 ---
 
+### [2026-06-30] - Agente não encerra mais conversa em RETENÇÃO (RET-IA)
+
+**Decisão**
+Três ajustes para o agente NUNCA dar follow-up nem auto-close em conversa entregue
+à automação/time de Retenção:
+1. No fluxo principal, após `_trigger_retention_tag_only`, marcar
+   `waiting_for_client=False; inactivity_start=0` (antes marcava `True`, o que tornava
+   a conversa elegível ao loop de follow-up/encerramento).
+2. TTL do handoff de retenção em `_trigger_retention_tag_only`: 8h → **72h**. Os guards
+   de FOLLOWUP-1 e AUTO-CLOSE já pulam quando há handoff ativo; com 8h ele expirava
+   antes do atendimento.
+3. Rede de segurança no AUTO-CLOSE (stage 1) e DIRECT-CLOSE (stage 2): além do
+   `_is_handoff_active`, checa `_is_in_retention(cid, msgs=...)` (histórico recente do
+   aluno pedindo cancelar/trancar) e NÃO encerra se estiver em retenção.
+
+**Contexto**
+Caso Maria Clara (#185134): aluna pediu cancelamento, o agente aplicou a tag RET-IA +
+nota e silenciou. A conversa ficou ~16h aguardando o time. O handoff de retenção (TTL
+8h) expirou e o loop de auto-close enviou "Como não tivemos retorno, vou finalizar..."
+e encerrou a conversa — sendo que a aluna nem falou com o consultor. A distribuição
+foi manual (a automação n8n não conectou um consultor em tempo).
+
+**Alternativas descartadas**
+- *Só estender o TTL*: o `waiting_for_client=True` ainda deixava a conversa no loop;
+  e se o time demorasse mais que o TTL, fecharia de novo. Por isso também (1) e (3).
+- *Só checar histórico no close*: custo de fetch por ciclo; combinado com (1)+(2) o
+  fetch só ocorre nos poucos casos que chegam ao estágio de close.
+
+**Impacto**
+- Conversa em retenção não recebe mais follow-up nem é encerrada pelo agente.
+- O encerramento fica por conta do consultor/automação de Retenção.
+- Custo extra mínimo: 1 fetch de mensagens só quando uma conversa chega ao estágio de
+  auto-close/direct-close.
+
+---
+
 ### [2026-06-25] - Interceptador RET-IA p/ retenção que cai em Atendimento (tag-only)
 
 **Decisão**
