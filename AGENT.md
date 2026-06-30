@@ -7,6 +7,37 @@
 
 ---
 
+### [2026-06-30] - Criação de lead robusta também na distribuição normal
+
+**Decisão**
+Generalizado o helper `_ret_ia_ensure_lead` → `_ensure_lead_for_conv(lead_id, phone, name)`
+e passado a usá-lo em **toda** a distribuição (não só na retenção):
+1. **Caminho com consultor** (`_distribute_to_attendant_locked`): substituída a busca/
+   criação antiga (que usava o telefone com DDI 55) pelo helper, que normaliza p/
+   nacional ao buscar (match por sufixo) e ao criar — evita lead duplicado/não
+   vinculado.
+2. **Fallback sem consultor** (`human_unavailable`): agora também cria/garante o lead
+   antes de postar a nota e enfileirar. Antes, esse caminho **nunca criava lead**.
+
+**Contexto**
+Caso reportado (Gaby): atendimento normal escalado por baixa confiança (0.30); a
+conversa caiu no fallback `human_unavailable` (sem consultor) — chegou nota interna,
+mas o painel mostrava "Lead não encontrado" porque o fallback não criava lead. Além
+disso, o caminho com consultor sofria do mesmo bug do DDI 55 da retenção (criava/
+buscava com `55...` e não vinculava ao contato da conversa, em formato nacional).
+
+**Alternativas descartadas**
+- Criar lead só no caminho com consultor: deixaria as conversas em fila (sem consultor)
+  sem lead, mantendo o "Lead não encontrado".
+- Manter helper separado para retenção e distribuição: duplicação e risco de divergir.
+
+**Impacto**
+Toda conversa escalada (com ou sem consultor disponível) passa a ter lead criado/
+vinculado em formato nacional. Cria mais leads no fallback, mas são contatos reais já
+em escalonamento — consistente com o caminho que já criava lead na distribuição.
+
+---
+
 ### [2026-06-30] - RGM verificado por CPF+telefone + dedup (1 linha por pessoa)
 
 **Decisão**
