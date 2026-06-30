@@ -11773,14 +11773,19 @@ def _ret_ia_phone_variants(phone):
 
 
 def _lead_exists(lead_id):
-    """Confirma que o lead_id realmente existe no CRM (evita usar lead 'fantasma')."""
+    """Confirma que o lead_id realmente existe no CRM (evita usar lead 'fantasma').
+    (2026-06-30) Só considera INEXISTENTE em 404 explícito. Em timeout/5xx/erro de
+    rede assume que EXISTE — para não descartar um lead_id válido por falha
+    transitória da API (o que abortaria tag+nota da retenção)."""
     if not lead_id:
         return False
     try:
         r = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
-        return r.status_code == 200
+        if r.status_code == 404:
+            return False
+        return True
     except Exception:
-        return False
+        return True
 
 
 def _ensure_lead_for_conv(lead_id=None, phone=None, name=''):
@@ -11849,11 +11854,20 @@ def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
         # lead_id recebido, busca por telefone (normalizando o DDI 55 -> nacional)
         # e cria com o formato nacional p/ casar com o contato da conversa
         # (evita 'Lead não encontrado' no painel).
+        orig_lead_id = lead_id
         lead_id = _ensure_lead_for_conv(lead_id=lead_id, phone=phone)
 
         if not lead_id:
-            p(f"  [RET-IA] Sem lead válido e nao conseguiu criar — automação RET-IA NAO acionada")
-            return None
+            # (2026-06-30) NÃO bloquear tag/nota por falha transitória de resolução.
+            # Se havia um lead_id de entrada, usa ele (melhor tagear um lead possivel-
+            # mente válido do que não acionar a automação). Só aborta se não há lead
+            # algum (nem recebido, nem criável).
+            if orig_lead_id:
+                p(f"  [RET-IA] resolução de lead falhou — usando lead_id original ({orig_lead_id}) p/ NAO bloquear tag/nota")
+                lead_id = orig_lead_id
+            else:
+                p(f"  [RET-IA] Sem lead válido e nao conseguiu criar — automação RET-IA NAO acionada")
+                return None
 
         # (2026-06-25) Dedup por CONVERSA, não pelo estado permanente do lead.
         # Antes: se a tag RET-IA já existia no lead, NADA acontecia — aluno que
