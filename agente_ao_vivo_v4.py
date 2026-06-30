@@ -11505,12 +11505,29 @@ def choose_retention_target(conv_id):
     return RETENTION_TEAM[idx]
 
 
-def _fetch_rgm(phone=None, cpf=None):
-    """(2026-06-30) Resolve o RGM do aluno em dcz_sync.mm_matriculados por CPF/telefone.
-    Retorna a string do RGM ou None. Prioriza matriculados ativos / série mais alta.
-    (fetch_academic_data NÃO traz o rgm, por isso este helper dedicado.)"""
-    if not phone and not cpf:
-        return None
+def _resolve_rgm_verified(lead_id=None, phone=None, cpf=None):
+    """(2026-06-30) Resolve o RGM com IDENTIDADE confirmada — evita marcar o RGM de
+    OUTRA pessoa (caso de telefone compartilhado/cadastro trocado).
+    Regra: CPF e telefone devem apontar para o MESMO registro em mm_matriculados.
+      - CPF e telefone resolvem o MESMO rgm  -> usa (alta confiança);
+      - CPF resolve e o telefone do próprio registro do CPF bate -> usa;
+      - só CPF (telefone sem registro acadêmico) -> usa (CPF é a identidade);
+      - CPF x telefone DIVERGEM, ou só telefone sem CPF -> NÃO marca (None).
+    Retorna (rgm|None, motivo). fetch_academic_data NÃO traz o rgm; por isso aqui.
+    """
+    if not cpf and lead_id:
+        try:
+            r = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
+            if r.status_code == 200:
+                cpf = (r.json().get('taxId') or '')
+        except Exception:
+            pass
+    clean_cpf = re.sub(r'\D', '', str(cpf or ''))
+    if clean_cpf and len(clean_cpf) < 11:
+        clean_cpf = clean_cpf.zfill(11)
+    cp = re.sub(r'\D', '', str(phone or ''))[-11:]
+    if len(clean_cpf) != 11 and len(cp) < 10:
+        return None, 'sem cpf/telefone'
     try:
         cfg = DB_CONFIG.copy()
         cfg['dbname'] = 'dcz_sync'
@@ -11518,35 +11535,42 @@ def _fetch_rgm(phone=None, cpf=None):
         cfg['options'] = '-c statement_timeout=8000'
         conn = psycopg2.connect(**cfg)
         cur = conn.cursor()
-        rgm = None
-        if cpf:
-            clean = re.sub(r'\D', '', str(cpf))
-            if clean and len(clean) < 11:
-                clean = clean.zfill(11)
-            if len(clean) >= 9:
-                cur.execute("""SELECT rgm FROM mm_matriculados
-                    WHERE cpf = %s AND rgm IS NOT NULL AND rgm <> ''
-                    ORDER BY (situacao = 'Matriculado') DESC, serie DESC LIMIT 1""", (clean,))
-                row = cur.fetchone()
-                if row:
-                    rgm = row[0]
-        if not rgm and phone:
-            cp = re.sub(r'\D', '', str(phone))[-11:]
-            if len(cp) >= 10:
-                cur.execute("""SELECT rgm FROM mm_matriculados
-                    WHERE (fone_cel LIKE %s OR fone_res LIKE %s OR fone_com LIKE %s)
-                      AND rgm IS NOT NULL AND rgm <> ''
-                    ORDER BY (situacao = 'Matriculado') DESC, serie DESC LIMIT 1""",
-                    (f'%{cp}', f'%{cp}', f'%{cp}'))
-                row = cur.fetchone()
-                if row:
-                    rgm = row[0]
+        rgm_cpf = None
+        fones_cpf = ''
+        if len(clean_cpf) == 11:
+            cur.execute("""SELECT rgm,
+                    coalesce(fone_cel,'')||'|'||coalesce(fone_res,'')||'|'||coalesce(fone_com,'')
+                FROM mm_matriculados WHERE cpf = %s AND rgm IS NOT NULL AND rgm <> ''
+                ORDER BY (situacao = 'Matriculado') DESC, serie DESC LIMIT 1""", (clean_cpf,))
+            row = cur.fetchone()
+            if row:
+                rgm_cpf = str(row[0]).strip()
+                fones_cpf = re.sub(r'\D', '', row[1] or '')
+        rgm_phone = None
+        if len(cp) >= 10:
+            cur.execute("""SELECT rgm FROM mm_matriculados
+                WHERE (fone_cel LIKE %s OR fone_res LIKE %s OR fone_com LIKE %s)
+                  AND rgm IS NOT NULL AND rgm <> ''
+                ORDER BY (situacao = 'Matriculado') DESC, serie DESC LIMIT 1""",
+                (f'%{cp}', f'%{cp}', f'%{cp}'))
+            row = cur.fetchone()
+            if row:
+                rgm_phone = str(row[0]).strip()
         cur.close()
         conn.close()
-        return str(rgm).strip() if rgm else None
+
+        if rgm_cpf and rgm_phone:
+            if rgm_cpf == rgm_phone:
+                return rgm_cpf, 'cpf+telefone concordam'
+            return None, f'divergencia cpf({rgm_cpf})x telefone({rgm_phone})'
+        if rgm_cpf and cp and cp in fones_cpf:
+            return rgm_cpf, 'cpf + telefone do registro batem'
+        if rgm_cpf and not rgm_phone:
+            return rgm_cpf, 'cpf (telefone sem registro academico)'
+        return None, 'sem confirmacao por cpf'
     except Exception as e:
-        p(f"  [RGM] erro resolvendo rgm: {e}")
-        return None
+        p(f"  [RGM] erro resolvendo (verificado): {e}")
+        return None, 'erro'
 
 
 def _ret_ia_fill_rgm_disparador(lead_id=None, phone=None, rgm=None):
@@ -11596,13 +11620,17 @@ def _ret_ia_fill_rgm_disparador(lead_id=None, phone=None, rgm=None):
 _RGM_BACKFILL_LAST = 0
 
 
-def _ret_ia_backfill_rgm_disparador(max_phones=200, max_days=30):
-    """(2026-06-30) (B) Backfill: preenche o RGM dos registros 'Processos CAA_IA'
-    (origem_ativacao='caa_ia') que ficaram sem RGM no painel do Disparador,
-    cruzando o telefone com dcz_sync.mm_matriculados. Cobre o caso em que a linha
-    em activation_responses é criada pelo disparador DEPOIS de o agente tagear
-    (race), e limpa o passivo já existente. Throttle interno de 10 min.
-    Escopo restrito a caa_ia — NUNCA toca em caa_atm/caa/financeiro/etc."""
+def _ret_ia_backfill_rgm_disparador(max_leads=80, max_days=30):
+    """(2026-06-30) Mantém o painel 'Processos CAA_IA' (disparos.activation_responses)
+    correto, atendendo às regras:
+      1) DEDUP — 1 linha por pessoa (datacrazy_lead_id): mantém a MAIS RECENTE e
+         apaga as demais caa_ia (autorizado), evitando a mesma pessoa aparecer
+         várias vezes;
+      2) RGM verificado — re-resolve por CPF+telefone (_resolve_rgm_verified) e
+         grava só quando a identidade confere; se NÃO confirmar, deixa o RGM em
+         branco (nunca marca o RGM de outra pessoa).
+    Escopo restrito a caa_ia — NUNCA toca em caa_atm/caa/financeiro/etc.
+    Throttle interno de 10 min."""
     global _RGM_BACKFILL_LAST
     now = time.time()
     if now - _RGM_BACKFILL_LAST < 600:
@@ -11612,35 +11640,54 @@ def _ret_ia_backfill_rgm_disparador(max_phones=200, max_days=30):
         cfg = DB_CONFIG.copy()
         cfg['dbname'] = 'disparos'
         cfg['connect_timeout'] = 5
-        cfg['options'] = '-c statement_timeout=15000'
+        cfg['options'] = '-c statement_timeout=20000'
         conn = psycopg2.connect(**cfg)
         cur = conn.cursor()
-        cur.execute("""SELECT DISTINCT telefone FROM activation_responses
+        cur.execute("""SELECT datacrazy_lead_id, max(telefone), count(*)
+            FROM activation_responses
             WHERE category = 'processos-caa' AND origem_ativacao = 'caa_ia'
-              AND (rgm IS NULL OR rgm = '' OR lower(rgm) = 'undefined')
-              AND telefone IS NOT NULL AND telefone <> ''
+              AND datacrazy_lead_id IS NOT NULL AND datacrazy_lead_id <> ''
               AND received_at > now() - make_interval(days => %s)
-            LIMIT %s""", (max_days, max_phones))
-        phones = [r[0] for r in cur.fetchall()]
-        filled = 0
-        for ph in phones:
-            rgm = _fetch_rgm(phone=ph)
-            if not rgm:
-                continue
-            tail = re.sub(r'\D', '', str(ph))[-8:]
-            if len(tail) < 8:
-                continue
-            cur.execute("""UPDATE activation_responses SET rgm = %s
-                WHERE category = 'processos-caa' AND origem_ativacao = 'caa_ia'
-                  AND telefone LIKE %s
-                  AND (rgm IS NULL OR rgm = '' OR lower(rgm) = 'undefined')""",
-                (str(rgm), f'%{tail}'))
-            filled += cur.rowcount
+            GROUP BY datacrazy_lead_id
+            ORDER BY count(*) DESC, max(received_at) DESC
+            LIMIT %s""", (max_days, max_leads))
+        leads = cur.fetchall()
+        deleted = 0
+        fixed = 0
+        blanked = 0
+        for lead_id, phone, cnt in leads:
+            # 1) DEDUP: mantém a linha caa_ia mais recente; apaga as outras
+            if cnt and cnt > 1:
+                cur.execute("""DELETE FROM activation_responses
+                    WHERE category = 'processos-caa' AND origem_ativacao = 'caa_ia'
+                      AND datacrazy_lead_id = %s
+                      AND id <> (
+                        SELECT id FROM activation_responses
+                        WHERE category = 'processos-caa' AND origem_ativacao = 'caa_ia'
+                          AND datacrazy_lead_id = %s
+                        ORDER BY received_at DESC NULLS LAST LIMIT 1)""",
+                    (lead_id, lead_id))
+                deleted += cur.rowcount
+            # 2) RGM verificado (CPF+telefone). Confere -> grava; não confere -> limpa
+            rgm, _motivo = _resolve_rgm_verified(lead_id=lead_id, phone=phone)
+            if rgm:
+                cur.execute("""UPDATE activation_responses SET rgm = %s
+                    WHERE category = 'processos-caa' AND origem_ativacao = 'caa_ia'
+                      AND datacrazy_lead_id = %s
+                      AND (rgm IS NULL OR rgm = '' OR lower(rgm) = 'undefined' OR rgm <> %s)""",
+                    (rgm, lead_id, rgm))
+                fixed += cur.rowcount
+            else:
+                cur.execute("""UPDATE activation_responses SET rgm = NULL
+                    WHERE category = 'processos-caa' AND origem_ativacao = 'caa_ia'
+                      AND datacrazy_lead_id = %s
+                      AND rgm IS NOT NULL AND rgm <> ''""", (lead_id,))
+                blanked += cur.rowcount
         conn.commit()
         cur.close()
         conn.close()
-        if filled:
-            p(f"  [RGM-BACKFILL] {filled} registro(s) caa_ia preenchidos no painel Disparador")
+        if deleted or fixed or blanked:
+            p(f"  [RGM-BACKFILL] dedup_apagadas={deleted} rgm_ok={fixed} rgm_limpo={blanked}")
     except Exception as e:
         p(f"  [RGM-BACKFILL] erro: {e}")
 
@@ -11911,7 +11958,7 @@ def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
         # registros 'Processos CAA_IA' deste aluno que estejam sem RGM. O backfill
         # periódico (B) cobre as linhas criadas pelo disparador após esta tag.
         try:
-            _rgm = _fetch_rgm(phone=(phone or _current_phone))
+            _rgm, _ = _resolve_rgm_verified(lead_id=lead_id, phone=(phone or _current_phone))
             if _rgm:
                 _ret_ia_fill_rgm_disparador(lead_id=lead_id, phone=(phone or _current_phone), rgm=_rgm)
         except Exception as e_rgm:

@@ -7,6 +7,46 @@
 
 ---
 
+### [2026-06-30] - RGM verificado por CPF+telefone + dedup (1 linha por pessoa)
+
+**Decisão**
+Revisão do preenchimento de RGM no painel do Disparador (caa_ia):
+1. **RGM com identidade confirmada** (`_resolve_rgm_verified`): só grava o RGM
+   quando **CPF e telefone apontam para o MESMO** registro em `mm_matriculados`
+   (ou CPF confirmado pelo telefone do próprio registro / CPF sem registro de
+   telefone). Se CPF e telefone **divergem**, ou se só há telefone sem CPF, **não
+   marca** (evita pegar o RGM de outra pessoa em telefone compartilhado).
+   Substitui o `_fetch_rgm` (que resolvia só por telefone).
+2. **Dedup (1 linha por pessoa)**: o backfill mantém a linha `caa_ia` **mais
+   recente** por `datacrazy_lead_id` e **apaga** as demais (autorizado), evitando
+   a mesma pessoa aparecer várias vezes no painel.
+3. **Limpeza**: RGM não confirmado é deixado **em branco** (volta ao estado
+   anterior, sem marcar pessoa errada).
+Aplicada limpeza única no passivo: 8 duplicatas removidas, 8 RGM não confirmados
+limpos; 61/73 leads caa_ia com RGM verificado.
+
+**Contexto**
+Caso Livia: o painel mostrava a pessoa 4× e com RGM de outra pessoa. Diagnóstico:
+(a) o `_fetch_rgm` resolvia por **telefone**, e o telefone do lead pertencia a
+outro aluno na base acadêmica → RGM errado; (b) preencher o RGM disparava uma
+fan-out na consulta do painel → multiplicação visual. Obs.: no caso específico
+da Livia, o lead no CRM tem **nome "Livia" mas CPF e telefone do "Gustavo"**
+(RGM 48960632) — inconsistência de cadastro do lead, não do matching.
+
+**Alternativas descartadas**
+- *Reverter tudo (remover RGM)*: o usuário optou por manter, mas correto.
+- *Reverter só o código*: deixaria o passivo de RGM errado/duplicado no painel.
+- *Resolver RGM só por telefone*: causa o erro de identidade (telefone
+  compartilhado/trocado).
+
+**Impacto**
+- Ninguém recebe RGM de outra pessoa; cada pessoa aparece 1× no painel caa_ia.
+- `_resolve_rgm_verified` faz 1 GET /leads/{id} (CPF) por lead — backfill
+  limitado a 80 leads/passada, throttle 10 min.
+- Leads sem CPF confiável ficam sem RGM (como era antes), em vez de errado.
+
+---
+
 ### [2026-06-30] - RET-IA: garantir lead válido (DDI 55 → nacional) antes da tag/nota
 
 **Decisão**
