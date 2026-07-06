@@ -11548,15 +11548,26 @@ def _resolve_rgm_verified(lead_id=None, phone=None, cpf=None):
                 rgm_cpf = str(row[0]).strip()
                 fones_cpf = re.sub(r'\D', '', row[1] or '')
         rgm_phone = None
+        phone_rgm_count = 0
         if len(cp) >= 10:
-            cur.execute("""SELECT rgm FROM mm_matriculados
+            # (2026-07-06) Conta RGMs DISTINTOS do telefone: se for exatamente 1,
+            # o telefone é inequívoco e pode ser usado SEM CPF. Se >1 (telefone
+            # compartilhado, caso Livia), NÃO usa sem CPF — evita RGM de outra pessoa.
+            cur.execute("""SELECT DISTINCT rgm FROM mm_matriculados
                 WHERE (fone_cel LIKE %s OR fone_res LIKE %s OR fone_com LIKE %s)
-                  AND rgm IS NOT NULL AND rgm <> ''
-                ORDER BY (situacao = 'Matriculado') DESC, serie DESC LIMIT 1""",
+                  AND rgm IS NOT NULL AND rgm <> ''""",
                 (f'%{cp}', f'%{cp}', f'%{cp}'))
-            row = cur.fetchone()
-            if row:
-                rgm_phone = str(row[0]).strip()
+            distinct_rgms = [str(r[0]).strip() for r in cur.fetchall()]
+            phone_rgm_count = len(distinct_rgms)
+            if phone_rgm_count >= 1:
+                cur.execute("""SELECT rgm FROM mm_matriculados
+                    WHERE (fone_cel LIKE %s OR fone_res LIKE %s OR fone_com LIKE %s)
+                      AND rgm IS NOT NULL AND rgm <> ''
+                    ORDER BY (situacao = 'Matriculado') DESC, serie DESC LIMIT 1""",
+                    (f'%{cp}', f'%{cp}', f'%{cp}'))
+                row = cur.fetchone()
+                if row:
+                    rgm_phone = str(row[0]).strip()
         cur.close()
         conn.close()
 
@@ -11568,6 +11579,13 @@ def _resolve_rgm_verified(lead_id=None, phone=None, cpf=None):
             return rgm_cpf, 'cpf + telefone do registro batem'
         if rgm_cpf and not rgm_phone:
             return rgm_cpf, 'cpf (telefone sem registro academico)'
+        # (2026-07-06) Sem CPF confirmando, mas o telefone aponta p/ 1 ÚNICO RGM na
+        # base acadêmica -> inequívoco, usa. Só telefone compartilhado (>1 RGM) fica
+        # travado exigindo CPF.
+        if rgm_phone and phone_rgm_count == 1:
+            return rgm_phone, 'telefone unico (1 rgm)'
+        if rgm_phone and phone_rgm_count > 1:
+            return None, f'telefone compartilhado ({phone_rgm_count} rgms) sem cpf'
         return None, 'sem confirmacao por cpf'
     except Exception as e:
         p(f"  [RGM] erro resolvendo (verificado): {e}")

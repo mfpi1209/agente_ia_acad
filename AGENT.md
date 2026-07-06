@@ -7,6 +7,33 @@
 
 ---
 
+### [2026-07-06] - RGM: telefone único (1 RGM) preenche sem exigir CPF
+
+**Decisão**
+Ajuste no `_resolve_rgm_verified`: além das regras por CPF, passa a preencher o RGM
+quando **não há CPF confirmando, mas o telefone aponta para exatamente 1 RGM** na
+`mm_matriculados` (telefone inequívoco). Telefone compartilhado (**>1 RGM**) continua
+**travado** exigindo CPF (protege contra RGM de outra pessoa — caso Livia).
+
+**Contexto**
+A regra estrita de CPF (30/06) derrubou a cobertura de RGM no painel de ~95% para ~7%
+(6 de 88 em 7 dias), porque a maioria dos leads no DataCrazy **não tem CPF**. Medição:
+dos 89 telefones sem RGM, **66 apontavam para 1 único RGM** (seguros) e **0 eram
+compartilhados** — ou seja, a regra estrita bloqueava casos sem risco algum. O problema
+original da Livia era especificamente telefone compartilhado (2 RGMs no mesmo número).
+
+**Alternativas descartadas**
+- Manter estrito só com CPF: mantém a cobertura baixíssima (usuário reclamou).
+- Voltar ao `_fetch_rgm` (telefone puro, LIMIT 1): reintroduz o bug do telefone
+  compartilhado (Livia pegaria o RGM do Gustavo).
+
+**Impacto**
+Recupera ~66 casos atuais e os futuros, sem risco de RGM trocado (telefone
+compartilhado segue exigindo CPF). Aplicado no fill imediato e no backfill periódico.
+Backfill único executado para preencher os casos já existentes no painel dentro da regra.
+
+---
+
 ### [2026-06-30] - Criação de lead robusta também na distribuição normal
 
 **Decisão**
