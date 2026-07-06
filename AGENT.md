@@ -7,6 +7,31 @@
 
 ---
 
+### [2026-07-06] - User-Agent obrigatório nas chamadas DataCrazy (Cloudflare 403)
+
+**Decisão**
+Adicionado `User-Agent` (e `Accept`) ao header `H` usado em TODAS as chamadas ao
+DataCrazy no agente.
+
+**Contexto**
+O DataCrazy (Cloudflare) passou a responder **HTTP 403 "Attention Required"** para
+requests sem User-Agent / com o UA padrão do `python-requests`. Resultado: o agente
+ficava com `fetched=0` em todo ciclo (loop vivo, mas sem puxar conversas) e **parava
+de distribuir** — a fila subiu muito. Teste direto confirmou: **sem UA = 403, com
+qualquer UA = 200** (retornou as conversas normalmente).
+
+**Alternativas descartadas**
+- Esperar o DataCrazy "voltar": não era instabilidade transitória, e sim bloqueio por
+  falta de UA; sem o header o problema persistiria.
+- Mexer em cada chamada individual: todas já usam o `H` central, então bastou o `H`.
+
+**Impacto**
+Restaura o acesso do agente ao DataCrazy (leitura de conversas, distribuição, tags,
+notas). OBS: o cockpit (`kb_api.py`) tem chamadas DataCrazy com header próprio sem UA —
+precisa do mesmo ajuste se apresentar 403.
+
+---
+
 ### [2026-07-06] - RGM: telefone único (1 RGM) preenche sem exigir CPF
 
 **Decisão**

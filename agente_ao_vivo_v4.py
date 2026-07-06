@@ -31,7 +31,19 @@ DCZ_API = 'https://api.g1.datacrazy.io'
 DCZ_CRM = 'https://crm.g1.datacrazy.io/api/crm'
 DCZ_MSG = 'https://messaging.g1.datacrazy.io/api'
 DCZ_TOKEN = os.environ.get('DCZ_TOKEN', '')
-H = {'Authorization': f'Bearer {DCZ_TOKEN}', 'Content-Type': 'application/json'}
+# (2026-07-06) User-Agent OBRIGATORIO: o Cloudflare do DataCrazy passou a bloquear
+# (HTTP 403 "Attention Required") requests sem User-Agent / com o UA padrao do
+# python-requests. Sem este header o agente recebe 403 em TODAS as chamadas e fica
+# 'cego' (fetched=0, sem distribuir). Testado: sem UA=403, com UA=200.
+H = {
+    'Authorization': f'Bearer {DCZ_TOKEN}',
+    'Content-Type': 'application/json',
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+    ),
+    'Accept': 'application/json, text/plain, */*',
+}
 
 PIPELINE_ALUNOS_ID = '7d1b30e3-b554-4225-8523-d2d21ffc7c35'
 INSTANCE_ACADEMICO_ID = '692a13008721fc1c4000859f'
