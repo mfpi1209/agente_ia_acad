@@ -7,6 +7,119 @@
 
 ---
 
+### [2026-07-08] - Saneamento dos findings do supervisor (45k → backlog controlado)
+
+**Decisão**
+Corrigido o acúmulo descontrolado de `agent_audit_findings` (45.317 findings, só 15
+resolvidos). Quatro mudanças no supervisor + limpeza única:
+- **A) Dedup na gravação** (`_record_audit_finding`): não cria nova linha se já existe
+  finding ABERTO do mesmo `conv_id+problem_type` nas últimas 24h.
+- **B) Auto-expirar** (`_expire_old_audit_findings`, 1x/h no loop): arquiva findings
+  abertos com mais de 7 dias (`resolved_by='auto_expirado'`).
+- **C) Cooldown persistente** (tabela `supervisor_audit_seen` + `_load_audit_seen`/
+  `_persist_audit_seen`): a janela de 10min de não-reauditar sobrevive a restart.
+- **D) Normalização de severidade** na gravação (`high/medium/low → alta/media/baixa`)
+  e correção da query de idempotência (`severity IN ('alta','high')`).
+- **E) Limpeza única** (script descartável): normalizou severidade histórica e arquivou
+  (sem deletar, `resolved_by='cleanup_2026_07_08'`) todos os abertos exceto o mais
+  recente por `conv_id+problem_type`; depois auto-expirou os >7 dias.
+
+**Contexto / diagnóstico**
+Investigação no banco: 45.317 findings em 10.555 conversas (média 4,3/conv, pior caso
+46 numa só conversa re-auditada por ~39 dias). Duplicata exata era pouca (117 linhas) —
+a inflação vinha de re-auditar a MESMA conversa a cada ciclo (cooldown só em memória,
+zerava no restart) e nada nunca expirava. Severidade convivia em 2 vocabulários
+('alta' 9.722 + 'high' 4.758), quebrando contagem.
+
+**Resultado**
+Findings abertos: 45.317 → **3.867** (últimos 7 dias, deduplicados). 21.095 arquivados
+por dedup + 20.356 por expiração; 4.758 normalizados high→alta. Nada foi deletado.
+
+**Alternativas descartadas**
+- Deletar findings antigos: descartado — arquivar (resolved_at) preserva histórico/auditoria.
+- Dedup por duplicata exata (conv+tipo+summary): pegava só 117 — o problema era temporal.
+
+**Impacto**
+Backlog do supervisor passa a ser sustentável e a taxa/severidade viram sinal confiável
+de qualidade. Requer deploy p/ A–D valerem em produção.
+
+---
+
+### [2026-07-08] - Expansão da aba Desempenho: telemetria real + confiabilidade dos dados
+
+**Decisão**
+Aprovada a Fase 1 da expansão do cockpit para dar visibilidade REAL do agente:
+1. **Item 0 — Instrumentação**: novas colunas em `ia_interaction_log` (`t_total_ms`,
+   `t_espera_ms`, `t_rag_ms`, `t_llm_ms`, `tokens_in`, `tokens_out`, `custo_usd`, `model`)
+   gravadas pelo agente no caminho principal de resposta. Custo calculado com preço real
+   do gpt-4o-mini (input $0.15/1M, output $0.60/1M).
+2. **Item 6 — Avaliação**: unificado o vocabulário do campo `interaction_summary.avaliacao`
+   para `correta`/`incorreta` (migra `aprovada→correta`, `reprovada→incorreta`).
+3. **Item 5 — Limpar lixo**: agente deixa de tabular conversas só de saudação (pergunta e
+   resposta vazias); listagens filtram linhas sem resposta.
+4. **Item 4 — Qualidade confiável**: novo agregado de `agent_audit_findings` (findings do
+   supervisor OpenAI por severidade + taxa de problema) como sinal de qualidade objetivo.
+5. **Repensar aba "Agente IA"**: sentimento (IA) e ✓/✗ manual saem de KPI — sentimento vira
+   contexto rotulado "estimado por IA"; qualidade passa a ser os findings do supervisor.
+6. **Regra transversal de UX**: toda métrica não-100%-confiável ou estimada exibe aviso
+   ("estimativa"/"aproximado") no cockpit.
+
+**Contexto**
+Auditoria dos dados existentes revelou que: sentimento é classificado por gpt-4o-mini com
+default `neutro` (por isso "quase tudo neutro"); a "taxa de acerto" depende de rótulo manual
+(NULL por padrão) sobre uma lista poluída por saudações/linhas sem resposta; e o custo/token
+do Dashboard vinha de `chat_evaluations` (só Playground/testes manuais), não da produção —
+número enganoso. Faltava o essencial e confiável: tempo real de resposta e custo real.
+
+**Alternativas descartadas**
+- Melhorar o classificador de sentimento para virar KPI: continua sendo estimativa subjetiva.
+- Manter dois vocabulários de `avaliacao` (aprovada/reprovada vs correta/incorreta): é bug,
+  contava taxa de acerto errado conforme a aba de origem.
+- Duplicar custo/token em Dashboard e Desempenho: cada métrica tem fonte única; custo real
+  (Item 0) vira dono, remove-se a fonte de Playground.
+
+**Impacto**
+Cockpit passa a separar sinal objetivo (tempo/custo/findings) de sinal estimado (sentimento).
+Item 0 só acumula a partir do deploy → visualizações de tempo/custo entram na Fase 2, após
+dados existirem. Colunas nullable e migração de dados idempotente = baixo risco.
+
+---
+
+### [2026-07-06] - Framework de avaliação de desempenho (Fase 0) + descoberta de método
+
+**Decisão**
+Criado `avaliacao_desempenho.py`: relatório-baseline que compara a era ANTIGA (bot de
+menu/saudação) vs a ERA DO AGENTE (IA), a partir de `log_conversa`, `ia_interaction_log`
+e `disparos`. Métrica-âncora = **tempo até um HUMANO real responder** (não "tempo até
+1ª resposta"). Corte de produção configurável via `AGENT_PROD_CUTOFF` (default 2026-05-20).
+
+**Contexto / descoberta**
+A comparação ingênua de "tempo até 1ª resposta" dava resultado invertido (era antiga
+"mais rápida"). Investigando o conteúdo, descobriu-se que a **era antiga NÃO era manual**:
+tinha um bot de menu/saudação (DataCrazy) que respondia em ~4s ("Bem vindo ao Suporte",
+"Veja as opções"). A conta compartilhada `Suporte`/`Administrador` = automação nas DUAS
+eras; humano = atendente com nome próprio. Logo, a métrica justa é "tempo até humano".
+
+**Resultado do baseline (jul/2026)**
+- Tempo mediano até humano: ANTIGA 15,6min → AGENTE 8,0min (~metade).
+- Cauda p90 até humano: ANTIGA 14,6h → AGENTE 1,8h (jun/jul chegou a ~1h) — maior ganho.
+- % de conversas que chegam a um humano subiu (88-91% → 95-98% em jun/jul).
+- IA resolve sozinha ~7,6% (baixo → oportunidade de FAQ/base). IA envia 33-47% das msgs.
+- Mix de ação: 56% follow-up/auto-close, 22% menu, 8% escala, 5% resolve, 0,6% retenção.
+- Disparos: 67k enviados, 7,2% de resposta; `activation_manual_outcomes` quase vazia
+  (só 76 desfechos) → rastreio de resultado de retenção é um gap.
+
+**Alternativas descartadas**
+- "Tempo até 1ª resposta" cru: enganava por causa do auto-greeting da era antiga.
+- Atribuir IA via `agent_sent_signatures` por timestamp: descartado por risco de timezone;
+  o nome do atendente em `log_conversa` já separa automação de humano de forma limpa.
+
+**Impacto**
+Base numérica confiável para acompanhar o agente e priorizar melhorias. Próximas fases
+(a aprovar): views + job diário de métricas materializadas e aba no cockpit.
+
+---
+
 ### [2026-07-06] - User-Agent obrigatório nas chamadas DataCrazy (Cloudflare 403)
 
 **Decisão**

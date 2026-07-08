@@ -1261,6 +1261,10 @@ MORNING_DISPATCH_BATCH_SIZE = 25
 MORNING_DISPATCH_RETRY_BATCH = 5
 MORNING_DISPATCH_RETRY_COOLDOWN_S = 600
 _last_pending_dispatch_ts = 0
+_last_pending_expire_ts = 0
+# Registros presos em pending/in_progress por mais de N dias sao arquivados
+# (closed_no_engagement) para nao inflar o contador "Em atendimento" do Cockpit.
+PENDING_ESCALATION_STALE_DAYS = int(os.environ.get('PENDING_ESCALATION_STALE_DAYS', '7'))
 
 # Templates de mensagens fora do horário
 AFTER_HOURS_FIRST_MSG = (
@@ -3199,6 +3203,13 @@ def tabulate_interaction(messages, profile, phone, conv_id=''):
                 pergunta_aluno = txt
                 break
 
+    # (2026-07-08, Item 5) Nao tabular linha-lixo: se sobrou nem pergunta real do
+    # aluno nem resposta real do bot (conversa so de saudacao/mensagens genericas),
+    # a linha so polui sentimento e "taxa de acerto" no cockpit -> pula.
+    if not pergunta_aluno.strip() and not resposta_agente.strip():
+        p("    Tabulacao pulada: sem pergunta/resposta relevante (so saudacao)")
+        return
+
     relevant = [m for m in messages if not (
         (m.get('role') == 'user' and _is_skip_user(m.get('text', ''))) or
         (m.get('role') == 'bot' and _is_skip_bot(m.get('text', '')))
@@ -3628,6 +3639,20 @@ def build_sentiment_context(sentiment, memory):
 
 # ===================== RAG + LLM =====================
 
+# ===================== TELEMETRIA (2026-07-08, Item 0) =====================
+# Scratch por resposta: o loop do agente processa UMA msg por vez (sequencial),
+# entao um dict de modulo basta. Preenchido ao longo do pipeline (espera CRM,
+# RAG, LLM) e lido no log_to_db(with_metrics=True) do caminho de resposta.
+_resp_metrics = {}
+
+def _reset_resp_metrics():
+    _resp_metrics.clear()
+
+def _calc_custo_usd(tokens_in, tokens_out):
+    # gpt-4o-mini: input $0.15 / 1M tokens, output $0.60 / 1M tokens.
+    return round((tokens_in or 0) * 0.15 / 1e6 + (tokens_out or 0) * 0.60 / 1e6, 6)
+
+
 def rag_search(question):
     client = OpenAI(api_key=OPENAI_API_KEY)
     conn = get_db()
@@ -3653,6 +3678,11 @@ def rag_search(question):
 
     if results:
         p(f"    Embedding: {t_emb*1000:.0f}ms | RAG: {t_rag*1000:.0f}ms | Top: {results[0][5]:.3f}")
+
+    try:
+        _resp_metrics['t_rag_ms'] = int((t_emb + t_rag) * 1000)
+    except Exception:
+        pass
 
     cur.close()
     conn.close()
@@ -3813,6 +3843,16 @@ def call_llm(question, references, history, profile, memory, sentiment, is_first
     resp_text = chat.choices[0].message.content
     t_llm = time.time() - t0
     p(f"    LLM{'(vision)' if image_b64 else ''}: {t_llm*1000:.0f}ms")
+
+    try:
+        _resp_metrics['t_llm_ms'] = int(t_llm * 1000)
+        _u = getattr(chat, 'usage', None)
+        if _u is not None:
+            _resp_metrics['tokens_in'] = getattr(_u, 'prompt_tokens', None)
+            _resp_metrics['tokens_out'] = getattr(_u, 'completion_tokens', None)
+        _resp_metrics['model'] = 'gpt-4o-mini'
+    except Exception:
+        pass
 
     cm = re.search(r'\[CONFIANCA:(\d+\.?\d*)\]', resp_text)
     confidence = float(cm.group(1)) if cm else 0.3
@@ -4421,15 +4461,32 @@ def send_and_track(conv_id, text, buttons=None, force=False):
             lock.release()
 
 
-def log_to_db(conv_id, question, response, confidence, action):
+def log_to_db(conv_id, question, response, confidence, action, with_metrics=False):
     try:
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO ia_interaction_log
-            (conversation_id, pergunta_recebida, resposta_gerada, confianca, acao)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (conv_id, question[:2000], response[:2000], confidence, action[:50]))
+        # (2026-07-08, Item 0) with_metrics=True só no caminho de resposta que
+        # passou pelo LLM (auto_reply / escalate_low_conf) — grava tempo/custo reais.
+        if with_metrics and _resp_metrics:
+            m = _resp_metrics
+            ti = m.get('tokens_in'); to = m.get('tokens_out')
+            custo = _calc_custo_usd(ti, to) if (ti or to) else None
+            ps = m.get('proc_start')
+            t_total = int((time.time() - ps) * 1000) if ps else None
+            cur.execute("""
+                INSERT INTO ia_interaction_log
+                (conversation_id, pergunta_recebida, resposta_gerada, confianca, acao,
+                 t_total_ms, t_espera_ms, t_rag_ms, t_llm_ms, tokens_in, tokens_out, custo_usd, model)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (conv_id, question[:2000], response[:2000], confidence, action[:50],
+                  t_total, m.get('t_espera_ms'), m.get('t_rag_ms'), m.get('t_llm_ms'),
+                  ti, to, custo, m.get('model')))
+        else:
+            cur.execute("""
+                INSERT INTO ia_interaction_log
+                (conversation_id, pergunta_recebida, resposta_gerada, confianca, acao)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (conv_id, question[:2000], response[:2000], confidence, action[:50]))
         conn.commit()
         cur.close()
         conn.close()
@@ -5844,6 +5901,40 @@ def record_pending_escalation(conv_id, reason, tier='insist', retorno_label=None
         p(f"  [AFTER-HOURS] Erro ao registrar fila: {e_pe}")
 
 
+def expire_stale_pending_escalation(days=None):
+    """Arquiva registros da fila 'Fora do Horário' presos em pending/in_progress
+    por mais de `days` dias, marcando-os como closed_no_engagement.
+
+    Roda no máximo 1x/hora (throttle por _last_pending_expire_ts). É o análogo,
+    para a fila, do _expire_old_audit_findings do supervisor: impede que a fila
+    reencha indefinidamente (a distribuição das 9h marca in_progress e nada
+    sempre marca resolved). NÃO deleta nada — apenas arquiva, reversível.
+    """
+    global _last_pending_expire_ts
+    now_ts = time.time()
+    if now_ts - _last_pending_expire_ts < 3600:
+        return
+    _last_pending_expire_ts = now_ts
+    d = days if days is not None else PENDING_ESCALATION_STALE_DAYS
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute(f"""
+            UPDATE pending_escalation
+            SET status='closed_no_engagement', resolved_at=NOW(), updated_at=NOW()
+            WHERE status IN ('pending', 'in_progress')
+              AND created_at < NOW() - INTERVAL '{int(d)} days'
+        """)
+        n = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        if n:
+            p(f"  [FILA] auto-expira: {n} registros presos > {d}d arquivados (closed_no_engagement)")
+    except Exception as e_exp:
+        p(f"  [FILA] erro auto-expira: {e_exp}")
+
+
 def update_pending_escalation_status(conv_id, status, note=''):
     """Atualiza status da fila Cockpit (pending / in_progress / resolved /
     closed_no_engagement / failed).
@@ -6005,6 +6096,10 @@ def process_pending_escalation_auto_dispatch():
     - Depois: retentativas a cada MORNING_DISPATCH_RETRY_COOLDOWN_S com lote menor
     """
     global student_profile, _current_phone, _last_pending_dispatch_ts
+
+    # Manutenção contínua: arquiva registros presos há muito tempo (1x/h).
+    # Roda independente do horário/flag de dispatch para a fila não inflar.
+    expire_stale_pending_escalation()
 
     if not AUTO_DISPATCH_MORNING_QUEUE:
         return
@@ -9110,6 +9205,18 @@ def _ensure_audit_table():
             CREATE INDEX IF NOT EXISTS idx_audit_severity_created
             ON agent_audit_findings (severity, created_at DESC)
         """)
+        # (2026-07-08, A/B) coluna de resolucao (idempotente) + indice p/ dedup rapido
+        cur.execute("""ALTER TABLE agent_audit_findings
+            ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP,
+            ADD COLUMN IF NOT EXISTS resolved_by VARCHAR(64)""")
+        cur.execute("""CREATE INDEX IF NOT EXISTS idx_audit_dedup
+            ON agent_audit_findings (conv_id, problem_type, created_at DESC)
+            WHERE resolved_at IS NULL""")
+        # (2026-07-08, C) cooldown de auditoria PERSISTENTE (sobrevive a restart)
+        cur.execute("""CREATE TABLE IF NOT EXISTS supervisor_audit_seen (
+                conv_id VARCHAR(64) PRIMARY KEY,
+                audited_at TIMESTAMP DEFAULT NOW()
+            )""")
         conn.commit()
         cur.close()
         conn.close()
@@ -9117,12 +9224,98 @@ def _ensure_audit_table():
         p(f"  [AUDIT] tabela indisponivel: {e}")
 
 
-def _record_audit_finding(conv_id, severity, problem_type, summary, detail=None,
-                          action_taken='', phone='', model=''):
-    _ensure_audit_table()
+_last_audit_expire_ts = 0
+def _expire_old_audit_findings(days=7):
+    """(2026-07-08, B) Auto-arquiva findings ABERTOS com mais de `days` dias.
+    Mantem o backlog limitado — sem isso a tabela cresce pra sempre (so 15 de
+    45k estavam resolvidos). Roda no maximo 1x/hora."""
+    global _last_audit_expire_ts
+    now = time.time()
+    if now - _last_audit_expire_ts < 3600:
+        return
+    _last_audit_expire_ts = now
     try:
         conn = get_db()
         cur = conn.cursor()
+        cur.execute("""UPDATE agent_audit_findings
+            SET resolved_at = NOW(), resolved_by = 'auto_expirado'
+            WHERE resolved_at IS NULL
+              AND created_at < NOW() - make_interval(days => %s)""", (days,))
+        n = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        if n:
+            p(f"  [AUDIT] auto-expirados {n} findings antigos (>{days}d)")
+    except Exception as e:
+        p(f"  [AUDIT] erro auto-expire: {e}")
+
+
+_audit_seen_loaded = False
+def _load_audit_seen():
+    """(2026-07-08, C) Semeia o cooldown em memoria a partir do banco (ultimos
+    30min) uma vez por processo, p/ um restart nao re-auditar tudo de novo."""
+    global _audit_seen_loaded
+    if _audit_seen_loaded:
+        return
+    _audit_seen_loaded = True
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""SELECT conv_id, extract(epoch from audited_at)
+            FROM supervisor_audit_seen
+            WHERE audited_at > NOW() - INTERVAL '30 minutes'""")
+        for cid, ts in cur.fetchall():
+            _openai_supervisor_audited[cid] = float(ts)
+        cur.close()
+        conn.close()
+    except Exception as e:
+        p(f"  [AUDIT] erro load_audit_seen: {e}")
+
+
+def _persist_audit_seen(conv_id):
+    """(2026-07-08, C) Registra que a conv foi auditada agora (cooldown durável)."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""INSERT INTO supervisor_audit_seen (conv_id, audited_at)
+            VALUES (%s, NOW())
+            ON CONFLICT (conv_id) DO UPDATE SET audited_at = NOW()""", (conv_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _record_audit_finding(conv_id, severity, problem_type, summary, detail=None,
+                          action_taken='', phone='', model=''):
+    _ensure_audit_table()
+    # (2026-07-08, D) Normaliza severidade: o checador de assignment gravava em
+    # ingles (high/medium/low) e o supervisor OpenAI em pt (alta/media/baixa).
+    # Unifica para pt-br p/ contagem e dedup consistentes.
+    severity = {'high': 'alta', 'medium': 'media', 'low': 'baixa'}.get(
+        (severity or '').lower(), (severity or 'baixa').lower())
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        # (2026-07-08, A) DEDUP: nao cria nova linha se ja existe finding ABERTO do
+        # mesmo conv_id+problem_type nas ultimas 24h. Era a causa dos 45k findings —
+        # a mesma conversa era re-flagrada a cada ciclo por dias. Best-effort: se a
+        # coluna resolved_at ainda nao existir, cai no insert normal.
+        try:
+            cur.execute("""SELECT 1 FROM agent_audit_findings
+                WHERE conv_id=%s AND problem_type=%s AND resolved_at IS NULL
+                  AND created_at > NOW() - INTERVAL '24 hours' LIMIT 1""",
+                (conv_id, problem_type or ''))
+            if cur.fetchone():
+                cur.close(); conn.close()
+                return
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         cur.execute("""
             INSERT INTO agent_audit_findings
             (conv_id, phone, model, severity, problem_type, summary, detail, action_taken)
@@ -9911,6 +10104,8 @@ def process_openai_supervisor_loop():
     _last_openai_supervisor_ts = now_ts
 
     _ensure_audit_table()
+    _expire_old_audit_findings()   # (B) arquiva findings antigos abertos (1x/h)
+    _load_audit_seen()             # (C) semeia cooldown do banco (1x/processo)
 
     # Antes de auditar novas convs, re-verifica findings recentes de
     # assignment_mismatch — se o estado do DCZ ja propagou e ficou
@@ -9986,6 +10181,7 @@ def process_openai_supervisor_loop():
             continue
         audited += 1
         _openai_supervisor_audited[cid] = now_ts
+        _persist_audit_seen(cid)   # (C) cooldown durável entre restarts
         if not result.get('tem_problema'):
             continue
         cycle_problems += 1
@@ -10037,7 +10233,7 @@ def process_openai_supervisor_loop():
                     SELECT 1
                       FROM agent_audit_findings
                      WHERE conv_id = %s
-                       AND severity = 'high'
+                       AND severity IN ('alta', 'high')
                        AND action_taken IN ('agent_silenced', 'distributed')
                        AND created_at > NOW() - INTERVAL '6 hours'
                      LIMIT 1
@@ -10855,6 +11051,44 @@ def _supabase_increment_fila(consultant_id, current_fila):
         return False
 
 
+def _read_chat_attendant_ids(conv_id):
+    """(2026-07-08) Retorna a LISTA de ids de atendente de uma conversa DCZ.
+
+    BUG HISTORICO (causa dos ~660 falsos positivos 'assignment_mismatch'):
+    a API /messaging/conversations/{id} NAO expoe um campo 'attendant'
+    (singular). O atendente vem em `attendants` (lista) e em
+    `currentThread.attendants` (lista). O codigo antigo lia cd.get('attendant')
+    -> sempre '' -> chat_ok=False -> finding indevido, mesmo com o humano
+    corretamente atribuido. Aqui lemos as listas certas.
+    """
+    if not conv_id:
+        return []
+    try:
+        r = requests.get(f'{DCZ_MSG}/messaging/conversations/{conv_id}',
+                         headers=H, timeout=10)
+        if r.status_code != 200:
+            return []
+        cd = r.json()
+        ids = []
+        for a in (cd.get('attendants') or []):
+            if isinstance(a, dict) and a.get('id'):
+                ids.append(a['id'])
+        ct = cd.get('currentThread') or {}
+        for a in (ct.get('attendants') or []):
+            if isinstance(a, dict) and a.get('id') and a['id'] not in ids:
+                ids.append(a['id'])
+        # fallbacks legados (caso a API mude)
+        att = cd.get('attendant')
+        if isinstance(att, dict) and att.get('id') and att['id'] not in ids:
+            ids.append(att['id'])
+        aid = cd.get('attendantId')
+        if aid and aid not in ids:
+            ids.append(aid)
+        return ids
+    except Exception:
+        return []
+
+
 def _enforce_assignment_consistency(conv_id, lead_id, phone, expected_name,
                                     max_retries=4):
     """Verifica e força que o atendente do lead+business+chat seja realmente
@@ -10963,20 +11197,13 @@ def _enforce_assignment_consistency(conv_id, lead_id, phone, expected_name,
             return ''
 
     def _read_chat_att():
-        if not conv_id:
-            return ''
-        try:
-            r = requests.get(f'{DCZ_MSG}/messaging/conversations/{conv_id}',
-                             headers=H, timeout=10)
-            if r.status_code != 200:
-                return ''
-            cd = r.json()
-            att = cd.get('attendant') or {}
-            if isinstance(att, dict):
-                return att.get('id', '')
-            return cd.get('attendantId', '') or ''
-        except Exception:
-            return ''
+        # (2026-07-08) le a LISTA attendants[] (ver _read_chat_attendant_ids).
+        # Retorna o expected_chat_id se ele estiver entre os atendentes do chat
+        # (=atribuido corretamente); senao o 1o id encontrado (p/ diagnostico).
+        ids = _read_chat_attendant_ids(conv_id)
+        if expected_chat_id and expected_chat_id in ids:
+            return expected_chat_id
+        return ids[0] if ids else ''
 
     # ---- ciclo de verificação + retry ----
     for attempt in range(max_retries + 1):
@@ -12629,6 +12856,10 @@ def _wait_automation_finish(conv_id, max_wait=30, stable_time=5):
         elif time.time() - stable_since >= stable_time:
             break
         time.sleep(2)
+    try:
+        _resp_metrics['t_espera_ms'] = int((time.time() - start) * 1000)
+    except Exception:
+        pass
     p(f"    Automação estável após {time.time() - start:.0f}s ({prev_count} msgs saída)")
 
 
@@ -13468,6 +13699,8 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
     global followup_stage, waiting_for_client, inactivity_start, _last_auto_skipped
     global _awaiting_cpf, _student_in_base, _awaiting_polo_confirm
     processed_msg_ids.add(msg_id)
+    _reset_resp_metrics()
+    _resp_metrics['proc_start'] = time.time()
     followup_stage = 0
     waiting_for_client = False
     inactivity_start = 0
@@ -15038,7 +15271,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         )
         send_and_track(conv_id, _low_conf_msg, force=True)
         conversation_messages.append({'role': 'bot', 'text': _low_conf_msg})
-        log_to_db(conv_id, question, _low_conf_msg, confidence, 'escalate_low_conf')
+        log_to_db(conv_id, question, _low_conf_msg, confidence, 'escalate_low_conf', with_metrics=True)
         try:
             distribute_to_attendant(conv_id, f'Baixa confianca da IA ({confidence:.2f})')
         except Exception as e_lc:
@@ -15095,7 +15328,7 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
         p(f"  Resposta é pergunta/pede mais info (conf={confidence:.2f}) -> sem follow-up 'ficou alguma dúvida'")
 
     conversation_messages.append({'role': 'bot', 'text': clean})
-    log_to_db(conv_id, question, clean, confidence, 'auto_reply')
+    log_to_db(conv_id, question, clean, confidence, 'auto_reply', with_metrics=True)
 
     cur_phone = _current_phone or PHONE_TO_MONITOR
     try:

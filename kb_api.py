@@ -434,6 +434,26 @@ def run_migrations():
         ("interaction_summary_conv_id", """DO $$ BEGIN
             ALTER TABLE interaction_summary ADD COLUMN conv_id VARCHAR(50);
             EXCEPTION WHEN duplicate_column THEN NULL; END $$"""),
+        # (2026-07-08) Item 0 — telemetria real de tempo/custo por resposta do agente.
+        # Colunas nullable: chamadas antigas de log_to_db gravam NULL sem quebrar.
+        ("ia_log_telemetry", """ALTER TABLE ia_interaction_log
+            ADD COLUMN IF NOT EXISTS t_total_ms INT,
+            ADD COLUMN IF NOT EXISTS t_espera_ms INT,
+            ADD COLUMN IF NOT EXISTS t_rag_ms INT,
+            ADD COLUMN IF NOT EXISTS t_llm_ms INT,
+            ADD COLUMN IF NOT EXISTS tokens_in INT,
+            ADD COLUMN IF NOT EXISTS tokens_out INT,
+            ADD COLUMN IF NOT EXISTS custo_usd NUMERIC(10,6),
+            ADD COLUMN IF NOT EXISTS model TEXT"""),
+        # (2026-07-08) Item 6 — unifica vocabulario de interaction_summary.avaliacao.
+        # Antes convivia 'aprovada'/'reprovada' (rota /api/conversations) com
+        # 'correta'/'incorreta' (aba Agente IA), contando taxa de acerto errado.
+        ("avaliacao_unify", """UPDATE interaction_summary
+            SET avaliacao = CASE
+                WHEN avaliacao='aprovada'  THEN 'correta'
+                WHEN avaliacao='reprovada' THEN 'incorreta'
+                ELSE avaliacao END
+            WHERE avaliacao IN ('aprovada','reprovada')"""),
     ]
 
     for name, sql in ddl_statements:
@@ -735,6 +755,58 @@ async def get_stats():
             'interactions_by_action': [], 'avg_confidence': 0,
             'error': str(e)
         }
+
+
+_PULSE_CACHE = {}
+
+
+@app.get("/api/dashboard/pulse")
+async def dashboard_pulse():
+    """(2026-07-08) Pulso operacional p/ dar 'vida' ao Dashboard: atividade de hoje,
+    7 dias, taxa de automacao e tendencia de 14 dias. Cache curto (60s)."""
+    cached = _PULSE_CACHE.get('p')
+    if cached and cached[1] > time.time():
+        return cached[0]
+    out = {'hoje': 0, 'ontem': 0, 'd7': 0, 'taxa_automacao': None, 'sparkline': [],
+           'custo_7d': None, 'tokens_7d': None, 'respostas_com_custo_7d': 0}
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT count(*) FROM ia_interaction_log WHERE created_at::date = current_date")
+            out['hoje'] = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM ia_interaction_log WHERE created_at::date = current_date - 1")
+            out['ontem'] = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM ia_interaction_log WHERE created_at > now() - interval '7 days'")
+            out['d7'] = cur.fetchone()[0]
+            cur.execute("""SELECT
+                    count(*) FILTER (WHERE acao LIKE 'escalate%' OR acao LIKE '%transfer') esc,
+                    count(*) tot
+                FROM ia_interaction_log WHERE created_at > now() - interval '7 days'""")
+            esc, tot = cur.fetchone()
+            if tot:
+                out['taxa_automacao'] = round(100.0 * (tot - (esc or 0)) / tot, 1)
+            cur.execute("""SELECT to_char(created_at::date,'DD/MM') d, count(*) n
+                           FROM ia_interaction_log WHERE created_at > now() - interval '14 days'
+                           GROUP BY created_at::date ORDER BY created_at::date""")
+            out['sparkline'] = [{'d': r[0], 'n': r[1]} for r in cur.fetchall()]
+            # (2026-07-08) CUSTO REAL de producao (Item 0). So existe apos o deploy do
+            # agente instrumentado. Best-effort: se as colunas ainda nao existem, ignora.
+            try:
+                cur.execute("""SELECT
+                        coalesce(sum(custo_usd),0),
+                        coalesce(sum(coalesce(tokens_in,0)+coalesce(tokens_out,0)),0),
+                        count(*) FILTER (WHERE custo_usd IS NOT NULL)
+                    FROM ia_interaction_log WHERE created_at > now() - interval '7 days'""")
+                c7, t7, n7 = cur.fetchone()
+                out['custo_7d'] = float(c7 or 0)
+                out['tokens_7d'] = int(t7 or 0)
+                out['respostas_com_custo_7d'] = int(n7 or 0)
+            except Exception:
+                conn.rollback()
+    except Exception as e:
+        out['error'] = str(e)
+    _PULSE_CACHE['p'] = (out, time.time() + 60)
+    return out
 
 
 @app.get("/api/temas")
@@ -2349,6 +2421,7 @@ async def after_hours_pending(
     status: str = Query('pending'),
     tier: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
 ):
     """Lista fila de retornos fora do horário."""
     allowed_status = {'pending', 'in_progress', 'resolved', 'closed_no_engagement', 'all', 'active'}
@@ -2372,6 +2445,8 @@ async def after_hours_pending(
             where.append("tier = %s")
             params.append(tier)
         w = " AND ".join(where)
+        cur.execute(f"SELECT COUNT(*) AS n FROM pending_escalation WHERE {w}", params)
+        total = cur.fetchone()['n']
         cur.execute(f"""
             SELECT id, conv_id, phone, student_name, reason, tier, retorno_label,
                    pergunta, status, created_at, updated_at, resolved_at
@@ -2380,8 +2455,8 @@ async def after_hours_pending(
             ORDER BY
               CASE tier WHEN 'insist' THEN 0 WHEN 'first' THEN 1 ELSE 2 END,
               created_at DESC
-            LIMIT %s
-        """, params + [limit])
+            LIMIT %s OFFSET %s
+        """, params + [limit, offset])
         rows = []
         for r in cur.fetchall():
             item = dict(r)
@@ -2403,6 +2478,9 @@ async def after_hours_pending(
             'items': rows,
             'counts': counts,
             'priority_pending': priority,
+            'total': total,
+            'limit': limit,
+            'offset': offset,
         }
 
 
@@ -3529,6 +3607,275 @@ def _ensure_academic_calendar_table_local(cur):
     )
 
 
+# ==================== DESEMPENHO (IA vs manual) ====================
+# (2026-07-07) Aba Desempenho do cockpit. Metrica-ancora: TEMPO ATE UM HUMANO
+# REAL responder (automacao — bot antigo ou IA — posta como 'Suporte'/'Administrador';
+# humano = nome proprio). Corte de producao plena do agente = 2026-05-20.
+_DESEMPENHO_CACHE = {}
+_DESEMP_CUTOFF = '2026-05-20'
+_DESEMP_HIST = '2025-11-01'
+_NOT_HUMAN = "('Suporte','Administrador')"
+
+
+def _pctile(vals, q):
+    if not vals:
+        return None
+    s = sorted(vals)
+    if len(s) == 1:
+        return s[0]
+    k = (len(s) - 1) * q
+    f = int(k)
+    return s[f] + (s[f + 1] - s[f]) * (k - f) if f + 1 < len(s) else s[f]
+
+
+@app.get("/api/desempenho")
+async def desempenho():
+    """Metricas de desempenho: manual (era antiga) vs agente (IA)."""
+    from datetime import datetime as _dt
+    cached = _DESEMPENHO_CACHE.get('d')
+    if cached and cached[1] > time.time():
+        return cached[0]
+
+    out = {'cutoff': _DESEMP_CUTOFF, 'gerado_em': _dt.now().isoformat()}
+    with get_db() as conn:
+        cur = conn.cursor()
+
+        # ---- tempo ate humano: por conversa (ym, era, gap) + totais por mes ----
+        cur.execute(f"""
+            WITH firsts AS (
+              SELECT conversation_id, MIN(message_at) fc FROM log_conversa
+              WHERE message_at >= %s AND sender_type='CLIENTE' GROUP BY conversation_id
+            ),
+            fh AS (
+              SELECT DISTINCT ON (l.conversation_id) f.fc, l.message_at ha
+              FROM firsts f JOIN log_conversa l ON l.conversation_id=f.conversation_id
+               AND l.sender_type='SUPORTE' AND l.message_at > f.fc
+               AND COALESCE(NULLIF(TRIM(l.atendente_nome),''),'Suporte') NOT IN {_NOT_HUMAN}
+              ORDER BY l.conversation_id, l.message_at
+            )
+            SELECT to_char(fc,'YYYY-MM') ym, (fc >= %s) era_ag,
+                   EXTRACT(EPOCH FROM (ha-fc)) gap FROM fh
+        """, (_DESEMP_HIST, _DESEMP_CUTOFF))
+        by_month = {}
+        eras = {'ANTIGA': [], 'AGENTE': []}
+        for ym, era_ag, gap in cur.fetchall():
+            if gap is None or gap < 0:
+                continue
+            g = float(gap)
+            by_month.setdefault(ym, []).append(g)
+            eras['AGENTE' if era_ag else 'ANTIGA'].append(g)
+
+        cur.execute(f"""
+            WITH firsts AS (
+              SELECT conversation_id, MIN(message_at) fc FROM log_conversa
+              WHERE message_at >= %s AND sender_type='CLIENTE' GROUP BY conversation_id
+            )
+            SELECT to_char(fc,'YYYY-MM') ym, count(*) FROM firsts WHERE fc IS NOT NULL GROUP BY 1
+        """, (_DESEMP_HIST,))
+        tot_month = {ym: n for ym, n in cur.fetchall()}
+
+        def resumo(vals, total=None):
+            n = len(vals)
+            return {
+                'convs_total': total, 'chegou_humano': n,
+                'pct_humano': round(100.0 * n / total, 1) if total else None,
+                'mediana_s': round(_pctile(vals, 0.5)) if vals else None,
+                'p90_s': round(_pctile(vals, 0.9)) if vals else None,
+                'pct_5min': round(100.0 * sum(1 for v in vals if v <= 300) / n, 1) if n else None,
+            }
+
+        out['tempo_humano_mensal'] = [
+            dict(mes=ym, **resumo(by_month.get(ym, []), tot_month.get(ym, 0)))
+            for ym in sorted(tot_month)
+        ]
+        out['eras'] = {k.lower(): resumo(v) for k, v in eras.items()}
+
+        # ---- autonomia da IA (era agente) ----
+        cur.execute(f"""
+            WITH conv AS (
+              SELECT conversation_id,
+                bool_or(sender_type='SUPORTE' AND COALESCE(NULLIF(TRIM(atendente_nome),''),'Suporte') IN {_NOT_HUMAN}) teve_ia,
+                bool_or(sender_type='SUPORTE' AND COALESCE(NULLIF(TRIM(atendente_nome),''),'Suporte') NOT IN {_NOT_HUMAN}) teve_hum,
+                MIN(message_at) ini
+              FROM log_conversa WHERE message_at >= %s GROUP BY conversation_id
+            )
+            SELECT count(*) FILTER (WHERE teve_ia),
+                   count(*) FILTER (WHERE teve_ia AND NOT teve_hum),
+                   count(*) FILTER (WHERE teve_ia AND teve_hum)
+            FROM conv WHERE ini >= %s
+        """, (_DESEMP_HIST, _DESEMP_CUTOFF))
+        tia, soia, iah = cur.fetchone()
+        out['autonomia'] = {
+            'ia_total': tia or 0, 'so_ia': soia or 0, 'com_humano': iah or 0,
+            'pct_so_ia': round(100.0 * (soia or 0) / tia, 1) if tia else 0,
+        }
+
+        # ---- volume IA vs humano por mes ----
+        cur.execute(f"""
+            SELECT to_char(message_at,'YYYY-MM') ym,
+              sum((COALESCE(NULLIF(TRIM(atendente_nome),''),'Suporte') IN {_NOT_HUMAN})::int) ia,
+              sum((COALESCE(NULLIF(TRIM(atendente_nome),''),'Suporte') NOT IN {_NOT_HUMAN})::int) hum
+            FROM log_conversa WHERE sender_type='SUPORTE' AND message_at >= %s
+            GROUP BY 1 ORDER BY 1
+        """, (_DESEMP_CUTOFF,))
+        out['volume_mensal'] = [
+            {'mes': ym, 'ia': ia or 0, 'humano': hum or 0,
+             'pct_ia': round(100.0 * (ia or 0) / ((ia or 0) + (hum or 0)), 1) if ((ia or 0) + (hum or 0)) else 0}
+            for ym, ia, hum in cur.fetchall()
+        ]
+
+        # ---- mix de acoes (ult 30d) ----
+        cur.execute("""
+            SELECT
+              sum((acao LIKE 'escalate%' OR acao LIKE '%transfer')::int) escala,
+              sum((acao IN ('resolved','auto_reply','payment_confirmed','confirmacao_resolucao',
+                    'closing','despedida','semestre_resolved','inicio_aulas_resolved','esqueci_senha_canonical'))::int) resolveu,
+              sum((acao LIKE 'menu%' OR acao='greeting' OR acao='after_hours_first')::int) navegacao,
+              sum((acao LIKE 'followup%' OR acao='greeting_repeat' OR acao='auto_close')::int) followup,
+              sum((acao LIKE 'retention%' OR acao='retention')::int) retencao,
+              count(*) tot
+            FROM ia_interaction_log WHERE created_at > now()-interval '30 days'
+        """)
+        esc, res, nav, fup, ret, tot = cur.fetchone()
+        out['mix_acoes'] = {'resolveu': res or 0, 'escalou': esc or 0, 'navegacao': nav or 0,
+                            'followup': fup or 0, 'retencao': ret or 0, 'total': tot or 0}
+
+        # ---- latencia distribuicao e tag de retencao, por semana (normal x resgate) ----
+        def latencia(tbl, tcol, filtro):
+            cur.execute(f"""
+                WITH h AS (SELECT conv_id, {tcol} ev FROM {tbl} WHERE {filtro}),
+                lat AS (
+                  SELECT date_trunc('week', h.ev) wk, EXTRACT(EPOCH FROM (h.ev - lc.last_cli)) g
+                  FROM h JOIN LATERAL (
+                     SELECT max(message_at) AT TIME ZONE 'UTC' last_cli FROM log_conversa l
+                     WHERE l.conversation_id=h.conv_id AND l.sender_type='CLIENTE'
+                       AND l.message_at <= h.ev AT TIME ZONE 'UTC'
+                  ) lc ON true WHERE lc.last_cli IS NOT NULL
+                )
+                SELECT to_char(wk,'YYYY-MM-DD'), count(*),
+                       round((100.0*sum((g BETWEEN 0 AND 3600)::int)/count(*))::numeric,1),
+                       percentile_cont(0.5) WITHIN GROUP (ORDER BY g) FILTER (WHERE g BETWEEN 0 AND 3600),
+                       percentile_cont(0.9) WITHIN GROUP (ORDER BY g) FILTER (WHERE g BETWEEN 0 AND 3600)
+                FROM lat GROUP BY wk ORDER BY wk
+            """)
+            return [{'semana': wk, 'total': n, 'pct_normal': float(pf) if pf is not None else None,
+                     'mediana_s': round(med) if med is not None else None,
+                     'p90_s': round(p90) if p90 is not None else None}
+                    for wk, n, pf, med, p90 in cur.fetchall()]
+
+        out['distribuicao_semanal'] = latencia('handoff_active', 'created_at', "motivo='dispatch'")
+        out['retencao_semanal'] = latencia('agent_sent_signatures', 'sent_at', "signature='ret_ia'")
+
+        # resumo agregado de distribuicao (casos frescos, ult 30d) -> KPI destaque
+        cur.execute("""
+            WITH h AS (SELECT conv_id, created_at ev FROM handoff_active
+                       WHERE motivo='dispatch' AND created_at > now() - interval '30 days'),
+            lat AS (
+              SELECT EXTRACT(EPOCH FROM (h.ev - lc.last_cli)) g
+              FROM h JOIN LATERAL (
+                 SELECT max(message_at) AT TIME ZONE 'UTC' last_cli FROM log_conversa l
+                 WHERE l.conversation_id=h.conv_id AND l.sender_type='CLIENTE'
+                   AND l.message_at <= h.ev AT TIME ZONE 'UTC'
+              ) lc ON true WHERE lc.last_cli IS NOT NULL
+            )
+            SELECT count(*) FILTER (WHERE g BETWEEN 0 AND 3600),
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY g) FILTER (WHERE g BETWEEN 0 AND 3600),
+                   percentile_cont(0.9) WITHIN GROUP (ORDER BY g) FILTER (WHERE g BETWEEN 0 AND 3600),
+                   round((100.0*count(*) FILTER (WHERE g BETWEEN 0 AND 3600)/NULLIF(count(*),0))::numeric,1)
+            FROM lat
+        """)
+        dn, dmed, dp90, dpct = cur.fetchone()
+        out['distribuicao_resumo'] = {
+            'casos': dn or 0,
+            'mediana_s': round(dmed) if dmed is not None else None,
+            'p90_s': round(dp90) if dp90 is not None else None,
+            'pct_normal': float(dpct) if dpct is not None else None,
+        }
+
+    # ---- funil de disparo (banco disparos) ----
+    try:
+        with get_other_db('disparos') as dconn:
+            dc = dconn.cursor()
+            dc.execute("SELECT count(*) FROM activation_dispatch_events WHERE status='sent'")
+            env = dc.fetchone()[0]
+            dc.execute("SELECT count(*) FROM activation_responses")
+            resp = dc.fetchone()[0]
+            out['funil_disparo'] = {'enviados': env, 'respostas': resp,
+                                    'pct_resposta': round(100.0 * resp / env, 1) if env else 0}
+    except Exception as e:
+        out['funil_disparo'] = {'erro': str(e)}
+
+    _DESEMPENHO_CACHE['d'] = (out, time.time() + 600)  # cache 10 min
+    return out
+
+
+_QUALIDADE_CACHE = {}
+
+@app.get("/api/desempenho/qualidade")
+async def desempenho_qualidade(hours: int = 168):
+    """(2026-07-08, Item 4) Sinal de qualidade OBJETIVO: findings do supervisor
+    OpenAI agregados por severidade/tipo/dia. Diferente do sentimento (estimado por
+    IA) e da avaliacao manual, isso e auditoria automatica do proprio revisor."""
+    hours = max(1, min(int(hours or 168), 24 * 90))
+    ck = f'q{hours}'
+    cached = _QUALIDADE_CACHE.get(ck)
+    if cached and cached[1] > time.time():
+        return cached[0]
+    out = {
+        'hours': hours,
+        'por_severidade': {'alta': 0, 'media': 0, 'baixa': 0},
+        'abertos': 0, 'resolvidos': 0, 'total': 0,
+        'por_dia': [], 'top_tipos': [], 'supervisor': {},
+    }
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""SELECT lower(severity), count(*) FROM agent_audit_findings
+                WHERE created_at > now() - make_interval(hours => %s)
+                GROUP BY lower(severity)""", (hours,))
+            # (2026-07-08) severidade convive em 2 vocabularios no banco:
+            # 'alta/media/baixa' (supervisor OpenAI) e 'high/medium/low' (checador
+            # de assignment). Normaliza para nao perder contagem.
+            _sevmap = {'alta': 'alta', 'high': 'alta', 'media': 'media',
+                       'medium': 'media', 'baixa': 'baixa', 'low': 'baixa'}
+            for sev, n in cur.fetchall():
+                key = _sevmap.get((sev or '').strip())
+                if key:
+                    out['por_severidade'][key] += n
+                    out['total'] += n
+            cur.execute("""SELECT count(*) FILTER (WHERE resolved_at IS NULL),
+                       count(*) FILTER (WHERE resolved_at IS NOT NULL)
+                FROM agent_audit_findings
+                WHERE created_at > now() - make_interval(hours => %s)""", (hours,))
+            ab, rs = cur.fetchone()
+            out['abertos'] = ab or 0
+            out['resolvidos'] = rs or 0
+            cur.execute("""SELECT to_char(created_at::date,'DD/MM') d, count(*) n
+                FROM agent_audit_findings
+                WHERE created_at > now() - make_interval(hours => %s)
+                GROUP BY created_at::date ORDER BY created_at::date""", (hours,))
+            out['por_dia'] = [{'d': d, 'n': n} for d, n in cur.fetchall()]
+            cur.execute("""SELECT problem_type, count(*) n FROM agent_audit_findings
+                WHERE created_at > now() - make_interval(hours => %s)
+                GROUP BY problem_type ORDER BY n DESC LIMIT 8""", (hours,))
+            out['top_tipos'] = [{'tipo': t or '—', 'n': n} for t, n in cur.fetchall()]
+            cur.execute("SELECT value FROM agent_config WHERE key='openai_supervisor_stats'")
+            row = cur.fetchone()
+            if row and row[0]:
+                try:
+                    sup = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                    if isinstance(sup, dict):
+                        # remove buffer pesado de resultados por conversa (nao usado no agregado)
+                        sup.pop('last_results', None)
+                    out['supervisor'] = sup
+                except Exception:
+                    pass
+    except Exception as e:
+        out['error'] = str(e)
+    _QUALIDADE_CACHE[ck] = (out, time.time() + 300)  # cache 5 min
+    return out
+
+
 @app.get("/api/calendar")
 async def calendar_list(
     categoria: str = Query('', max_length=64),
@@ -4129,8 +4476,8 @@ async def sentiment_responses(
         total = cur.fetchone()['cnt']
 
         cur.execute(f"""SELECT count(*) FILTER (WHERE avaliacao IS NULL OR avaliacao = '') as pendentes,
-            count(*) FILTER (WHERE avaliacao = 'aprovada') as aprovadas,
-            count(*) FILTER (WHERE avaliacao = 'reprovada') as reprovadas
+            count(*) FILTER (WHERE avaliacao = 'correta') as aprovadas,
+            count(*) FILTER (WHERE avaliacao = 'incorreta') as reprovadas
             FROM interaction_summary WHERE pergunta_aluno IS NOT NULL AND pergunta_aluno != ''""")
         counters = dict(cur.fetchone())
 
@@ -4154,8 +4501,11 @@ async def sentiment_responses(
 async def avaliar_resposta(record_id: int, request: Request):
     body = await request.json()
     avaliacao = body.get('avaliacao', '')
-    if avaliacao not in ('aprovada', 'reprovada', ''):
-        raise HTTPException(400, "Avaliação deve ser 'aprovada', 'reprovada' ou vazio")
+    # (2026-07-08, Item 6) vocabulario unificado -> correta/incorreta.
+    # Aceita valores legados (aprovada/reprovada) e converte.
+    avaliacao = {'aprovada': 'correta', 'reprovada': 'incorreta'}.get(avaliacao, avaliacao)
+    if avaliacao not in ('correta', 'incorreta', ''):
+        raise HTTPException(400, "Avaliação deve ser 'correta', 'incorreta' ou vazio")
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("UPDATE interaction_summary SET avaliacao = %s WHERE id = %s",
@@ -5172,7 +5522,9 @@ def aia_recent(limit: int = 30, page: int = 1, tema: str = None,
     page = max(1, int(page or 1))
     conn = _aia_conn()
     cur = conn.cursor(cursor_factory=_AiaRDC)
-    where = ["1=1"]
+    # (2026-07-08, Item 5) esconde linha-lixo historica: sem pergunta E sem resposta
+    # (conversa so de saudacao). Novas ja nem sao gravadas pelo agente.
+    where = ["(COALESCE(TRIM(pergunta_aluno),'') <> '' OR COALESCE(TRIM(resposta_agente),'') <> '')"]
     params = []
     if tema:
         where.append("tema = %s"); params.append(tema)

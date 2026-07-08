@@ -127,6 +127,8 @@ body.dark-mode .modal-bg{background:rgba(0,0,0,.6);}
 body.dark-mode table th{color:#6b7085;background:rgba(255,255,255,.03);}
 body.dark-mode table td{border-bottom-color:rgba(255,255,255,.04);}
 body.dark-mode table tr:hover{background:#22263a;}
+.aoh-insist{background:rgba(251,191,36,.08);}
+body.dark-mode .aoh-insist{background:rgba(251,191,36,.12);}
 body.dark-mode .conf-h{color:#4ade80;}.dark-mode .conf-m{color:#facc15;}.dark-mode .conf-l{color:#f87171;}
 body.dark-mode .btn-d{background:rgba(239,68,68,.15);color:#f87171;}
 body.dark-mode .btn-s{background:rgba(34,197,94,.15);color:#4ade80;}
@@ -269,6 +271,7 @@ body.dark-mode .wa-bubble.wa-bot .wa-meta{color:#6b7085;}
 <div class="max-w-screen-2xl mx-auto px-5">
 <div class="flex bg-white mt-4 rounded-xl border border-gray-100 px-2 overflow-x-auto" style="box-shadow:0 1px 3px rgba(0,0,0,.03);">
   <div class="tab active" data-tab="dashboard" onclick="sw('dashboard')"><i class="fas fa-chart-pie mr-1.5"></i>Dashboard</div>
+  <div class="tab" data-tab="desempenho" onclick="sw('desempenho')"><i class="fas fa-gauge-high mr-1.5"></i>Desempenho</div>
   <div class="tab" data-tab="qa" onclick="sw('qa')"><i class="fas fa-database mr-1.5"></i>Base Q&A</div>
   <div class="tab" data-tab="agentia" onclick="sw('agentia')"><i class="fas fa-robot mr-1.5"></i>Agente IA</div>
   <div class="tab" data-tab="playground" onclick="sw('playground')"><i class="fas fa-flask mr-1.5"></i>Playground</div>
@@ -288,22 +291,170 @@ body.dark-mode .wa-bubble.wa-bot .wa-meta{color:#6b7085;}
 
 <!-- ===== DASHBOARD ===== -->
 <div id="tab-dashboard" class="tc fade">
-<div class="grid grid-cols-2 lg:grid-cols-5 gap-4 mt-5">
-  <div class="card p-5 stat-card blue"><div class="text-xs font-medium text-gray-400 uppercase tracking-wider">Total Q&A</div><div class="text-3xl font-extrabold mt-1" id="s-total">-</div><div class="text-xs text-indigo-500 mt-1" id="s-emb"></div></div>
-  <div class="card p-5 stat-card green"><div class="text-xs font-medium text-gray-400 uppercase tracking-wider">Temas</div><div class="text-3xl font-extrabold mt-1" id="s-temas">-</div><div class="text-xs text-amber-500 mt-1" id="s-st"></div></div>
-  <div class="card p-5 stat-card purple"><div class="text-xs font-medium text-gray-400 uppercase tracking-wider">Interações IA</div><div class="text-3xl font-extrabold mt-1" id="s-int">-</div></div>
-  <div class="card p-5 stat-card yellow"><div class="text-xs font-medium text-gray-400 uppercase tracking-wider">Confiança Média</div><div class="text-3xl font-extrabold mt-1" id="s-conf">-</div></div>
-  <div class="card p-5 stat-card red"><div class="text-xs font-medium text-gray-400 uppercase tracking-wider">Avaliações</div><div class="text-3xl font-extrabold mt-1" id="s-evals">-</div><div class="text-xs mt-1" id="s-eval-detail"></div></div>
+  <!-- KPIs operacionais -->
+  <div class="grid grid-cols-2 xl:grid-cols-4 gap-4 mt-5">
+    <div class="card p-5">
+      <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider"><i class="fas fa-bolt text-indigo-400 mr-1.5"></i>Interações hoje</div>
+      <div class="flex items-end justify-between mt-1">
+        <div>
+          <div class="text-3xl font-extrabold" id="d-hoje">-</div>
+          <div class="text-[11px] mt-1" id="d-hoje-cmp"></div>
+        </div>
+        <div style="width:88px;height:40px;"><canvas id="cv-d-spark"></canvas></div>
+      </div>
+    </div>
+    <div class="card p-5">
+      <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider"><i class="fas fa-robot text-green-400 mr-1.5"></i>Automação (7d)</div>
+      <div class="text-3xl font-extrabold text-green-600 mt-1" id="d-auto">-</div>
+      <div class="text-[11px] text-gray-400 mt-1">respostas sem escalar p/ humano</div>
+    </div>
+    <div class="card p-5">
+      <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider"><i class="fas fa-gauge-high text-amber-400 mr-1.5"></i>Confiança média</div>
+      <div class="text-3xl font-extrabold mt-1" id="d-conf">-</div>
+      <div class="text-[11px] text-gray-400 mt-1">confiança das respostas da IA</div>
+    </div>
+    <div class="card p-5">
+      <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider"><i class="fas fa-database text-purple-400 mr-1.5"></i>Base de conhecimento</div>
+      <div class="text-3xl font-extrabold mt-1" id="d-qa">-</div>
+      <div class="text-[11px] text-gray-400 mt-1" id="d-qa-sub"></div>
+    </div>
+  </div>
+
+  <!-- atividade 14d + o que a IA fez -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
+    <div class="card p-5 lg:col-span-2">
+      <h3 class="text-sm font-bold text-gray-500 mb-1">Atividade dos últimos 14 dias</h3>
+      <p class="text-[11px] text-gray-400 mb-3">Interações da IA por dia</p>
+      <div style="height:220px;"><canvas id="cv-d-atividade"></canvas></div>
+    </div>
+    <div class="card p-5">
+      <h3 class="text-sm font-bold text-gray-500 mb-1">O que a IA fez</h3>
+      <p class="text-[11px] text-gray-400 mb-3">Ações agrupadas por tipo</p>
+      <div style="height:220px;"><canvas id="cv-actions"></canvas></div>
+    </div>
+  </div>
+
+  <!-- tema + avaliacoes -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+    <div class="card p-5"><h3 class="text-sm font-bold text-gray-500 mb-1">Base por tema</h3><p class="text-[11px] text-gray-400 mb-3">Top 10 temas com mais Q&A</p><div style="height:240px;"><canvas id="cv-temas"></canvas></div></div>
+    <div class="card p-5"><h3 class="text-sm font-bold text-gray-500 mb-1">Avaliações do treinamento</h3><p class="text-[11px] text-gray-400 mb-3">Feedback nas respostas revisadas</p><div style="height:240px;position:relative;"><canvas id="cv-evals"></canvas><div id="d-evals-empty" class="hidden absolute inset-0 flex items-center justify-center text-gray-400 text-sm">Nenhuma avaliação ainda</div></div></div>
+  </div>
+
+  <!-- escalacoes + custo -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
+    <div class="card p-5 lg:col-span-2"><h3 class="text-sm font-bold text-gray-500 mb-3">Top escalações recentes</h3><div id="top-esc" class="space-y-2"></div></div>
+    <div class="card p-5"><h3 class="text-sm font-bold text-gray-500 mb-3">Custo real <span class="text-[10px] font-normal text-gray-400">· produção</span></h3><div id="cost-info"></div></div>
+  </div>
 </div>
-<div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
-  <div class="card p-5"><h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Distribuição por Tema</h3><div style="height:240px;"><canvas id="cv-temas"></canvas></div></div>
-  <div class="card p-5"><h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Ações da IA</h3><div style="height:240px;"><canvas id="cv-actions"></canvas></div></div>
-  <div class="card p-5"><h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Avaliações do Treinamento</h3><div style="height:240px;"><canvas id="cv-evals"></canvas></div></div>
-</div>
-<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
-  <div class="card p-5"><h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Top Escalações</h3><div id="top-esc" class="space-y-2"></div></div>
-  <div class="card p-5"><h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Custo Estimado</h3><div id="cost-info"></div></div>
-</div>
+
+<!-- ===== DESEMPENHO ===== -->
+<div id="tab-desempenho" class="tc hidden fade">
+  <div class="flex items-center justify-between mt-5 mb-4 flex-wrap gap-2">
+    <div>
+      <h2 class="text-xl font-bold text-gray-800">Desempenho do Agente</h2>
+      <p class="text-xs text-gray-400">Atendimento <b>manual (antigo)</b> vs <b>agente IA</b>. <span id="dz-gerado"></span></p>
+    </div>
+    <button class="btn btn-g btn-sm" onclick="loadDesempenho(true)"><i class="fas fa-rotate mr-1"></i>Atualizar</button>
+  </div>
+  <div id="dz-loading" class="text-center text-gray-400 py-16"><i class="fas fa-spinner fa-spin text-3xl"></i><div class="mt-3 text-sm">Calculando métricas (pode levar alguns segundos)…</div></div>
+  <div id="dz-body" class="hidden">
+
+    <!-- HERO: antes vs agora -->
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+      <div class="card p-5">
+        <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3"><i class="fas fa-stopwatch text-indigo-400 mr-1.5"></i>Tempo até um humano</div>
+        <div class="flex items-end gap-2">
+          <div class="text-center"><div class="text-[10px] text-gray-400 uppercase">antes</div><div class="text-lg font-bold text-gray-400 line-through" id="dz-med-old">-</div></div>
+          <i class="fas fa-arrow-right text-gray-300 mb-2 text-sm"></i>
+          <div class="text-center"><div class="text-[10px] text-gray-400 uppercase">agora</div><div class="text-3xl font-extrabold text-green-600" id="dz-med-new">-</div></div>
+          <span class="ml-auto text-sm font-bold mb-1" id="dz-med-delta"></span>
+        </div>
+        <div class="text-[11px] text-gray-400 mt-2">mediana — metade dos alunos espera menos que isso · <span class="text-amber-500">~ aproximado</span></div>
+      </div>
+      <div class="card p-5">
+        <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3"><i class="fas fa-hourglass-half text-amber-400 mr-1.5"></i>Piores casos (p90)</div>
+        <div class="flex items-end gap-2">
+          <div class="text-center"><div class="text-[10px] text-gray-400 uppercase">antes</div><div class="text-lg font-bold text-gray-400 line-through" id="dz-p90-old">-</div></div>
+          <i class="fas fa-arrow-right text-gray-300 mb-2 text-sm"></i>
+          <div class="text-center"><div class="text-[10px] text-gray-400 uppercase">agora</div><div class="text-3xl font-extrabold text-green-600" id="dz-p90-new">-</div></div>
+          <span class="ml-auto text-sm font-bold mb-1" id="dz-p90-delta"></span>
+        </div>
+        <div class="text-[11px] text-gray-400 mt-2">9 em cada 10 alunos esperam menos que isso</div>
+      </div>
+      <div class="card p-5">
+        <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3"><i class="fas fa-robot text-purple-400 mr-1.5"></i>IA resolve sozinha</div>
+        <div class="text-4xl font-extrabold text-purple-600" id="dz-auto-new">-</div>
+        <div class="text-[11px] text-gray-400 mt-2" id="dz-auto-sub"></div>
+      </div>
+      <div class="card p-5">
+        <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3"><i class="fas fa-bolt text-blue-400 mr-1.5"></i>Velocidade de distribuição</div>
+        <div class="text-4xl font-extrabold text-blue-600" id="dz-dist-med">-</div>
+        <div class="text-[11px] text-gray-400 mt-2" id="dz-dist-sub">mediana até encaminhar (casos frescos, 30d)</div>
+      </div>
+    </div>
+
+    <!-- evolucao tempo + volume -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+      <div class="card p-5">
+        <div class="flex items-center justify-between mb-1"><h3 class="text-sm font-bold text-gray-700">Evolução do tempo de resposta</h3><span class="text-[11px] font-semibold text-green-500"><i class="fas fa-arrow-trend-down mr-1"></i>menor = melhor</span></div>
+        <p class="text-[11px] text-gray-400 mb-3">Mediana do tempo até um humano, por mês (minutos)</p>
+        <div style="height:230px;"><canvas id="cv-dz-humano"></canvas></div>
+      </div>
+      <div class="card p-5">
+        <h3 class="text-sm font-bold text-gray-700 mb-1">Volume de mensagens: IA vs humano</h3>
+        <p class="text-[11px] text-gray-400 mb-3">Quanto a IA respondeu vs os atendentes, por mês</p>
+        <div style="height:230px;"><canvas id="cv-dz-volume"></canvas></div>
+      </div>
+    </div>
+
+    <!-- o que a IA fez + distribuicao semanal -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+      <div class="card p-5">
+        <h3 class="text-sm font-bold text-gray-700 mb-1">O que a IA fez</h3>
+        <p class="text-[11px] text-gray-400 mb-3">Distribuição das ações do agente nos últimos 30 dias</p>
+        <div style="height:240px;"><canvas id="cv-dz-mix"></canvas></div>
+      </div>
+      <div class="card p-5">
+        <div class="flex items-center justify-between mb-1"><h3 class="text-sm font-bold text-gray-700">Rapidez para encaminhar, por semana</h3><span class="text-[11px] font-semibold text-green-500"><i class="fas fa-arrow-trend-down mr-1"></i>menor = melhor</span></div>
+        <p class="text-[11px] text-gray-400 mb-3">Mediana do tempo até distribuir — só casos frescos (segundos)</p>
+        <div style="height:240px;"><canvas id="cv-dz-dist"></canvas></div>
+      </div>
+    </div>
+
+    <!-- retencao + funil -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+      <div class="card p-5"><h3 class="text-sm font-bold text-gray-700 mb-3">Retenção (tag RET-IA): tempo até a tag</h3><div id="dz-ret" class="text-sm"></div></div>
+      <div class="card p-5"><h3 class="text-sm font-bold text-gray-700 mb-3">Funil de disparo</h3><div id="dz-funil"></div></div>
+    </div>
+
+    <!-- QUALIDADE: auditoria automatica do supervisor OpenAI -->
+    <div class="card p-5 mt-4">
+      <div class="flex items-center justify-between flex-wrap gap-2 mb-1">
+        <div>
+          <h3 class="text-sm font-bold text-gray-700"><i class="fas fa-shield-halved text-purple-500 mr-1.5"></i>Qualidade — auditoria do supervisor</h3>
+          <p class="text-[11px] text-gray-400">Problemas detectados automaticamente pelo revisor OpenAI. Sinal objetivo — não depende de sentimento nem de avaliação manual.</p>
+        </div>
+        <select id="dzq-hours" class="inp" style="width:auto;min-width:130px" onchange="loadDesempenhoQualidade()">
+          <option value="72">Últimas 72h</option>
+          <option value="168" selected>Últimos 7 dias</option>
+          <option value="720">Últimos 30 dias</option>
+        </select>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+        <div class="p-3 rounded-xl" style="background:rgba(239,68,68,.08)"><div class="text-[11px] text-red-600 font-semibold uppercase tracking-wide">Alta severidade</div><div class="text-2xl font-extrabold text-red-600" id="dzq-alta">-</div></div>
+        <div class="p-3 rounded-xl" style="background:rgba(234,179,8,.08)"><div class="text-[11px] text-yellow-600 font-semibold uppercase tracking-wide">Média</div><div class="text-2xl font-extrabold text-yellow-600" id="dzq-media">-</div></div>
+        <div class="p-3 rounded-xl" style="background:rgba(148,163,184,.12)"><div class="text-[11px] text-gray-500 font-semibold uppercase tracking-wide">Baixa</div><div class="text-2xl font-extrabold text-gray-500" id="dzq-baixa">-</div></div>
+        <div class="p-3 rounded-xl" style="background:rgba(99,102,241,.08)"><div class="text-[11px] text-indigo-600 font-semibold uppercase tracking-wide">Taxa de problema</div><div class="text-2xl font-extrabold text-indigo-600" id="dzq-taxa">-</div><div class="text-[10px] text-gray-400">~ amostra auditada pelo supervisor</div></div>
+      </div>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+        <div><div class="text-xs font-bold text-gray-600 mb-2">Problemas por dia</div><div style="height:190px;"><canvas id="cv-dzq-dia"></canvas></div></div>
+        <div><div class="text-xs font-bold text-gray-600 mb-2">Tipos mais comuns</div><div id="dzq-tipos" class="space-y-1.5 text-sm"></div></div>
+      </div>
+      <div class="text-[11px] text-gray-400 mt-3" id="dzq-sup"></div>
+    </div>
+
+    <p class="text-xs text-gray-400 mt-4 leading-relaxed"><i class="fas fa-circle-info mr-1"></i><b>Como ler:</b> na era antiga já havia um bot de menu que respondia na hora — por isso a métrica compara o "tempo até um humano de verdade". <b>Casos frescos</b> = encaminhamento em até 1h da mensagem do aluno (o resto é resgate de backlog, que cresce quando o agente fica fora do ar).</p>
+  </div>
 </div>
 
 <!-- ===== QA LIST ===== -->
@@ -383,6 +534,9 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
 #tab-agentia .aia-alert-q strong{color:var(--aia-text);}
 #tab-agentia .aia-btn-dcz{display:inline-flex;align-items:center;gap:4px;background:rgba(99,102,241,.15);color:var(--aia-primary-l);border:1px solid rgba(99,102,241,.3);padding:3px 9px;border-radius:5px;font-size:10px;cursor:pointer;text-decoration:none;margin-top:3px;}
 #tab-agentia .aia-btn-dcz:hover{background:var(--aia-primary);color:#fff;}
+#tab-agentia .aia-btn-corr{display:inline-flex;align-items:center;gap:4px;background:rgba(34,197,94,.15);color:var(--aia-green);border:1px solid rgba(34,197,94,.35);padding:3px 9px;border-radius:5px;font-size:10px;cursor:pointer;font-family:inherit;}
+#tab-agentia .aia-btn-corr:hover{background:var(--aia-green);color:#fff;}
+#tab-agentia .aia-alert-card.corrigido{border-left-color:var(--aia-green);opacity:.7;}
 #tab-agentia .aia-tbl-section{background:var(--aia-card);border:1px solid var(--aia-border);border-radius:12px;overflow:hidden;}
 #tab-agentia .aia-tbl-header{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--aia-border);}
 #tab-agentia .aia-tbl-header h2{font-size:15px;font-weight:600;}
@@ -450,14 +604,9 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
   <div class="aia-container">
     <div class="aia-kpi-grid" id="aia-kpis"></div>
     <div id="aia-alerts-sec"></div>
-    <div class="aia-charts">
-      <div class="aia-cc"><h3>Interações por Dia</h3><canvas id="aia-cDia"></canvas></div>
-      <div class="aia-cc"><h3>Sentimento</h3><canvas id="aia-cSent"></canvas></div>
-      <div class="aia-cc"><h3>Resolução</h3><canvas id="aia-cRes"></canvas></div>
-    </div>
     <div class="aia-charts-2">
+      <div class="aia-cc"><h3>Interações por Dia</h3><canvas id="aia-cDia"></canvas></div>
       <div class="aia-cc"><h3>Temas</h3><canvas id="aia-cTema"></canvas></div>
-      <div class="aia-cc"><h3>Distribuição NPS</h3><canvas id="aia-cNps"></canvas></div>
       <div class="aia-cc"><h3>Horário de Pico</h3><canvas id="aia-cHora"></canvas></div>
     </div>
     <div class="aia-tbl-section">
@@ -639,97 +788,84 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
 
 <!-- ===== AUDITORIA IA (supervisor OpenAI) ===== -->
 <div id="tab-audit" class="tc hidden fade">
-<div class="card p-5 mt-5 border-l-4 border-purple-400">
-  <div class="flex items-center justify-between flex-wrap gap-3">
+  <div class="flex items-center justify-between mt-5 mb-1 flex-wrap gap-2">
     <div>
-      <h3 class="text-lg font-bold text-gray-800"><i class="fas fa-shield-halved mr-1.5 text-purple-500"></i>Auditoria IA — Supervisor OpenAI</h3>
-      <p class="text-xs text-gray-500 mt-1">Findings detectados automaticamente pelo modelo revisor. Atualiza a cada 30s.</p>
-      <div id="audit-sup-status" class="text-xs mt-1.5"></div>
+      <h2 class="text-xl font-bold text-gray-800"><i class="fas fa-shield-halved text-purple-500 mr-1.5"></i>Auditoria IA</h2>
+      <p class="text-xs text-gray-400">Problemas detectados automaticamente pelo supervisor (revisor OpenAI) · atualiza a cada 30s</p>
     </div>
     <div class="flex items-center gap-2 flex-wrap">
-      <select id="audit-status" class="input text-sm" onchange="loadAuditFindings()">
+      <select id="audit-status" class="inp" style="width:auto;min-width:120px" onchange="loadAuditFindings()">
         <option value="open" selected>Em aberto</option>
         <option value="resolved">Resolvidos</option>
         <option value="all">Todos</option>
       </select>
-      <select id="audit-sev" class="input text-sm" onchange="loadAuditFindings()">
+      <select id="audit-sev" class="inp" style="width:auto;min-width:130px" onchange="loadAuditFindings()">
         <option value="">Todas severidades</option>
         <option value="alta">Alta</option>
         <option value="media">Média</option>
         <option value="baixa">Baixa</option>
       </select>
-      <select id="audit-hours" class="input text-sm" onchange="loadAuditFindings()">
+      <select id="audit-hours" class="inp" style="width:auto;min-width:130px" onchange="loadAuditFindings()">
         <option value="24">Últimas 24h</option>
         <option value="72" selected>Últimas 72h</option>
         <option value="168">Últimos 7 dias</option>
         <option value="720">Últimos 30 dias</option>
       </select>
-      <button class="btn btn-w btn-sm" onclick="loadAuditFindings()"><i class="fas fa-arrows-rotate"></i></button>
-      </div>
+      <button class="btn btn-g btn-sm" onclick="loadAuditFindings()" title="Atualizar"><i class="fas fa-arrows-rotate"></i></button>
     </div>
-  <div id="audit-counts" class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4"></div>
-  <div id="audit-list" class="space-y-2 mt-4"><div class="text-sm text-gray-400 text-center py-6"><span class="ld"></span> Carregando...</div></div>
   </div>
-  </div>
+  <div id="audit-sup-status" class="text-[11px] text-gray-400 mb-3"></div>
+  <div id="audit-counts" class="grid grid-cols-3 gap-4"></div>
+  <div id="audit-list" class="space-y-3 mt-4"><div class="text-sm text-gray-400 text-center py-8"><span class="ld"></span> Carregando…</div></div>
+</div>
 
 <div id="tab-afterhours" class="tc hidden fade">
-<div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-5">
-  <div class="card p-5 lg:col-span-1 border-l-4 border-amber-400">
-    <div class="flex items-center justify-between mb-2">
-      <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider"><i class="fas fa-clock mr-1 text-amber-500"></i>Horário agora</h3>
-      <span id="aoh-mode-badge" class="text-xs font-bold px-2.5 py-1 rounded-full bg-gray-100 text-gray-600">—</span>
-</div>
-    <div class="text-2xl font-extrabold text-gray-800 tabular-nums" id="aoh-clock">--:--:--</div>
-    <div class="text-sm text-gray-500 mt-1" id="aoh-date">—</div>
-    <div class="text-xs text-gray-400 mt-3" id="aoh-tz">America/Sao_Paulo</div>
-    <div class="mt-4 pt-3 border-t border-gray-100">
-      <div class="text-xs text-gray-500">Próximo retorno humano</div>
-      <div class="text-sm font-semibold text-amber-700 mt-1" id="aoh-next-return">—</div>
-      <div class="text-xs text-gray-400 mt-1" id="aoh-next-return-hint">Para alunos que insistirem fora do horário</div>
-  </div>
-    <div class="mt-3 text-xs text-gray-500 leading-relaxed" id="aoh-hours-info">—</div>
-  </div>
-  <div class="card p-5 lg:col-span-2">
-    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Resumo da fila</h3>
-    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-      <div class="p-3 bg-amber-50 rounded-lg border border-amber-100">
-        <div class="text-xs text-amber-700">Prioritários (insistência)</div>
-        <div class="text-2xl font-bold text-amber-800" id="aoh-cnt-priority">0</div>
+
+<!-- Barra de status do atendimento (compacta) -->
+<div class="card p-4 mt-5 border-l-4 border-amber-400">
+  <div class="flex flex-wrap items-center justify-between gap-4">
+    <div class="flex items-center gap-4">
+      <span id="aoh-mode-badge" class="text-xs font-bold px-3 py-1.5 rounded-full bg-gray-100 text-gray-600">—</span>
+      <div>
+        <div class="text-lg font-bold text-gray-800 tabular-nums leading-tight" id="aoh-clock">--:--:--</div>
+        <div class="text-xs text-gray-500" id="aoh-date">—</div>
       </div>
-      <div class="p-3 bg-yellow-50 rounded-lg border border-yellow-100">
-        <div class="text-xs text-yellow-700">Pendentes</div>
-        <div class="text-2xl font-bold text-yellow-800" id="aoh-cnt-pending">0</div>
-      </div>
-      <div class="p-3 bg-indigo-600 rounded-lg border border-indigo-700 shadow-sm">
-        <div class="text-xs font-semibold text-white/90 uppercase tracking-wide">Em atendimento</div>
-        <div class="text-2xl font-extrabold text-white" id="aoh-cnt-progress">0</div>
-      </div>
-      <div class="p-3 bg-green-50 rounded-lg border border-green-100">
-        <div class="text-xs text-green-700">Resolvidos</div>
-        <div class="text-2xl font-bold text-green-800" id="aoh-cnt-resolved">0</div>
-      </div>
+    </div>
+    <div class="text-xs text-gray-500 leading-relaxed text-right">
+      <div>Próximo retorno humano: <strong class="text-amber-700" id="aoh-next-return">—</strong></div>
+      <div id="aoh-hours-info">—</div>
     </div>
   </div>
 </div>
-<div class="card p-4 mt-4 border border-indigo-100 bg-indigo-50/40" id="aoh-auto-banner">
-  <div class="flex flex-wrap items-start gap-3">
-    <div class="flex-1 min-w-[200px]">
-      <div class="text-xs font-bold text-indigo-700 uppercase tracking-wide"><i class="fas fa-robot mr-1"></i>Automação às 9h (agente)</div>
-      <p class="text-xs text-indigo-900/80 mt-1 leading-relaxed" id="aoh-auto-desc">—</p>
-      <p class="text-xs text-gray-600 mt-1" id="aoh-watchdog">Watchdog: <strong>—</strong></p>
-    </div>
-    <div class="text-xs text-indigo-600 whitespace-nowrap" id="aoh-auto-last">Último lote: —</div>
+
+<!-- Resumo da fila -->
+<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+  <div class="card p-4 border border-amber-100 bg-amber-50">
+    <div class="text-xs text-amber-700">Prioritários (insistência)</div>
+    <div class="text-2xl font-bold text-amber-800" id="aoh-cnt-priority">0</div>
+  </div>
+  <div class="card p-4 border border-yellow-100 bg-yellow-50">
+    <div class="text-xs text-yellow-700">A atender</div>
+    <div class="text-2xl font-bold text-yellow-800" id="aoh-cnt-pending">0</div>
+  </div>
+  <div class="card p-4 border border-indigo-700 bg-indigo-600 shadow-sm">
+    <div class="text-xs font-semibold text-white/90 uppercase tracking-wide">Em atendimento</div>
+    <div class="text-2xl font-extrabold text-white" id="aoh-cnt-progress">0</div>
+  </div>
+  <div class="card p-4 border border-green-100 bg-green-50">
+    <div class="text-xs text-green-700">Concluídos</div>
+    <div class="text-2xl font-bold text-green-800" id="aoh-cnt-resolved">0</div>
   </div>
 </div>
 <div class="card mt-4">
   <div class="p-4 border-b flex flex-wrap items-center gap-3">
-    <h3 class="text-sm font-semibold text-gray-700"><i class="fas fa-list-check mr-1.5 text-amber-500"></i>Retornos pendentes</h3>
+    <h3 class="text-sm font-semibold text-gray-700"><i class="fas fa-list-check mr-1.5 text-amber-500"></i>Fila de retornos</h3>
     <select id="aoh-filter-status" class="inp btn-sm" style="width:auto;" onchange="loadAfterHours()">
-      <option value="active">Ativos (pendente + em atendimento)</option>
-      <option value="pending">Só pendentes</option>
+      <option value="active">A atender + em atendimento</option>
+      <option value="pending">Só a atender</option>
       <option value="in_progress">Em atendimento</option>
-      <option value="resolved">Resolvidos</option>
-      <option value="closed_no_engagement">Encerrados sem atendimento</option>
+      <option value="resolved">Concluídos</option>
+      <option value="closed_no_engagement">Encerrados sem resposta</option>
       <option value="all">Todos</option>
     </select>
     <select id="aoh-filter-tier" class="inp btn-sm" style="width:auto;" onchange="loadAfterHours()">
@@ -737,7 +873,7 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
       <option value="insist">Insistência / prioridade</option>
       <option value="first">1º pedido</option>
     </select>
-    <button onclick="loadAfterHours()" class="btn btn-p btn-sm"><i class="fas fa-rotate mr-1"></i>Atualizar</button>
+    <button onclick="loadAfterHours(true)" class="btn btn-p btn-sm"><i class="fas fa-rotate mr-1"></i>Atualizar</button>
   </div>
   <div class="overflow-x-auto">
     <table class="w-full text-sm">
@@ -754,7 +890,29 @@ body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4
     </table>
   </div>
   <div id="aoh-empty" class="hidden p-8 text-center text-gray-400 text-sm">Nenhum registro neste filtro.</div>
+  <div id="aoh-pager" class="hidden p-3 border-t flex items-center justify-between text-xs text-gray-500">
+    <span id="aoh-pager-info">—</span>
+    <div class="flex items-center gap-2">
+      <button id="aoh-prev" class="btn btn-g btn-sm" onclick="aohGoPage(-1)" title="Página anterior"><i class="fas fa-chevron-left"></i></button>
+      <span id="aoh-pager-pages" class="tabular-nums font-medium text-gray-600">—</span>
+      <button id="aoh-next" class="btn btn-g btn-sm" onclick="aohGoPage(1)" title="Próxima página"><i class="fas fa-chevron-right"></i></button>
+    </div>
+  </div>
 </div>
+
+<!-- Status do sistema (discreto, recolhível — abre sozinho se houver problema) -->
+<details id="aoh-sys" class="card mt-4 p-0">
+  <summary class="px-4 py-3 cursor-pointer text-xs font-semibold text-gray-600 flex items-center gap-2 select-none">
+    <i class="fas fa-gear text-gray-400"></i>Status do sistema
+    <span id="aoh-sys-flag" class="ml-auto text-xs font-bold"></span>
+  </summary>
+  <div class="px-4 pb-4 pt-1 border-t border-gray-100" id="aoh-auto-banner">
+    <div class="text-xs font-bold text-indigo-700 uppercase tracking-wide"><i class="fas fa-robot mr-1"></i>Automação às 9h (agente)</div>
+    <p class="text-xs text-gray-700 mt-1 leading-relaxed" id="aoh-auto-desc">—</p>
+    <p class="text-xs text-indigo-600 mt-1" id="aoh-auto-last">Último lote: —</p>
+    <p class="text-xs text-gray-600 mt-2" id="aoh-watchdog">Watchdog: <strong>—</strong></p>
+  </div>
+</details>
 </div>
 
 <!-- ===== DISPARADOR ===== -->
@@ -1938,27 +2096,31 @@ async function aiaLoadAll(){
 function aiaRenderKPIs(s){
   document.getElementById('aia-kpis').innerHTML=`
     <div class="aia-kpi blue"><div class="aia-kpi-label">Total Interações</div><div class="aia-kpi-val">${s.total.toLocaleString('pt-BR')}</div><div class="aia-kpi-sub">No período selecionado</div></div>
-    <div class="aia-kpi green"><div class="aia-kpi-label">Taxa de Resolução</div><div class="aia-kpi-val">${s.taxa_resolucao}%</div><div class="aia-kpi-sub">Resolvido + Parcial</div></div>
-    <div class="aia-kpi purple"><div class="aia-kpi-label">NPS Score</div><div class="aia-kpi-val">${s.nps_score>0?'+':''}${s.nps_score}</div><div class="aia-kpi-sub"><div class="aia-nps-bar">${s.detratores>0?`<div class="seg det" style="width:${(s.detratores/(s.promotores+s.neutros+s.detratores))*100}%">${s.detratores}</div>`:''}${s.neutros>0?`<div class="seg neu" style="width:${(s.neutros/(s.promotores+s.neutros+s.detratores))*100}%">${s.neutros}</div>`:''}${s.promotores>0?`<div class="seg pro" style="width:${(s.promotores/(s.promotores+s.neutros+s.detratores))*100}%">${s.promotores}</div>`:''}</div></div></div>
-    <div class="aia-kpi yellow"><div class="aia-kpi-label">NPS Médio</div><div class="aia-kpi-val">${s.avg_nps}</div><div class="aia-kpi-sub">Escala 1-10</div></div>
-    <div class="aia-kpi red"><div class="aia-kpi-label">Frustrados</div><div class="aia-kpi-val">${(s.sentimentos.find(x=>x.sentimento==='frustrado')||{cnt:0}).cnt}</div><div class="aia-kpi-sub">Requerem atenção</div></div>`;
+    <div class="aia-kpi green"><div class="aia-kpi-label">Taxa de Resolução</div><div class="aia-kpi-val">${s.taxa_resolucao}%</div><div class="aia-kpi-sub">estimado por IA</div></div>
+    <div class="aia-kpi purple"><div class="aia-kpi-label">NPS Score</div><div class="aia-kpi-val">${s.nps_score>0?'+':''}${s.nps_score}</div><div class="aia-kpi-sub">estimado · média ${s.avg_nps}</div></div>
+    <div class="aia-kpi red"><div class="aia-kpi-label">Frustrados</div><div class="aia-kpi-val">${(s.sentimentos.find(x=>x.sentimento==='frustrado')||{cnt:0}).cnt}</div><div class="aia-kpi-sub">estimado · requer atenção</div></div>`;
 }
+let aiaAlertsData=[];
 function aiaRenderAlerts(alerts){
   const sec=document.getElementById('aia-alerts-sec');
+  aiaAlertsData=alerts||[];
   if(!alerts.length){sec.innerHTML='';return;}
   sec.innerHTML=`<div class="aia-alerts-hdr"><h2>⚠ Alertas (últimas 24h)</h2><span class="aia-alert-badge">${alerts.length} alertas</span></div>
-    <div class="aia-alerts-scroll">${alerts.map(a=>`<div class="aia-alert-card"><div class="aia-alert-top"><span class="aia-alert-name">${a.student_name||'Desconhecido'}</span><span class="aia-alert-time">${aiaFmtDate(a.created_at)}</span></div><div class="aia-alert-meta">${aiaSentTag(a.sentimento)} ${aiaNpsTag(a.nps_implicito)} <span class="aia-tag aia-tag-blue">${a.tema||'-'}</span></div><div class="aia-alert-q"><strong>Pergunta:</strong> ${(a.pergunta_aluno||'-').substring(0,120)}</div><div class="aia-alert-q"><strong>Resposta:</strong> ${(a.resposta_agente||'-').substring(0,120)}</div><a class="aia-btn-dcz" href="${aiaDczLink(a.conv_id,a.phone)}" target="_blank">↗ Ver no DataCrazy</a></div>`).join('')}</div>`;
+    <div class="aia-alerts-scroll">${alerts.map(a=>`<div class="aia-alert-card" data-alert-id="${a.id}"><div class="aia-alert-top"><span class="aia-alert-name">${a.student_name||'Desconhecido'}</span><span class="aia-alert-time">${aiaFmtDate(a.created_at)}</span></div><div class="aia-alert-meta">${aiaSentTag(a.sentimento)} ${aiaNpsTag(a.nps_implicito)} <span class="aia-tag aia-tag-blue">${a.tema||'-'}</span></div><div class="aia-alert-q"><strong>Pergunta:</strong> ${(a.pergunta_aluno||'-').substring(0,120)}</div><div class="aia-alert-q"><strong>Resposta:</strong> ${(a.resposta_agente||'-').substring(0,120)}</div><div style="display:flex;gap:6px;margin-top:6px;align-items:center;"><a class="aia-btn-dcz" href="${aiaDczLink(a.conv_id,a.phone)}" target="_blank">↗ DataCrazy</a><button class="aia-btn-corr" onclick="aiaCorrFromAlert(${a.id})"><i class="fas fa-pen-to-square"></i> Corrigir</button></div></div>`).join('')}</div>`;
+}
+function aiaCorrFromAlert(id){
+  const a=aiaAlertsData.find(x=>x.id===id);
+  if(!a){return;}
+  aiaCorrOpen(a.id,a.pergunta_aluno||'',a.resposta_agente||'');
 }
 function aiaDestroyChart(id){if(aiaCharts[id]){aiaCharts[id].destroy();delete aiaCharts[id];}}
 function aiaRenderCharts(s){
   Chart.defaults.color='#8b8fa3';Chart.defaults.borderColor='rgba(255,255,255,.06)';
-  aiaDestroyChart('cDia');aiaCharts.cDia=new Chart(document.getElementById('aia-cDia'),{type:'line',data:{labels:s.por_dia.map(d=>{const dt=new Date(d.d+'T12:00:00');return dt.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'});}),datasets:[{label:'Interações',data:s.por_dia.map(d=>d.cnt),borderColor:'#6366f1',backgroundColor:'rgba(99,102,241,.15)',fill:true,tension:.3,pointRadius:4,pointBackgroundColor:'#6366f1'}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}});
-  aiaDestroyChart('cSent');aiaCharts.cSent=new Chart(document.getElementById('aia-cSent'),{type:'doughnut',data:{labels:s.sentimentos.map(x=>x.sentimento),datasets:[{data:s.sentimentos.map(x=>x.cnt),backgroundColor:s.sentimentos.map(x=>AIA_SENT_C[x.sentimento]||'#666')}]},options:{responsive:true,plugins:{legend:{position:'bottom',labels:{padding:12,usePointStyle:true}}},cutout:'60%'}});
-  const resC={sim:'#22c55e',parcial:'#eab308',nao:'#ef4444',escalado:'#6366f1','não':'#ef4444'};
-  aiaDestroyChart('cRes');aiaCharts.cRes=new Chart(document.getElementById('aia-cRes'),{type:'doughnut',data:{labels:s.resolvido.map(x=>x.resolvido),datasets:[{data:s.resolvido.map(x=>x.cnt),backgroundColor:s.resolvido.map(x=>resC[x.resolvido]||'#666')}]},options:{responsive:true,plugins:{legend:{position:'bottom',labels:{padding:12,usePointStyle:true}}},cutout:'60%'}});
-  aiaDestroyChart('cTema');aiaCharts.cTema=new Chart(document.getElementById('aia-cTema'),{type:'bar',data:{labels:s.temas.map(x=>x.tema),datasets:[{label:'Qtd',data:s.temas.map(x=>x.cnt),backgroundColor:s.temas.map((_,i)=>AIA_TEMA_C[i%AIA_TEMA_C.length]),borderRadius:6}]},options:{indexAxis:'horizontal',responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}});
-  aiaDestroyChart('cNps');const npsC=s.nps.map(x=>x.nps_implicito>=9?'#22c55e':x.nps_implicito>=7?'#eab308':'#ef4444');aiaCharts.cNps=new Chart(document.getElementById('aia-cNps'),{type:'bar',data:{labels:s.nps.map(x=>'NPS '+x.nps_implicito),datasets:[{label:'Qtd',data:s.nps.map(x=>x.cnt),backgroundColor:npsC,borderRadius:6}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}});
-  aiaDestroyChart('cHora');const hrs=Array.from({length:24},(_,i)=>i);const hd=hrs.map(h=>(s.por_hora.find(x=>x.h===h)||{cnt:0}).cnt);aiaCharts.cHora=new Chart(document.getElementById('aia-cHora'),{type:'bar',data:{labels:hrs.map(h=>h+'h'),datasets:[{label:'Interações',data:hd,backgroundColor:'rgba(59,130,246,.6)',borderRadius:4}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}});
+  const mk=(id,cfg)=>{const el=document.getElementById('aia-'+id);if(!el)return;aiaDestroyChart(id);aiaCharts[id]=new Chart(el,cfg);};
+  mk('cDia',{type:'line',data:{labels:s.por_dia.map(d=>{const dt=new Date(d.d+'T12:00:00');return dt.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'});}),datasets:[{label:'Interações',data:s.por_dia.map(d=>d.cnt),borderColor:'#6366f1',backgroundColor:'rgba(99,102,241,.15)',fill:true,tension:.3,pointRadius:4,pointBackgroundColor:'#6366f1'}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}});
+  mk('cTema',{type:'bar',data:{labels:s.temas.map(x=>x.tema),datasets:[{label:'Qtd',data:s.temas.map(x=>x.cnt),backgroundColor:s.temas.map((_,i)=>AIA_TEMA_C[i%AIA_TEMA_C.length]),borderRadius:6}]},options:{indexAxis:'horizontal',responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}});
+  const hrs=Array.from({length:24},(_,i)=>i);const hd=hrs.map(h=>(s.por_hora.find(x=>x.h===h)||{cnt:0}).cnt);
+  mk('cHora',{type:'bar',data:{labels:hrs.map(h=>h+'h'),datasets:[{label:'Interações',data:hd,backgroundColor:'rgba(59,130,246,.6)',borderRadius:4}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}});
   const sel=document.getElementById('aia-ftema');const cur=sel.value;sel.innerHTML='<option value="">Todos os Temas</option>'+s.temas.map(t=>`<option value="${t.tema}" ${t.tema===cur?'selected':''}>${t.tema} (${t.cnt})</option>`).join('');
 }
 async function aiaLoadTbl(){
@@ -2007,6 +2169,12 @@ async function aiaCorrSave(){
     const r=await fetch(AIA+'/api/corrigir/'+aiaCorrId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({resposta_correta:texto})}).then(r=>r.json());
     if(r.ok){
       toast('Correção salva na memória do agente!','success');
+      const card=document.querySelector('.aia-alert-card[data-alert-id="'+aiaCorrId+'"]');
+      if(card){
+        card.classList.add('corrigido');
+        const b=card.querySelector('.aia-btn-corr');
+        if(b)b.outerHTML='<span style="font-size:10px;color:var(--aia-green);font-weight:600;"><i class="fas fa-check"></i> Corrigido</span>';
+      }
       aiaCorrClose();
     }else{alert(r.error||r.msg||'Erro ao salvar');}
   }catch(e){alert('Erro de conexão: '+e);}
@@ -2015,27 +2183,192 @@ async function aiaCorrSave(){
 
 // ==== TABS ====
 function sw(t){document.querySelectorAll('.tc').forEach(e=>e.classList.add('hidden'));document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));document.getElementById('tab-'+t).classList.remove('hidden');document.querySelector(`.tab[data-tab="${t}"]`).classList.add('active');
-if(t==='dashboard')loadDash();if(t==='qa')loadQA();if(t==='logs')loadLogs();if(t==='prompts')loadPrompts();if(t==='playground')initPG();if(t==='agentia')initAgentIA();if(t==='audit')initAudit();if(t==='afterhours')initAfterHours();if(t==='team')loadTeam();if(t==='students')loadStudents();if(t==='alerts')loadAlerts();if(t==='menus')loadMenus();if(t==='agentcfg')loadAgentConfig();if(t==='conversations')loadConversations();if(t==='caa')initCaa();if(t==='calendar')initCalendar();if(t==='disparador')initDisparador();}
+if(t==='dashboard')loadDash();if(t==='desempenho')loadDesempenho();if(t==='qa')loadQA();if(t==='logs')loadLogs();if(t==='prompts')loadPrompts();if(t==='playground')initPG();if(t==='agentia')initAgentIA();if(t==='audit')initAudit();if(t==='afterhours')initAfterHours();if(t==='team')loadTeam();if(t==='students')loadStudents();if(t==='alerts')loadAlerts();if(t==='menus')loadMenus();if(t==='agentcfg')loadAgentConfig();if(t==='conversations')loadConversations();if(t==='caa')initCaa();if(t==='calendar')initCalendar();if(t==='disparador')initDisparador();}
 
 // ==== DASHBOARD ====
+function dashGroupActions(actions){
+  const DEF=[['Resolveu','#22c55e'],['Escalou p/ humano','#eab308'],['Menu/saudação','#60a5fa'],['Follow-up','#a78bfa'],['Retenção','#ef4444'],['Outros','#94a3b8']];
+  const b={'Resolveu':0,'Escalou p/ humano':0,'Menu/saudação':0,'Follow-up':0,'Retenção':0,'Outros':0};
+  const RES=['resolved','auto_reply','payment_confirmed','confirmacao_resolucao','closing','despedida','semestre_resolved','inicio_aulas_resolved','esqueci_senha_canonical'];
+  (actions||[]).forEach(o=>{
+    const a=(o.action||'').toLowerCase(), n=o.count||0;
+    if(a.includes('escalate')||a.includes('transfer')) b['Escalou p/ humano']+=n;
+    else if(RES.includes(a)) b['Resolveu']+=n;
+    else if(a.startsWith('menu')||a==='greeting'||a==='greeting_repeat'||a==='after_hours_first'||a==='not_in_base') b['Menu/saudação']+=n;
+    else if(a.startsWith('followup')||a==='auto_close') b['Follow-up']+=n;
+    else if(a.startsWith('retention')||a==='retention') b['Retenção']+=n;
+    else b['Outros']+=n;
+  });
+  const labels=[],data=[],colors=[];
+  DEF.forEach(([k,c])=>{ if(b[k]>0){labels.push(k);data.push(b[k]);colors.push(c);} });
+  return {labels,data,colors};
+}
 async function loadDash(){
-  const[st,an]=await Promise.all([fetch(A+'/api/stats').then(r=>r.json()),fetch(A+'/api/analytics').then(r=>r.json())]);
-  document.getElementById('s-total').textContent=st.total_qa.toLocaleString();
-  document.getElementById('s-emb').textContent=st.with_embedding.toLocaleString()+' com embedding';
-  document.getElementById('s-temas').textContent=st.temas.length;
-  document.getElementById('s-st').textContent=st.sem_tema+' sem tema';
-  document.getElementById('s-int').textContent=st.total_interactions.toLocaleString();
-  const ce=document.getElementById('s-conf');ce.textContent=st.avg_confidence.toFixed(2);ce.className='text-3xl font-extrabold mt-1 '+confCls(st.avg_confidence);
-  const es=an.eval_stats||{};const etot=Object.values(es).reduce((a,b)=>a+b,0);
-  document.getElementById('s-evals').textContent=etot;
-  document.getElementById('s-eval-detail').innerHTML=`<span class="text-green-600">${es.approved||0} boas</span> <span class="text-blue-600">${es.corrected||0} corrigidas</span> <span class="text-red-600">${es.rejected||0} ruins</span>`;
-  if(charts.temas)charts.temas.destroy();if(charts.actions)charts.actions.destroy();if(charts.evals)charts.evals.destroy();
-  charts.temas=new Chart(document.getElementById('cv-temas'),{type:'bar',data:{labels:st.temas.map(t=>t.tema),datasets:[{label:'Q&A',data:st.temas.map(t=>t.count),backgroundColor:'#818cf8',borderRadius:4}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{display:false},y:{ticks:{font:{size:10}}}}}});
-  const aLabels=st.interactions_by_action.map(a=>a.action);const aCols=aLabels.map(l=>l.includes('auto')?'#22c55e':l.includes('escalate')?'#eab308':'#ef4444');
-  charts.actions=new Chart(document.getElementById('cv-actions'),{type:'doughnut',data:{labels:aLabels,datasets:[{data:st.interactions_by_action.map(a=>a.count),backgroundColor:aCols,borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,cutout:'65%',plugins:{legend:{position:'bottom',labels:{font:{size:10},padding:8,usePointStyle:true}}}}});
-  if(etot>0){charts.evals=new Chart(document.getElementById('cv-evals'),{type:'doughnut',data:{labels:['Aprovadas','Corrigidas','Rejeitadas'],datasets:[{data:[es.approved||0,es.corrected||0,es.rejected||0],backgroundColor:['#22c55e','#3b82f6','#ef4444'],borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,cutout:'65%',plugins:{legend:{position:'bottom',labels:{font:{size:10},padding:8,usePointStyle:true}}}}});}
-  document.getElementById('top-esc').innerHTML=an.top_escalations.length?an.top_escalations.map(e=>`<div class="flex items-center gap-2 py-2 px-3 bg-gray-50 rounded-lg"><span class="badge b-red">${(e.confianca||0).toFixed(1)}</span><span class="flex-1 text-xs trunc2">${esc(e.pergunta)}</span><span class="badge b-gray">${e.acao}</span></div>`).join(''):'<div class="text-sm text-gray-400 text-center py-4">Nenhuma escalação</div>';
-  document.getElementById('cost-info').innerHTML=`<div class="flex items-baseline gap-2"><span class="text-4xl font-extrabold text-gray-800">$${an.estimated_cost_usd.toFixed(4)}</span><span class="text-sm text-gray-400">USD</span></div><div class="text-sm text-gray-500 mt-2"><i class="fas fa-coins text-amber-400 mr-1"></i>Tokens totais: ${(an.total_tokens||0).toLocaleString()}</div>`;
+  const[st,an,pu]=await Promise.all([
+    fetch(A+'/api/stats').then(r=>r.json()),
+    fetch(A+'/api/analytics').then(r=>r.json()),
+    fetch(A+'/api/dashboard/pulse').then(r=>r.json()).catch(()=>({}))
+  ]);
+  // KPIs
+  document.getElementById('d-hoje').textContent=(pu.hoje||0).toLocaleString();
+  const dhc=document.getElementById('d-hoje-cmp');
+  if(pu.d7!=null){const md=Math.round((pu.d7||0)/7);dhc.innerHTML='<span class="text-gray-400">média <b class="text-gray-500">'+md.toLocaleString()+'</b>/dia (7d)</span>';}
+  document.getElementById('d-auto').textContent=(pu.taxa_automacao!=null?pu.taxa_automacao+'%':'-');
+  const ce=document.getElementById('d-conf');ce.textContent=(st.avg_confidence||0).toFixed(2);ce.className='text-3xl font-extrabold mt-1 '+confCls(st.avg_confidence);
+  document.getElementById('d-qa').textContent=(st.total_qa||0).toLocaleString();
+  document.getElementById('d-qa-sub').textContent=(st.with_embedding||0).toLocaleString()+' com embedding · '+(st.temas?st.temas.length:0)+' temas';
+
+  const gridY={grid:{color:'rgba(148,163,184,.12)'},ticks:{font:{size:10}}}, gridX={grid:{display:false},ticks:{font:{size:10}}};
+  const dLeg={legend:{position:'bottom',labels:{font:{size:10},padding:8,usePointStyle:true,boxWidth:8}}};
+  const sp=pu.sparkline||[];
+  // sparkline mini
+  if(charts.dSpark)charts.dSpark.destroy();
+  charts.dSpark=new Chart(document.getElementById('cv-d-spark'),{type:'line',data:{labels:sp.map(x=>x.d),datasets:[{data:sp.map(x=>x.n),borderColor:'#6366f1',backgroundColor:'rgba(99,102,241,.18)',fill:true,tension:.4,pointRadius:0,borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{enabled:false}},scales:{x:{display:false},y:{display:false}}}});
+  // atividade 14d
+  if(charts.dAtiv)charts.dAtiv.destroy();
+  charts.dAtiv=new Chart(document.getElementById('cv-d-atividade'),{type:'bar',data:{labels:sp.map(x=>x.d),datasets:[{data:sp.map(x=>x.n),backgroundColor:'#818cf8',borderRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.parsed.y.toLocaleString()+' interações'}}},scales:{y:{beginAtZero:true,...gridY},x:gridX}}});
+  // o que a IA fez (agrupado)
+  const g=dashGroupActions(st.interactions_by_action);
+  if(charts.actions)charts.actions.destroy();
+  charts.actions=new Chart(document.getElementById('cv-actions'),{type:'doughnut',data:{labels:g.labels,datasets:[{data:g.data,backgroundColor:g.colors,borderWidth:2,borderColor:'#fff'}]},options:{responsive:true,maintainAspectRatio:false,cutout:'60%',plugins:{legend:{position:'bottom',labels:{font:{size:10},padding:6,usePointStyle:true,boxWidth:8}},tooltip:{callbacks:{label:c=>c.label+': '+c.parsed.toLocaleString()}}}}});
+  // base por tema (top 10)
+  const tp=(st.temas||[]).slice(0,10);
+  if(charts.temas)charts.temas.destroy();
+  charts.temas=new Chart(document.getElementById('cv-temas'),{type:'bar',data:{labels:tp.map(t=>t.tema),datasets:[{data:tp.map(t=>t.count),backgroundColor:'#818cf8',borderRadius:4}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.parsed.x.toLocaleString()+' Q&A'}}},scales:{x:{...gridY},y:{ticks:{font:{size:10}},grid:{display:false}}}}});
+  // avaliacoes
+  const es=an.eval_stats||{};const etot=(es.approved||0)+(es.corrected||0)+(es.rejected||0);
+  if(charts.evals)charts.evals.destroy();
+  document.getElementById('d-evals-empty').classList.toggle('hidden', etot>0);
+  if(etot>0){charts.evals=new Chart(document.getElementById('cv-evals'),{type:'doughnut',data:{labels:['Aprovadas','Corrigidas','Rejeitadas'],datasets:[{data:[es.approved||0,es.corrected||0,es.rejected||0],backgroundColor:['#22c55e','#3b82f6','#ef4444'],borderWidth:2,borderColor:'#fff'}]},options:{responsive:true,maintainAspectRatio:false,cutout:'62%',plugins:dLeg}});}
+  // top escalacoes
+  document.getElementById('top-esc').innerHTML=(an.top_escalations&&an.top_escalations.length)?an.top_escalations.map(e=>`<div class="flex items-center gap-2 py-2 px-3 rounded-lg" style="background:rgba(148,163,184,.08)"><span class="badge b-red">${(e.confianca||0).toFixed(1)}</span><span class="flex-1 text-xs trunc2">${esc(e.pergunta)}</span><span class="badge b-gray">${e.acao}</span></div>`).join(''):'<div class="text-sm text-gray-400 text-center py-4">Nenhuma escalação</div>';
+  // custo REAL de producao (Item 0). Sem dados ate o deploy do agente instrumentado.
+  const temCusto=(pu.respostas_com_custo_7d||0)>0;
+  document.getElementById('cost-info').innerHTML = temCusto ? (
+    `<div class="flex items-baseline gap-2"><span class="text-4xl font-extrabold">$${(pu.custo_7d||0).toFixed(2)}</span><span class="text-sm text-gray-400">USD · 7 dias</span></div>`+
+    `<div class="text-sm text-gray-500 mt-2"><i class="fas fa-coins text-amber-400 mr-1"></i>${(pu.tokens_7d||0).toLocaleString()} tokens · ${(pu.respostas_com_custo_7d||0).toLocaleString()} respostas</div>`+
+    `<div class="text-[11px] text-gray-400 mt-2">custo real de produção (últimos 7 dias)</div>`
+  ) : (
+    `<div class="text-2xl font-extrabold text-gray-400">— <span class="text-sm font-normal">sem dados ainda</span></div>`+
+    `<div class="text-[11px] text-gray-400 mt-2 flex items-start gap-1.5"><i class="fas fa-circle-info mt-0.5"></i><span>O custo real começa a ser medido <b>após o deploy</b> do agente instrumentado. O número antigo (Playground) foi removido por não refletir a produção.</span></div>`
+  );
+}
+
+// ==== DESEMPENHO ====
+function dzDur(s){if(s==null)return '-';s=+s;if(s<60)return Math.round(s)+'s';if(s<3600)return (s/60).toFixed(1)+'min';if(s<86400)return (s/3600).toFixed(1)+'h';return (s/86400).toFixed(1)+'d';}
+function dzDelta(oldv,newv){ // p/ metricas onde MENOR e melhor
+  if(!oldv||!newv) return {t:'',cls:''};
+  const p=Math.round((1-newv/oldv)*100);
+  if(p>0) return {t:'↓'+p+'%',cls:'text-green-600'};
+  if(p<0) return {t:'↑'+Math.abs(p)+'%',cls:'text-red-500'};
+  return {t:'=',cls:'text-gray-400'};
+}
+let _dzLoaded=false;
+async function loadDesempenho(force){
+  if(_dzLoaded && !force) return;
+  document.getElementById('dz-loading').classList.remove('hidden');
+  document.getElementById('dz-body').classList.add('hidden');
+  let d;
+  try{ d=await (await fetch(A+'/api/desempenho')).json(); }
+  catch(e){ document.getElementById('dz-loading').innerHTML='<div class="text-red-500 text-sm">Erro ao carregar: '+e+'</div>'; return; }
+  _dzLoaded=true;
+  if(d.gerado_em){document.getElementById('dz-gerado').textContent='• atualizado '+new Date(d.gerado_em).toLocaleString('pt-BR');}
+  const an=(d.eras&&d.eras.antiga)||{}, ag=(d.eras&&d.eras.agente)||{}, au=d.autonomia||{}, dr=d.distribuicao_resumo||{};
+  // hero: tempo mediana
+  document.getElementById('dz-med-old').textContent=dzDur(an.mediana_s);
+  document.getElementById('dz-med-new').textContent=dzDur(ag.mediana_s);
+  const dM=dzDelta(an.mediana_s,ag.mediana_s); const eM=document.getElementById('dz-med-delta'); eM.textContent=dM.t; eM.className='ml-auto text-sm font-bold mb-1 '+dM.cls;
+  // hero: p90
+  document.getElementById('dz-p90-old').textContent=dzDur(an.p90_s);
+  document.getElementById('dz-p90-new').textContent=dzDur(ag.p90_s);
+  const dP=dzDelta(an.p90_s,ag.p90_s); const eP=document.getElementById('dz-p90-delta'); eP.textContent=dP.t; eP.className='ml-auto text-sm font-bold mb-1 '+dP.cls;
+  // hero: autonomia + distribuicao
+  document.getElementById('dz-auto-new').textContent=(au.pct_so_ia||0)+'%';
+  document.getElementById('dz-auto-sub').textContent=(au.so_ia||0).toLocaleString()+' de '+(au.ia_total||0).toLocaleString()+' conversas sem precisar de humano';
+  document.getElementById('dz-dist-med').textContent=dzDur(dr.mediana_s);
+  document.getElementById('dz-dist-sub').innerHTML=(dr.pct_normal!=null?'<b>'+dr.pct_normal+'%</b> encaminhados em até 1h · ':'')+'casos frescos (30d)';
+  document.getElementById('dz-loading').classList.add('hidden');
+  document.getElementById('dz-body').classList.remove('hidden');
+  const legBot={legend:{position:'bottom',labels:{font:{size:10},padding:10,usePointStyle:true,boxWidth:8}}};
+  const gridY={grid:{color:'rgba(0,0,0,.05)'},ticks:{font:{size:10}}}, gridX={grid:{display:false},ticks:{font:{size:10}}};
+  // evolucao do tempo (mediana em min, linha simples, SEM log)
+  const tm=d.tempo_humano_mensal||[];
+  if(charts.dzHum)charts.dzHum.destroy();
+  charts.dzHum=new Chart(document.getElementById('cv-dz-humano'),{type:'line',data:{labels:tm.map(x=>x.mes),datasets:[
+    {label:'mediana',data:tm.map(x=>x.mediana_s!=null?+(x.mediana_s/60).toFixed(1):null),borderColor:'#6366f1',backgroundColor:'rgba(99,102,241,.12)',fill:true,tension:.35,spanGaps:true,pointRadius:4,pointBackgroundColor:'#6366f1',borderWidth:2.5}
+  ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.parsed.y+' min'}}},scales:{y:{beginAtZero:true,title:{display:true,text:'minutos',font:{size:10}},...gridY},x:gridX}}});
+  // volume IA vs humano (barras empilhadas)
+  const vm=d.volume_mensal||[];
+  if(charts.dzVol)charts.dzVol.destroy();
+  charts.dzVol=new Chart(document.getElementById('cv-dz-volume'),{type:'bar',data:{labels:vm.map(x=>x.mes),datasets:[
+    {label:'IA',data:vm.map(x=>x.ia),backgroundColor:'#818cf8',borderRadius:4},
+    {label:'Humano',data:vm.map(x=>x.humano),backgroundColor:'#f59e0b',borderRadius:4}
+  ]},options:{responsive:true,maintainAspectRatio:false,plugins:legBot,scales:{x:{stacked:true,...gridX},y:{stacked:true,...gridY}}}});
+  // o que a IA fez (rosca) — com % na legenda
+  const mx=d.mix_acoes||{}, mtot=mx.total||1;
+  const mxLabels=['Resolveu','Escalou p/ humano','Menu/saudação','Follow-up/encerrou','Retenção'];
+  const mxData=[mx.resolveu||0,mx.escalou||0,mx.navegacao||0,mx.followup||0,mx.retencao||0];
+  if(charts.dzMix)charts.dzMix.destroy();
+  charts.dzMix=new Chart(document.getElementById('cv-dz-mix'),{type:'doughnut',data:{labels:mxLabels.map((l,i)=>l+' ('+Math.round(100*mxData[i]/mtot)+'%)'),datasets:[{data:mxData,backgroundColor:['#22c55e','#eab308','#60a5fa','#a78bfa','#ef4444'],borderWidth:2,borderColor:'#fff'}]},options:{responsive:true,maintainAspectRatio:false,cutout:'60%',plugins:{legend:{position:'right',labels:{font:{size:10},padding:8,usePointStyle:true,boxWidth:8}},tooltip:{callbacks:{label:c=>c.label.split(' (')[0]+': '+c.parsed.toLocaleString()}}}}});
+  // rapidez para encaminhar por semana (barras simples, segundos)
+  const ds=d.distribuicao_semanal||[];
+  if(charts.dzDist)charts.dzDist.destroy();
+  charts.dzDist=new Chart(document.getElementById('cv-dz-dist'),{type:'bar',data:{labels:ds.map(x=>x.semana.slice(5)),datasets:[
+    {label:'mediana (s)',data:ds.map(x=>x.mediana_s),backgroundColor:'#38bdf8',borderRadius:4}
+  ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>dzDur(c.parsed.y)+' (mediana)'}}},scales:{y:{beginAtZero:true,title:{display:true,text:'segundos',font:{size:10}},...gridY},x:gridX}}});
+  // retencao semanal (tabela)
+  const rt=d.retencao_semanal||[];
+  document.getElementById('dz-ret').innerHTML = rt.length ? (
+    '<table class="w-full text-xs"><thead><tr class="text-gray-400 text-left border-b"><th class="py-1.5">Semana</th><th>Casos</th><th>% na hora</th><th>Mediana</th></tr></thead><tbody>'+
+    rt.map(x=>'<tr class="border-b border-gray-50"><td class="py-1.5">'+x.semana+'</td><td>'+x.total+'</td><td>'+(x.pct_normal!=null?x.pct_normal+'%':'-')+'</td><td class="font-semibold">'+dzDur(x.mediana_s)+'</td></tr>').join('')+
+    '</tbody></table>') : '<div class="text-gray-400 text-sm py-4 text-center">sem dados no período</div>';
+  // funil disparo
+  const f=d.funil_disparo||{};
+  document.getElementById('dz-funil').innerHTML = f.erro ? ('<div class="text-red-400 text-sm">'+esc(f.erro)+'</div>') : (
+    '<div class="space-y-3">'+
+    '<div class="flex items-baseline justify-between"><span class="text-sm text-gray-500"><i class="fas fa-paper-plane text-gray-300 mr-2"></i>Disparos enviados</span><span class="text-2xl font-extrabold text-gray-800">'+(f.enviados||0).toLocaleString()+'</span></div>'+
+    '<div class="flex items-baseline justify-between"><span class="text-sm text-gray-500"><i class="fas fa-reply text-indigo-300 mr-2"></i>Respostas recebidas</span><span class="text-2xl font-extrabold text-indigo-600">'+(f.respostas||0).toLocaleString()+'</span></div>'+
+    '<div class="flex items-baseline justify-between pt-2 border-t"><span class="text-sm text-gray-500"><i class="fas fa-percent text-green-300 mr-2"></i>Taxa de resposta</span><span class="text-2xl font-extrabold text-green-600">'+(f.pct_resposta||0)+'%</span></div>'+
+    '</div>');
+  loadDesempenhoQualidade();
+}
+
+async function loadDesempenhoQualidade(){
+  const h=document.getElementById('dzq-hours')?.value||'168';
+  let q;
+  try{ q=await (await fetch(A+'/api/desempenho/qualidade?hours='+h)).json(); }
+  catch(e){ return; }
+  const sev=q.por_severidade||{};
+  document.getElementById('dzq-alta').textContent=(sev.alta||0).toLocaleString();
+  document.getElementById('dzq-media').textContent=(sev.media||0).toLocaleString();
+  document.getElementById('dzq-baixa').textContent=(sev.baixa||0).toLocaleString();
+  // taxa de problema (amostra auditada do supervisor): problems_found / audited_total.
+  // Denominador consistente (mesma amostra), diferente dos findings historicos persistidos.
+  const sup=q.supervisor||{};
+  const aud=sup.audited_total||0;
+  const prob=sup.problems_found||0;
+  const taxa=aud>0?Math.round(1000*prob/aud)/10:null;
+  document.getElementById('dzq-taxa').textContent=taxa!=null?('~'+taxa+'%'):'—';
+  // grafico por dia
+  const pd=q.por_dia||[];
+  const gridY={grid:{color:'rgba(0,0,0,.05)'},ticks:{font:{size:10}}}, gridX={grid:{display:false},ticks:{font:{size:10}}};
+  if(charts.dzqDia)charts.dzqDia.destroy();
+  charts.dzqDia=new Chart(document.getElementById('cv-dzq-dia'),{type:'bar',data:{labels:pd.map(x=>x.d),datasets:[
+    {label:'problemas',data:pd.map(x=>x.n),backgroundColor:'#a855f7',borderRadius:4}
+  ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,...gridY},x:gridX}}});
+  // top tipos
+  const tp=q.top_tipos||[];
+  const maxN=tp.length?Math.max(...tp.map(x=>x.n)):1;
+  document.getElementById('dzq-tipos').innerHTML = tp.length ? tp.map(x=>
+    '<div><div class="flex justify-between text-xs mb-0.5"><span class="text-gray-600 truncate" style="max-width:75%">'+esc(String(x.tipo))+'</span><span class="font-semibold text-gray-500">'+x.n+'</span></div>'+
+    '<div class="h-1.5 rounded-full bg-gray-100"><div class="h-1.5 rounded-full" style="width:'+Math.round(100*x.n/maxN)+'%;background:#a855f7"></div></div></div>'
+  ).join('') : '<div class="text-gray-400 text-sm py-3 text-center">sem problemas no período 🎉</div>';
+  // rodape: contexto vida do supervisor
+  const parts=[];
+  parts.push((q.abertos||0)+' em aberto · '+(q.resolvidos||0)+' resolvidos');
+  if(aud) parts.push((aud).toLocaleString()+' conversas auditadas (total)');
+  if(sup.model) parts.push('modelo '+esc(sup.model));
+  document.getElementById('dzq-sup').textContent=parts.join(' · ');
 }
 
 // ==== QA LIST ====
@@ -2370,16 +2703,16 @@ async function loadAuditSupStatus(){
       return;
     }
     const s=d.stats;
-    const lastAt=s.last_cycle_at?new Date(s.last_cycle_at*1000).toLocaleString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—';
-    const errStyle=s.errors>0?'color:#dc2626':'color:#6b7280';
-    el.innerHTML=`
-      <span class="font-mono">modelo: <strong>${esc(s.model||'?')}</strong></span> ·
-      ciclos: <strong>${s.cycles||0}</strong> ·
-      convs auditadas: <strong>${s.audited_total||0}</strong> ·
-      problemas detectados: <strong>${s.problems_found||0}</strong> ·
-      <span style="${errStyle}">erros: <strong>${s.errors||0}</strong>${s.last_error?' — '+esc(s.last_error).substring(0,60):''}</span> ·
-      último ciclo: ${lastAt} (auditou ${s.last_cycle_audited||0} de ${s.convs_listed||0} listadas)
-    `;
+    const lastAt=s.last_cycle_at?new Date(s.last_cycle_at*1000).toLocaleString('pt-BR',{hour:'2-digit',minute:'2-digit'}):'—';
+    const chip=(txt)=>`<span class="inline-block px-2 py-0.5 bg-gray-100 rounded-md">${txt}</span>`;
+    const errChip=s.errors>0?`<span class="inline-block px-2 py-0.5 rounded-md" style="background:#fee2e2;color:#dc2626">erros: <strong>${s.errors}</strong></span>`:'';
+    el.innerHTML=`<div class="flex flex-wrap items-center gap-1.5">
+      ${chip(`modelo <strong>${esc(s.model||'?')}</strong>`)}
+      ${chip(`ciclos <strong>${s.cycles||0}</strong>`)}
+      ${chip(`auditadas <strong>${s.audited_total||0}</strong>`)}
+      ${chip(`último ciclo <strong>${lastAt}</strong>`)}
+      ${errChip}
+    </div>`;
   }catch(e){
     el.innerHTML='<span class="text-red-500">Erro ao carregar status</span>';
   }
@@ -2400,24 +2733,32 @@ async function loadAuditFindings(){
     document.getElementById('audit-list').innerHTML='<div class="text-sm text-red-600">Erro ao carregar</div>';
   }
 }
+function auditSetSev(s){
+  const cur=document.getElementById('audit-sev');
+  if(!cur)return;
+  cur.value=(cur.value===s)?'':s; // clicar de novo no mesmo card limpa o filtro
+  loadAuditFindings();
+}
 function renderAuditCounts(counts){
   const alta=counts.alta||0,media=counts.media||0,baixa=counts.baixa||0;
   const el=document.getElementById('audit-counts');
   if(!el)return;
-  el.innerHTML=`
-    <div class="bg-red-50 border border-red-200 rounded-xl p-3 flex items-center gap-3">
-      <i class="fas fa-circle-exclamation text-red-500 text-xl"></i>
-      <div><div class="text-xs text-red-700">Alta severidade</div><div class="text-xl font-bold text-red-700">${alta}</div></div>
-    </div>
-    <div class="bg-yellow-50 border border-yellow-200 rounded-xl p-3 flex items-center gap-3">
-      <i class="fas fa-triangle-exclamation text-yellow-500 text-xl"></i>
-      <div><div class="text-xs text-yellow-700">Média</div><div class="text-xl font-bold text-yellow-700">${media}</div></div>
-    </div>
-    <div class="bg-gray-50 border border-gray-200 rounded-xl p-3 flex items-center gap-3">
-      <i class="fas fa-info-circle text-gray-500 text-xl"></i>
-      <div><div class="text-xs text-gray-700">Baixa</div><div class="text-xl font-bold text-gray-700">${baixa}</div></div>
-    </div>
-  `;
+  const sel=document.getElementById('audit-sev')?.value||'';
+  const card=(sev,label,val,ico,color,hex)=>{
+    const active=sel===sev;
+    return `<button onclick="auditSetSev('${sev}')" class="card p-4 text-left transition ${active?'ring-2 ring-'+color+'-400':''}" style="border-top:3px solid ${hex}">
+      <div class="flex items-center justify-between">
+        <span class="text-xs font-semibold uppercase tracking-wide text-${color}-600">${label}</span>
+        <i class="fas ${ico} text-${color}-400"></i>
+      </div>
+      <div class="text-3xl font-extrabold text-${color}-600 mt-1 tabular-nums">${val}</div>
+      <div class="text-[11px] text-gray-400 mt-0.5">${active?'filtrando · clique p/ limpar':'clique p/ filtrar'}</div>
+    </button>`;
+  };
+  el.innerHTML=
+    card('alta','Alta severidade',alta,'fa-circle-exclamation','red','#ef4444')+
+    card('media','Média',media,'fa-triangle-exclamation','yellow','#eab308')+
+    card('baixa','Baixa',baixa,'fa-info-circle','gray','#9ca3af');
 }
 function auditLinks(it){
   // DCZ nao expoe URL publica /leads/{id} (da 404). O caminho que funciona
@@ -2426,17 +2767,13 @@ function auditLinks(it){
   const d=it.detail||{};
   const leadId=d.lead_id||d.leadId||'';
   const phone=it.phone||d.phone||'';
-  const convId=it.conv_id||'';
   let out='';
   if(phone){
     const u=DCZ_APP+'/multiservice?search='+encodeURIComponent(phone);
-    out+=`<a href="${u}" target="_blank" rel="noopener" class="btn btn-sm" style="font-size:11px;padding:4px 10px;background:#6366f1;color:#fff;text-decoration:none;border-radius:6px;"><i class="fas fa-external-link-alt mr-1"></i>Abrir no CRM (telefone)</a>`;
+    out+=`<a href="${u}" target="_blank" rel="noopener" class="btn btn-g btn-sm"><i class="fas fa-external-link-alt mr-1"></i>Abrir no CRM</a>`;
   }
   if(leadId){
-    out+=`<button class="btn btn-sm ml-1" onclick="navigator.clipboard.writeText('${leadId}');toast('Lead ID copiado','info');return false;" style="font-size:11px;padding:4px 10px;background:#0ea5e9;color:#fff;border:none;border-radius:6px;cursor:pointer;" title="${leadId}"><i class="fas fa-copy mr-1"></i>Copiar Lead ID</button>`;
-  }
-  if(!leadId && !phone && convId){
-    out+=`<span class="text-xs text-gray-400 ml-1">conv: <span class="font-mono">${convId.substring(0,18)}</span></span>`;
+    out+=`<button class="btn btn-g btn-sm" onclick="navigator.clipboard.writeText('${leadId}');toast('Lead ID copiado','info');return false;" title="${leadId}"><i class="fas fa-copy mr-1"></i>Copiar Lead ID</button>`;
   }
   return out;
 }
@@ -2445,39 +2782,45 @@ function renderAuditList(items){
   const el=document.getElementById('audit-list');
   if(!el)return;
   if(!items.length){el.innerHTML='<div class="text-center text-sm text-gray-400 py-6">🎉 Nenhum problema flagrado nesse filtro</div>';return;}
+  const sevBar={alta:'#ef4444',media:'#eab308',baixa:'#9ca3af'};
   el.innerHTML=items.map(it=>{
     const sevCls=AUDIT_SEV_BADGE[it.severity]||'b-gray';
     const sevLabel=({alta:'ALTA',media:'MÉDIA',baixa:'BAIXA'}[it.severity]||(it.severity||'').toUpperCase());
     const typeLabel=AUDIT_TYPE_LABELS[it.problem_type]||it.problem_type||'—';
     const dt=it.created_at?new Date(it.created_at).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
-    const resolved=it.resolved_at?`<span class="badge b-green ml-2"><i class="fas fa-check"></i> Resolvido ${it.resolved_by||''}</span>`:'';
-    const blocked=it.action_taken==='agent_silenced'?'<span class="badge b-red ml-2"><i class="fas fa-microphone-slash"></i> Agente silenciado</span>':'';
-    const trecho=(it.detail&&it.detail.trecho)?`<div class="mt-1.5 text-xs text-gray-500 italic">"${esc(it.detail.trecho).substring(0,180)}"</div>`:'';
+    const resolved=it.resolved_at?`<span class="badge b-green"><i class="fas fa-check"></i> Resolvido ${esc(it.resolved_by||'')}</span>`:'';
+    const blocked=it.action_taken==='agent_silenced'?'<span class="badge b-red"><i class="fas fa-microphone-slash"></i> Agente silenciado</span>':'';
+    const trecho=(it.detail&&it.detail.trecho)?`<div class="mt-1.5 text-xs text-gray-500 italic border-l-2 border-gray-200 pl-2">"${esc(it.detail.trecho).substring(0,180)}"</div>`:'';
     const win=(it.detail&&it.detail.window)?(it.detail.window.map(m=>`<div class="text-xs"><span class="font-mono text-gray-400">[${m.role}]</span> ${esc(m.body)}</div>`).join('')):'';
-    const links=auditLinks(it);
+    const who=it.phone?('tel '+esc(it.phone)):('conv '+(it.conv_id||'').substring(0,12));
+    // ---- linha de ações unificada (mesmo tamanho/estilo p/ todos os botões) ----
+    const acts=[];
+    if(!it.resolved_at && it.problem_type==='assignment_mismatch')
+      acts.push(`<button id="fix-${it.id}" class="btn btn-s btn-sm" onclick="autoFixAudit(${it.id})"><i class="fas fa-wand-magic-sparkles mr-1"></i>Corrigir agora</button>`);
+    acts.push(auditLinks(it));
+    if(!it.resolved_at)
+      acts.push(`<button class="btn btn-g btn-sm" onclick="resolveAudit(${it.id},false)"><i class="fas fa-box-archive mr-1"></i>Arquivar</button>`);
+    if(!it.resolved_at&&it.action_taken==='agent_silenced')
+      acts.push(`<button class="btn btn-w btn-sm" onclick="resolveAudit(${it.id},true)"><i class="fas fa-unlock mr-1"></i>Liberar agente</button>`);
+    const actsHtml=acts.filter(Boolean).join('');
     return `
-      <div class="p-3 bg-white border border-gray-200 rounded-xl">
-        <div class="flex items-start gap-2 flex-wrap">
+      <div class="card p-4" style="border-left:3px solid ${sevBar[it.severity]||'#9ca3af'}">
+        <div class="flex items-center gap-2 flex-wrap">
           <span class="badge ${sevCls}">${sevLabel}</span>
           <span class="badge b-gray">${esc(typeLabel)}</span>
-          <span class="text-xs text-gray-400">${dt}</span>
           ${resolved}${blocked}
-          <div class="ml-auto text-right">
-            <div class="text-xs text-gray-400">${it.phone?'tel: '+esc(it.phone):'conv: <span class="font-mono">'+(it.conv_id||'').substring(0,12)+'</span>'}</div>
-            ${it.student_first_name?`<div class="text-xs text-gray-500 font-medium">${esc(it.student_first_name)}</div>`:''}
+          <div class="ml-auto text-right leading-tight">
+            ${it.student_first_name?`<div class="text-xs text-gray-600 font-semibold">${esc(it.student_first_name)}</div>`:''}
+            <div class="text-[11px] text-gray-400">${who} · ${dt}</div>
           </div>
         </div>
-        <div class="mt-2 text-sm text-gray-800">${esc(it.summary||'')}</div>
+        <div class="mt-2 text-sm text-gray-800 leading-snug">${esc(it.summary||'')}</div>
         ${trecho}
-        ${win?`<details class="mt-2"><summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-700">Ver janela analisada (supervisor)</summary><div class="mt-1.5 p-2 bg-gray-50 rounded-lg space-y-0.5">${win}</div></details>`:''}
-        <details class="mt-2" id="conv-wrap-${it.id}"><summary class="cursor-pointer text-xs text-blue-600 hover:text-blue-800 font-medium" onclick="loadAuditConv(${it.id}, this)"><i class="fas fa-comments mr-1"></i>Ver conversa completa</summary><div id="conv-${it.id}" class="audit-chat-box mt-2 p-3 rounded-lg max-h-80 overflow-y-auto text-xs space-y-1.5"><div class="audit-chat-empty">Carregando...</div></div></details>
-        ${links?`<div class="mt-2 flex flex-wrap items-center gap-1">${links}</div>`:''}
-        <div class="mt-2 flex items-center gap-2 text-xs flex-wrap">
-          ${!it.resolved_at && it.problem_type==='assignment_mismatch'?`<button id="fix-${it.id}" class="btn btn-sm" onclick="autoFixAudit(${it.id})" style="background:#16a34a;color:#fff;font-size:11px;padding:6px 12px;border:none;border-radius:6px;cursor:pointer;"><i class="fas fa-wand-magic-sparkles mr-1"></i>Corrigir agora</button>`:''}
-          ${!it.resolved_at?`<button class="btn btn-sm" onclick="resolveAudit(${it.id},false)" style="background:#6b7280;color:#fff;font-size:11px;padding:6px 12px;border:none;border-radius:6px;cursor:pointer;"><i class="fas fa-archive"></i> Apenas arquivar</button>`:''}
-          ${(!it.resolved_at&&it.action_taken==='agent_silenced')?`<button class="btn btn-w btn-sm" onclick="resolveAudit(${it.id},true)"><i class="fas fa-unlock"></i> Liberar agente</button>`:''}
-          <span class="text-gray-400 ml-auto">modelo: ${esc(it.model||'')}</span>
+        <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+          <details id="conv-wrap-${it.id}"><summary class="cursor-pointer text-xs text-blue-600 hover:text-blue-800 font-medium" onclick="loadAuditConv(${it.id}, this)"><i class="fas fa-comments mr-1"></i>Ver conversa</summary><div id="conv-${it.id}" class="audit-chat-box mt-2 p-3 rounded-lg max-h-80 overflow-y-auto text-xs space-y-1.5"><div class="audit-chat-empty">Carregando…</div></div></details>
+          ${win?`<details><summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-700">Janela do supervisor</summary><div class="mt-1.5 p-2 bg-gray-50 rounded-lg space-y-0.5">${win}</div></details>`:''}
         </div>
+        ${actsHtml?`<div class="mt-3 pt-3 border-t border-gray-100 flex flex-wrap items-center gap-1.5">${actsHtml}<span class="text-[11px] text-gray-300 ml-auto">${esc(it.model||'')}</span></div>`:''}
       </div>`;
   }).join('');
 }
@@ -2545,6 +2888,9 @@ async function autoFixAudit(id){
 
 // ==== FORA DO HORÁRIO ====
 let aohClockInt=null;
+let aohPage=0;
+const AOH_PAGE_SIZE=20;
+function aohGoPage(delta){aohPage=Math.max(0,aohPage+delta);loadAfterHours(true);}
 const AOH_REASON_LABELS={
   escalate_after_hours:'Pediu atendente',
   retention_after_hours:'Retenção (cancel/tranc)',
@@ -2569,13 +2915,15 @@ function aohTickClock(){
   const de=document.getElementById('aoh-date');
   if(de)de.textContent=sp.toLocaleDateString('pt-BR',{weekday:'long',day:'2-digit',month:'long',year:'numeric'});
 }
-async function loadAfterHours(){
+async function loadAfterHours(keepPage){
+  if(!keepPage)aohPage=0;
   try{
     const st=document.getElementById('aoh-filter-status')?.value||'active';
     const tier=document.getElementById('aoh-filter-tier')?.value||'';
+    const off=aohPage*AOH_PAGE_SIZE;
     const [status,pending]=await Promise.all([
       fetch(A+'/api/after-hours/status').then(r=>r.json()),
-      fetch(A+'/api/after-hours/pending?status='+encodeURIComponent(st)+(tier?'&tier='+tier:'')).then(r=>r.json()),
+      fetch(A+'/api/after-hours/pending?status='+encodeURIComponent(st)+(tier?'&tier='+tier:'')+'&limit='+AOH_PAGE_SIZE+'&offset='+off).then(r=>r.json()),
     ]);
     const badge=document.getElementById('aoh-mode-badge');
     if(badge){
@@ -2591,11 +2939,10 @@ async function loadAfterHours(){
     const ad=status.auto_dispatch||{};
     const adEl=document.getElementById('aoh-auto-desc');
     const adLast=document.getElementById('aoh-auto-last');
-    const adBanner=document.getElementById('aoh-auto-banner');
+    const autoOn=ad.enabled!==false;
+    let sysProblem=!autoOn;
     if(adEl){
-      const on=ad.enabled!==false;
-      adEl.textContent=(ad.description||'')+(on?'':' (desligado nas configurações do agente — reinicie após salvar.)');
-      if(adBanner)adBanner.className='card p-4 mt-4 border '+(on?'border-indigo-100 bg-indigo-50/40':'border-gray-200 bg-gray-50');
+      adEl.textContent=(ad.description||'')+(autoOn?'':' (desligado nas configurações do agente — reinicie após salvar.)');
     }
     if(adLast){
       const lr=ad.last_run_date;
@@ -2608,8 +2955,8 @@ async function loadAfterHours(){
       const stHb=wd.heartbeat_status||'?';
       let cls='text-emerald-700',label='ok';
       if(age===null||age===undefined){cls='text-gray-500';label='sem dados';}
-      else if(stHb!=='online'){cls='text-rose-700';label=stHb;}
-      else if(age>5){cls='text-rose-700';label='travado ('+age+' min)';}
+      else if(stHb!=='online'){cls='text-rose-700';label=stHb;sysProblem=true;}
+      else if(age>5){cls='text-rose-700';label='travado ('+age+' min)';sysProblem=true;}
       else if(age>2){cls='text-amber-700';label='atrasado ('+age+' min)';}
       else label='ok ('+age+' min)';
       let extra='';
@@ -2618,6 +2965,13 @@ async function loadAfterHours(){
         extra=' · último restart automático: '+(r.when||'').replace('T',' ').slice(0,19)+(r.reason?(' — '+r.reason):'');
       }
       wdEl.innerHTML='Watchdog: <strong class="'+cls+'">'+label+'</strong>'+extra;
+    }
+    // Sinaliza no cabeçalho recolhível e abre sozinho só quando há algo pedindo atenção
+    const sysD=document.getElementById('aoh-sys');
+    const sysFlag=document.getElementById('aoh-sys-flag');
+    if(sysFlag){
+      if(sysProblem){sysFlag.innerHTML='<span class="text-rose-600">⚠ requer atenção</span>';if(sysD)sysD.open=true;}
+      else sysFlag.innerHTML='<span class="text-emerald-600">tudo ok</span>';
     }
     const bh=status.business_hours||{};
     document.getElementById('aoh-hours-info').innerHTML=
@@ -2635,25 +2989,59 @@ async function loadAfterHours(){
       empty.classList.remove('hidden');
     }else{
       empty.classList.add('hidden');
-      const statusLbl={pending:'Pendente',in_progress:'Em atendimento',resolved:'Resolvido',dismissed:'Dispensado',closed_no_engagement:'Encerrado sem atendimento'};
+      const statusLbl={pending:'A atender',in_progress:'Em atendimento',resolved:'Concluído',dismissed:'Dispensado',closed_no_engagement:'Encerrado (sem resposta)'};
       tbody.innerHTML=items.map(r=>{
         const dcz=dczLink({phone:r.phone||''});
         const tierBadge=r.tier==='insist'?'<span class="badge b-red">Insistência</span>':'<span class="badge b-yellow">1º pedido</span>';
         const stCls=r.status==='pending'?'b-yellow':r.status==='in_progress'?'b-blue':r.status==='closed_no_engagement'?'b-gray':'b-green';
-        return `<tr class="${r.tier==='insist'?'bg-amber-50/50':''}">
+        const nm=(r.student_name||'').trim();
+        const primary=nm||r.phone||'—';
+        const secondary=nm?(r.phone||''):'';
+        return `<tr class="${r.tier==='insist'?'aoh-insist':''}">
           <td class="p-3 whitespace-nowrap text-xs">${r.created_at?new Date(r.created_at).toLocaleString('pt-BR'):'—'}</td>
-          <td class="p-3"><strong>${esc(r.student_name||'—')}</strong><br><span class="text-xs text-gray-400">${esc(r.phone||'')}</span></td>
+          <td class="p-3"><strong>${esc(primary)}</strong>${secondary?`<br><span class="text-xs text-gray-400">${esc(secondary)}</span>`:''}</td>
           <td class="p-3 text-xs">${esc(AOH_REASON_LABELS[r.reason]||r.reason)}</td>
           <td class="p-3">${tierBadge}</td>
           <td class="p-3 text-xs font-medium text-amber-700">${esc(r.retorno_label||'—')}</td>
           <td class="p-3"><span class="badge ${stCls}">${statusLbl[r.status]||r.status}</span></td>
           <td class="p-3 whitespace-nowrap">
-            <a href="${dcz}" target="_blank" class="btn btn-g btn-sm" title="DataCrazy">↗</a>
-            ${r.status==='pending'?`<button class="btn btn-g btn-sm" onclick="aohSetStatus(${r.id},'in_progress')">Atender</button>`:''}
-            ${r.status!=='resolved'?`<button class="btn btn-s btn-sm" onclick="aohSetStatus(${r.id},'resolved')">✓</button>`:''}
+            <a href="${dcz}" target="_blank" class="btn btn-g btn-sm" title="Abrir no DataCrazy">↗</a>
+            ${r.status==='pending'?`<button class="btn btn-g btn-sm" onclick="aohSetStatus(${r.id},'in_progress')" title="Marcar em atendimento">Atender</button>`:''}
+            ${r.status!=='resolved'?`<button class="btn btn-s btn-sm" onclick="aohSetStatus(${r.id},'resolved')" title="Marcar como concluído">✓ Concluir</button>`:''}
           </td>
         </tr>`;
       }).join('');
+    }
+    const hasTotal=(pending.total!=null);
+    const total=hasTotal?pending.total:0;
+    const gotFull=items.length>=AOH_PAGE_SIZE;
+    const pager=document.getElementById('aoh-pager');
+    if(pager){
+      const show=hasTotal?(total>AOH_PAGE_SIZE):(aohPage>0||gotFull);
+      if(show){
+        pager.classList.remove('hidden');
+        const infoEl=document.getElementById('aoh-pager-info');
+        const pagesEl=document.getElementById('aoh-pager-pages');
+        const prevB=document.getElementById('aoh-prev');
+        const nextB=document.getElementById('aoh-next');
+        if(hasTotal){
+          const totalPages=Math.max(1,Math.ceil(total/AOH_PAGE_SIZE));
+          if(aohPage>totalPages-1)aohPage=totalPages-1;
+          const from=total?aohPage*AOH_PAGE_SIZE+1:0;
+          const to=Math.min(total,(aohPage+1)*AOH_PAGE_SIZE);
+          infoEl.textContent='Mostrando '+from+'–'+to+' de '+total;
+          pagesEl.textContent='Página '+(aohPage+1)+' de '+totalPages;
+          prevB.disabled=aohPage<=0;
+          nextB.disabled=aohPage>=totalPages-1;
+        }else{
+          const from=aohPage*AOH_PAGE_SIZE+1;
+          const to=aohPage*AOH_PAGE_SIZE+items.length;
+          infoEl.textContent='Mostrando '+from+'–'+to;
+          pagesEl.textContent='Página '+(aohPage+1);
+          prevB.disabled=aohPage<=0;
+          nextB.disabled=!gotFull;
+        }
+      }else pager.classList.add('hidden');
     }
   }catch(e){console.error('loadAfterHours',e);toast('Erro ao carregar fora do horário','error');}
 }
