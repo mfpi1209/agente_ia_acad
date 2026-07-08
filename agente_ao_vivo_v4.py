@@ -4613,6 +4613,33 @@ def _dispatch_tema(template_body, phone=None, lead_id=None, rgm=None):
     return f'DISPARO · {_classify_dispatch_type(template_body)}'
 
 
+def _dispatch_origin_line(phone=None, lead_id=None, rgm=None):
+    """(2026-07-07) Linha de contexto p/ o consultor: se o contato veio de um
+    disparo recente, retorna '📣 Origem: DISPARO · <rotulo> (template X, enviado
+    DD/MM)'. Reaproveita _lookup_dispatch (SOMENTE LEITURA, cacheado). '' se nada.
+    Serve p/ o consultor saber a campanha mesmo quando o aluno so responde
+    'boa tarde' e o Motivo fica magro."""
+    try:
+        hit = _lookup_dispatch(phone=phone, lead_id=lead_id, rgm=rgm)
+    except Exception:
+        hit = None
+    if not hit:
+        return ''
+    label = _dispatch_label(hit.get('category'), hit.get('template_name'))
+    extra = []
+    tpl = (hit.get('template_name') or '').strip()
+    if tpl:
+        extra.append(f'template {tpl}')
+    dt = hit.get('created_at')
+    if dt:
+        try:
+            extra.append('enviado ' + dt.strftime('%d/%m'))
+        except Exception:
+            pass
+    suffix = f' ({", ".join(extra)})' if extra else ''
+    return f'📣 Origem: {label}{suffix}'
+
+
 def _extract_dispatch_template(msgs, last_user_msg=None):
     """Retorna o corpo do template (msg OUT dispatch-like imediatamente anterior
     a resposta do aluno), ou '' se nao achar. Espelha a logica de _is_dispatch_reply."""
@@ -11413,11 +11440,18 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
         # Em ambos os casos NaO envia mensagem ao cliente — ja recebeu
         # "Vou te transferir para X" da primeira distribuicao.
     else:
-        note = (f"🔔 *Distribuição automática pelo agente IA*\n"
-                f"Atendente: *{nome}*\n"
-                f"Motivo: {reason}" if reason else
-                f"🔔 *Distribuição automática pelo agente IA*\n"
-                f"Atendente: *{nome}*")
+        # (2026-07-07) Enriquecimento: linha "📣 Origem" com a campanha do disparo
+        # (se o aluno veio de um) e Motivo mais claro quando o retorno de disparo
+        # nao trouxe um motivo especifico (ex.: aluno so respondeu "boa tarde").
+        origem_line = _dispatch_origin_line(phone=phone, lead_id=lead_id)
+        note_parts = ["🔔 *Distribuição automática pelo agente IA*", f"Atendente: *{nome}*"]
+        if origem_line:
+            note_parts.append(origem_line)
+        if reason:
+            note_parts.append(f"Motivo: {reason}")
+        elif origem_line:
+            note_parts.append("Motivo: Retorno de disparo (resposta curta/saudação)")
+        note = "\n".join(note_parts)
 
         # Dedup da NOTA interna: nao passa por send_and_track entao precisa de
         # check explicito. Bloqueia segunda nota identica dentro de 4h.
@@ -11966,10 +12000,12 @@ def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
                 p(f"  [RET-IA] ALERTA: toggle removeu a tag mas o re-add FALHOU no lead {lead_id}")
 
             try:
+                origem_line = _dispatch_origin_line(phone=phone, lead_id=lead_id)
                 note = (
                     f"🔴 *Retenção - Agente IA*\n"
                     f"O aluno manifestou intenção de cancelamento/trancamento.\n"
-                    f"Mensagem: \"{(question or '')[:120]}\"\n"
+                    + (f"{origem_line}\n" if origem_line else "")
+                    + f"Mensagem: \"{(question or '')[:120]}\"\n"
                     f"Acionada a automação de Retenção (tag RET-IA). O agente NÃO distribuiu nem respondeu."
                 )
                 requests.post(
