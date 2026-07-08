@@ -4541,34 +4541,36 @@ def _lookup_dispatch(phone=None, lead_id=None, rgm=None, max_days=30):
         cfg['options'] = '-c statement_timeout=8000'
         conn = psycopg2.connect(**cfg)
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        row = None
+        # (2026-07-08) Casa por QUALQUER chave (lead_id OR telefone OR rgm) e pega o
+        # disparo MAIS RECENTE no geral. Antes priorizava lead_id e PARAVA nele — mas
+        # o mesmo aluno pode ter lead duplicado/antigo no DataCrazy, e o disparo real
+        # (recente) fica sob outro lead/telefone. Ex.: Shaja tinha lead antigo com
+        # docs 11/06 e o caa_cancelamento 08/07 sob o lead novo -> a nota mostrava o
+        # disparo errado (11/06). Unindo as chaves num OR e ordenando por data, o
+        # disparo mais recente vence independente de qual chave casou.
+        conds, params = [], []
         if lead_id:
-            cur.execute("""SELECT category, template_name, created_at
-                           FROM activation_dispatch_events
-                           WHERE status='sent' AND datacrazy_lead_id=%s
-                             AND created_at > now() - make_interval(days => %s)
-                           ORDER BY created_at DESC LIMIT 1""", (lead_id, max_days))
-            row = cur.fetchone()
-        if not row and phone:
-            tail = re.sub(r'\D', '', phone or '')
-            if len(tail) > 11 and tail.startswith('55'):
-                tail = tail[2:]
-            tail = tail[-10:]
-            if tail:
-                cur.execute("""SELECT category, template_name, created_at
-                               FROM activation_dispatch_events
-                               WHERE status='sent'
-                                 AND right(regexp_replace(telefone,'\\D','','g'), %s)=%s
-                                 AND created_at > now() - make_interval(days => %s)
-                               ORDER BY created_at DESC LIMIT 1""",
-                            (len(tail), tail, max_days))
-                row = cur.fetchone()
-        if not row and rgm:
-            cur.execute("""SELECT category, template_name, created_at
-                           FROM activation_dispatch_events
-                           WHERE status='sent' AND rgm=%s
-                             AND created_at > now() - make_interval(days => %s)
-                           ORDER BY created_at DESC LIMIT 1""", (str(rgm), max_days))
+            conds.append("datacrazy_lead_id = %s")
+            params.append(lead_id)
+        tail = re.sub(r'\D', '', phone or '')
+        if len(tail) > 11 and tail.startswith('55'):
+            tail = tail[2:]
+        tail = tail[-10:]
+        if tail:
+            conds.append("right(regexp_replace(telefone,'\\D','','g'), %s) = %s")
+            params.extend([len(tail), tail])
+        if rgm:
+            conds.append("rgm = %s")
+            params.append(str(rgm))
+        row = None
+        if conds:
+            cur.execute(
+                "SELECT category, template_name, created_at "
+                "FROM activation_dispatch_events "
+                "WHERE status='sent' AND created_at > now() - make_interval(days => %s) "
+                "AND (" + " OR ".join(conds) + ") "
+                "ORDER BY created_at DESC LIMIT 1",
+                [max_days] + params)
             row = cur.fetchone()
         cur.close(); conn.close()
         if row:
@@ -4625,12 +4627,23 @@ def _dispatch_origin_line(phone=None, lead_id=None, rgm=None):
         hit = None
     if not hit:
         return ''
+    dt = hit.get('created_at')
+    # (2026-07-08) So rotula origem se o disparo for RECENTE (<= 3 dias). Se o ultimo
+    # disparo do aluno foi ha mais de 3 dias, ele provavelmente NAO esta respondendo
+    # aquele disparo -> nao mostra a nota de origem p/ nao confundir o consultor.
+    if dt:
+        try:
+            from datetime import datetime as _dt2
+            _now = _dt2.now(dt.tzinfo) if getattr(dt, 'tzinfo', None) else _dt2.now()
+            if (_now - dt).total_seconds() > 3 * 86400:
+                return ''
+        except Exception:
+            pass
     label = _dispatch_label(hit.get('category'), hit.get('template_name'))
     extra = []
     tpl = (hit.get('template_name') or '').strip()
     if tpl:
         extra.append(f'template {tpl}')
-    dt = hit.get('created_at')
     if dt:
         try:
             extra.append('enviado ' + dt.strftime('%d/%m'))
