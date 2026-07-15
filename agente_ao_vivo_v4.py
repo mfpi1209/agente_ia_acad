@@ -1733,6 +1733,8 @@ def load_agent_config_from_db():
     global BUSINESS_HOURS_WEEKDAY_START, BUSINESS_HOURS_WEEKDAY_END
     global BUSINESS_HOURS_SATURDAY_START, BUSINESS_HOURS_SATURDAY_END
     global AFTER_HOURS_FIRST_MSG, AFTER_HOURS_INSIST_MSG, RETENTION_AFTER_HOURS_MSG, HUMAN_BUSY_MSG
+    global LIMITE_NAO_INICIADOS, HARD_CAP_ABERTAS
+    global AUTO_CLOSE_COLD_ENABLED, AUTO_CLOSE_COLD_HOURS, AUTO_CLOSE_COLD_MAX_BATCH
     mapping = {
         'followup_1_delay': ('FOLLOWUP_1_DELAY', int),
         'close_delay': ('CLOSE_DELAY', int),
@@ -1758,6 +1760,11 @@ def load_agent_config_from_db():
         'human_busy_msg': ('HUMAN_BUSY_MSG', str),
         'auto_dispatch_morning_queue': ('AUTO_DISPATCH_MORNING_QUEUE', bool),
         'morning_dispatch_batch_size': ('MORNING_DISPATCH_BATCH_SIZE', int),
+        'limite_nao_iniciados': ('LIMITE_NAO_INICIADOS', int),
+        'hard_cap_abertas': ('HARD_CAP_ABERTAS', int),
+        'auto_close_cold_enabled': ('AUTO_CLOSE_COLD_ENABLED', bool),
+        'auto_close_cold_hours': ('AUTO_CLOSE_COLD_HOURS', int),
+        'auto_close_cold_max_batch': ('AUTO_CLOSE_COLD_MAX_BATCH', int),
     }
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -3648,9 +3655,29 @@ _resp_metrics = {}
 def _reset_resp_metrics():
     _resp_metrics.clear()
 
+# Preco por modelo em USD por 1M de tokens (entrada, saida). Fonte: tabela
+# publica da OpenAI (jul/2026). Mantido no codigo — se a OpenAI mudar o preco
+# ou trocarmos de modelo, atualizar aqui.
+_OPENAI_PRICES = {
+    'gpt-4o-mini': (0.15, 0.60),
+    'gpt-4o': (2.50, 10.00),
+    'gpt-5': (1.25, 10.00),
+    'gpt-5.1': (1.25, 10.00),
+    'gpt-5-mini': (0.25, 2.00),
+    'gpt-4.1': (2.00, 8.00),
+    'gpt-4.1-mini': (0.40, 1.60),
+    'o4-mini': (1.10, 4.40),
+    'o3-mini': (1.10, 4.40),
+}
+
+def _calc_custo_usd_model(model, tokens_in, tokens_out):
+    """Custo estimado em USD a partir de tokens reais e do preco do modelo."""
+    pin, pout = _OPENAI_PRICES.get((model or '').lower(), (0.0, 0.0))
+    return round((tokens_in or 0) * pin / 1e6 + (tokens_out or 0) * pout / 1e6, 6)
+
 def _calc_custo_usd(tokens_in, tokens_out):
-    # gpt-4o-mini: input $0.15 / 1M tokens, output $0.60 / 1M tokens.
-    return round((tokens_in or 0) * 0.15 / 1e6 + (tokens_out or 0) * 0.60 / 1e6, 6)
+    # Resposta do agente principal roda em gpt-4o-mini.
+    return _calc_custo_usd_model('gpt-4o-mini', tokens_in, tokens_out)
 
 
 def rag_search(question):
@@ -6100,6 +6127,15 @@ def process_pending_escalation_auto_dispatch():
     # Manutenção contínua: arquiva registros presos há muito tempo (1x/h).
     # Roda independente do horário/flag de dispatch para a fila não inflar.
     expire_stale_pending_escalation()
+
+    # (2026-07-15) Sincroniza o `fila` (carga real DCZ -> Supabase) a cada 5 min.
+    # Corrige o drift do contador que só incrementa e nunca decrementa — causa
+    # de a distribuição travar com todos "no teto" enquanto os consultores já
+    # esvaziaram suas conversas. Throttle interno; nunca zera às cegas.
+    try:
+        sync_fila_from_datacrazy()
+    except Exception as e:
+        p(f"  [FILA-SYNC] erro inesperado: {e}")
 
     if not AUTO_DISPATCH_MORNING_QUEUE:
         return
@@ -8572,6 +8608,10 @@ _openai_supervisor_audited = {}  # conv_id -> ts da ultima auditoria nesse proce
 # Telemetria do supervisor — usado para debug/observabilidade na aba Auditoria IA.
 _openai_sup_stats = {
     'cycles': 0,             # quantos ciclos rodaram (process_openai_supervisor_loop)
+    'started_at': time.time(),  # ts unix do inicio (p/ media diaria de custo)
+    'tokens_in_total': 0,    # tokens de entrada acumulados (custo)
+    'tokens_out_total': 0,   # tokens de saida acumulados (custo)
+    'custo_usd_total': 0.0,  # custo USD acumulado do supervisor (modelo caro)
     'last_cycle_at': 0,      # ts unix do ultimo ciclo
     'convs_listed': 0,       # convs achadas no DCZ no ultimo ciclo
     'audited_total': 0,      # convs efetivamente auditadas (chamada OpenAI feita) — acumulado
@@ -9842,6 +9882,21 @@ def _openai_supervisor_audit_conv(conv_id, msgs_window):
         content = resp.choices[0].message.content or '{}'
         parsed = json.loads(content)
         _openai_sup_stats['audited_total'] = _openai_sup_stats.get('audited_total', 0) + 1
+        # Custo real do supervisor (tokens reais x preco do modelo configurado).
+        # O agente principal usa gpt-4o-mini; o supervisor usa gpt-5.1 (bem mais
+        # caro) — sem isto, o "custo" do Cockpit fica muito subestimado.
+        try:
+            _u = getattr(resp, 'usage', None)
+            if _u is not None:
+                _ti = getattr(_u, 'prompt_tokens', 0) or 0
+                _to = getattr(_u, 'completion_tokens', 0) or 0
+                _openai_sup_stats['tokens_in_total'] = _openai_sup_stats.get('tokens_in_total', 0) + _ti
+                _openai_sup_stats['tokens_out_total'] = _openai_sup_stats.get('tokens_out_total', 0) + _to
+                _openai_sup_stats['custo_usd_total'] = round(
+                    _openai_sup_stats.get('custo_usd_total', 0.0)
+                    + _calc_custo_usd_model(OPENAI_SUPERVISOR_MODEL, _ti, _to), 6)
+        except Exception:
+            pass
         if parsed.get('tem_problema'):
             _openai_sup_stats['problems_found'] = _openai_sup_stats.get('problems_found', 0) + 1
         # ring-buffer dos ultimos 20 resultados (pra debug)
@@ -10794,9 +10849,30 @@ def get_available_consultant(exclude_attendants=None):
         if status_expediente != 'Ativo':
             p(f"  [DIST] {nome}: SKIP (status_expediente={status_expediente})")
             continue
-        if fila >= limite:
-            p(f"  [DIST] {nome}: SKIP (fila={fila} >= limite={limite})")
-            continue
+
+        # (2026-07-15) Carga por NAO INICIADOS (com fallback p/ regra antiga).
+        # Libera quem esta ocioso — poucos leads NAO respondidos — mesmo que
+        # tenha muitas abertas dormentes. So decide pelo cache do DataCrazy se
+        # ele estiver fresco; senao usa a regra classica de teto (nunca fica
+        # sem criterio e nunca sobredistribui as cegas).
+        att_id_cons = _lookup_attendant_id(nome, ATTENDANT_MAP)
+        load = _consultant_load.get(att_id_cons) if att_id_cons else None
+        cache_fresco = (time.time() - _consultant_load_ts) < CONSULTANT_LOAD_FRESH_S
+        nao_inic_cons = None
+        if load and cache_fresco:
+            nao_inic_cons = int(load.get('nao_iniciados', 0))
+            abertas_cons = int(load.get('abertas', fila))
+            if nao_inic_cons >= LIMITE_NAO_INICIADOS:
+                p(f"  [DIST] {nome}: SKIP (nao_iniciados={nao_inic_cons} >= {LIMITE_NAO_INICIADOS})")
+                continue
+            if abertas_cons >= HARD_CAP_ABERTAS:
+                p(f"  [DIST] {nome}: SKIP (abertas={abertas_cons} >= teto seguranca {HARD_CAP_ABERTAS})")
+                continue
+        else:
+            if fila >= limite:
+                p(f"  [DIST] {nome}: SKIP (fallback fila={fila} >= limite={limite})")
+                continue
+
         if not fim_de_semana and _em_intervalo(almoco_hora, ALMOCO_ANTE_MIN, ALMOCO_DURACAO_MIN, now):
             p(f"  [DIST] {nome}: SKIP (pausa almoço)")
             continue
@@ -10819,6 +10895,7 @@ def get_available_consultant(exclude_attendants=None):
             'nome': nome,
             'fila': fila,
             'limite': limite,
+            'nao_iniciados': nao_inic_cons if nao_inic_cons is not None else fila,
             '_ts': ts_val,
         })
 
@@ -10828,7 +10905,10 @@ def get_available_consultant(exclude_attendants=None):
 
     import time as _time
     agora = _time.time()
+    # Prioriza o mais OCIOSO: menos nao_iniciados primeiro, depois quem esta ha
+    # mais tempo sem receber, depois menos abertas.
     disponiveis.sort(key=lambda x: (
+        x['nao_iniciados'],
         -(agora - x['_ts']) if x['_ts'] > 0 else 1,
         x['fila'],
         x['nome'],
@@ -11049,6 +11129,244 @@ def _supabase_increment_fila(consultant_id, current_fila):
     except Exception as e:
         p(f"  [DIST] Erro Supabase update: {e}")
         return False
+
+
+# (2026-07-15) Sync de carga real do consultor.
+_FILA_SYNC_LAST_RUN = 0.0
+FILA_SYNC_INTERVAL_S = 300  # 5 min
+
+# (2026-07-15) Distribuicao guiada por "NAO INICIADOS".
+# O que trava a distribuicao nao deve ser o total de conversas abertas (muitas
+# ficam dormentes: o aluno nao respondeu mais). O que importa e quantos leads o
+# consultor tem AINDA NAO RESPONDIDOS (nao iniciados / isPending). Se esse numero
+# esta baixo, ele esta ocioso e pode receber — mesmo com muitas abertas antigas.
+#   LIMITE_NAO_INICIADOS  -> so recebe enquanto nao_iniciados < este valor.
+#   HARD_CAP_ABERTAS      -> teto de seguranca sobre o total de abertas (backstop).
+# Ambos ajustaveis via agent_config (limite_nao_iniciados / hard_cap_abertas).
+LIMITE_NAO_INICIADOS = 5
+HARD_CAP_ABERTAS = 60
+
+# (2026-07-15) Encerramento de conversas FRIAS (aluno sumiu apos o consultor
+# ja ter respondido) — pra elas pararem de contar como "em atendimento".
+# DESLIGADO por padrao: so encerra quando AUTO_CLOSE_COLD_ENABLED=true no
+# agent_config. Margem em horas de silencio do ALUNO. Batelada limitada por
+# ciclo para nao disparar centenas de /finish de uma vez.
+AUTO_CLOSE_COLD_ENABLED = False
+AUTO_CLOSE_COLD_HOURS = 36
+AUTO_CLOSE_COLD_MAX_BATCH = 30
+
+# Cache (em memoria) da carga por att_id, populado pelo sync. Usado em
+# get_available_consultant. Se estiver velho/vazio, cai no fallback (regra antiga).
+_consultant_load = {}       # att_id -> {'abertas': int, 'nao_iniciados': int}
+_consultant_load_ts = 0.0
+CONSULTANT_LOAD_FRESH_S = 15 * 60  # cache valido por 15 min
+
+
+def _conv_is_nao_iniciado(c):
+    """True se a conversa esta atribuida mas o consultor AINDA NAO respondeu
+    (novo lead parado na mao dele). Sinais do DataCrazy:
+      - isPending == True, ou
+      - 'unstarted' em statuses, ou
+      - nunca houve envio do consultor (sem lastSendedMessageDate e nao iniciada).
+    """
+    if bool(c.get('isPending')):
+        return True
+    stt = c.get('statuses') or []
+    if isinstance(stt, list) and 'unstarted' in stt:
+        return True
+    if (not c.get('initialized')) and (not c.get('lastSendedMessageDate')):
+        return True
+    return False
+
+
+def _conv_attendant_ids(c):
+    ids = []
+    for a in (c.get('attendants') or []):
+        if isinstance(a, dict) and a.get('id'):
+            ids.append(a['id'])
+    ct = c.get('currentThread') or {}
+    for a in (ct.get('attendants') or []):
+        if isinstance(a, dict) and a.get('id') and a['id'] not in ids:
+            ids.append(a['id'])
+    return ids
+
+
+def _dcz_finish_conversation(conv_id):
+    """Finaliza a conversa no DataCrazy (DCZ_API, com fallback DCZ_MSG)."""
+    for base in (f'{DCZ_API}/api/v1/conversations/{conv_id}/finish',
+                 f'{DCZ_MSG}/messaging/conversations/{conv_id}/finish'):
+        try:
+            r = requests.post(base, headers=H, json={}, timeout=12)
+            if r.status_code in (200, 201, 204):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _parse_dcz_ts(v):
+    if not v:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(v).replace('Z', '+00:00'))
+    except Exception:
+        return None
+
+
+def auto_close_cold_conversations(convs):
+    """Finaliza conversas FRIAS: atribuidas a humano, o consultor JA foi o
+    ultimo a responder (bola com o aluno) e o aluno esta em silencio ha mais de
+    AUTO_CLOSE_COLD_HOURS. Assim elas param de contar como "em atendimento".
+
+    DESLIGADO por padrao (AUTO_CLOSE_COLD_ENABLED). Nunca encerra:
+      - conversas sem atendente humano,
+      - "nao iniciadas"/isPending (o consultor ainda deve a 1a resposta),
+      - conversas cujo ultimo a falar foi o ALUNO (ele espera resposta).
+    Limita a batelada por ciclo (AUTO_CLOSE_COLD_MAX_BATCH).
+    """
+    if not AUTO_CLOSE_COLD_ENABLED:
+        return
+    if not convs:
+        return
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    margem_s = AUTO_CLOSE_COLD_HOURS * 3600
+    fechadas = 0
+    for c in convs:
+        if fechadas >= AUTO_CLOSE_COLD_MAX_BATCH:
+            break
+        if c.get('finished'):
+            continue
+        if not _conv_attendant_ids(c):
+            continue
+        # o consultor ainda deve resposta -> NAO encerra
+        if _conv_is_nao_iniciado(c):
+            continue
+        ts_recv = _parse_dcz_ts(c.get('lastReceivedMessageDate'))
+        ts_send = _parse_dcz_ts(c.get('lastSendedMessageDate'))
+        if not ts_recv or not ts_send:
+            continue
+        # exige que o consultor tenha respondido DEPOIS do aluno (bola com o aluno)
+        if ts_send < ts_recv:
+            continue
+        silencio = (now - ts_recv).total_seconds()
+        if silencio < margem_s:
+            continue
+        cid = c.get('id') or ''
+        if not cid:
+            continue
+        if _dcz_finish_conversation(cid):
+            fechadas += 1
+    if fechadas:
+        p(f"  [COLD-CLOSE] {fechadas} conversa(s) fria(s) encerrada(s) "
+          f"(aluno em silencio > {AUTO_CLOSE_COLD_HOURS}h)")
+
+
+def sync_fila_from_datacrazy(force=False):
+    """Recomputa a carga REAL de cada consultor ativo a partir das conversas
+    ativas do DataCrazy e grava em `fila` no Supabase.
+
+    Motivo: `_supabase_increment_fila` so INCREMENTA e nada decrementa quando o
+    consultor encerra conversas. Com o tempo o contador infla, todos batem o
+    teto em `get_available_consultant` e a distribuicao PARA — mesmo com os
+    consultores realmente livres. Aqui o `fila` passa a refletir a realidade e
+    se autocorrige (nem trava, nem sobrecarrega).
+
+    Seguranca: se a coleta do DataCrazy vier vazia/insuficiente ou nao casar com
+    nenhum consultor ativo, NAO aplica — nunca zera `fila` as cegas (o que
+    causaria over-distribuicao).     So altera o campo `fila`, preservando
+    `timestamp`/`ultima_execucao` (usados na ordem de distribuicao).
+
+    Alem de gravar `fila` (=abertas), popula o cache `_consultant_load` com
+    {abertas, nao_iniciados} por att_id — usado por get_available_consultant.
+    """
+    global _FILA_SYNC_LAST_RUN, _consultant_load, _consultant_load_ts
+    now = time.time()
+    if not force and (now - _FILA_SYNC_LAST_RUN) < FILA_SYNC_INTERVAL_S:
+        return
+    _FILA_SYNC_LAST_RUN = now
+
+    try:
+        convs = _fetch_active_conversations(limit_per_status=500, timeout=15)
+    except Exception as e:
+        p(f"  [FILA-SYNC] erro ao coletar conversas DCZ: {e}")
+        return
+    if not convs or len(convs) < 50:
+        p(f"  [FILA-SYNC] coleta insuficiente ({len(convs) if convs else 0}) — skip (nao mexe no fila)")
+        return
+
+    # carga real por att_id: abertas (nao finalizadas) e nao_iniciados
+    carga = {}          # att_id -> abertas
+    nao_inic = {}       # att_id -> nao iniciados (novos parados na mao)
+    for c in convs:
+        if c.get('finished'):
+            continue
+        ids = _conv_attendant_ids(c)
+        ni = _conv_is_nao_iniciado(c)
+        for i in ids:
+            carga[i] = carga.get(i, 0) + 1
+            if ni:
+                nao_inic[i] = nao_inic.get(i, 0) + 1
+
+    # publica o cache de carga (mesmo se o Supabase falhar depois)
+    _consultant_load = {
+        aid: {'abertas': carga.get(aid, 0), 'nao_iniciados': nao_inic.get(aid, 0)}
+        for aid in set(list(carga.keys()) + list(nao_inic.keys()))
+    }
+    _consultant_load_ts = now
+
+    # Encerra conversas frias (reaproveita a coleta) — no-op se desativado.
+    try:
+        auto_close_cold_conversations(convs)
+    except Exception as e:
+        p(f"  [COLD-CLOSE] erro: {e}")
+
+    try:
+        url = (f'{SUPABASE_URL}/rest/v1/{DISTRIBUICAO_TABLE}'
+               f'?ativo_inativo=eq.Ativo&tipo_atendimento=eq.Atendimento'
+               f'&select=id,responsavel,fila')
+        r = requests.get(url, headers=SUPABASE_HEADERS, timeout=10)
+        if r.status_code != 200:
+            p(f"  [FILA-SYNC] Supabase query falhou: {r.status_code}")
+            return
+        rows = r.json()
+    except Exception as e:
+        p(f"  [FILA-SYNC] erro Supabase query: {e}")
+        return
+
+    matched = 0
+    plano = []
+    for row in rows:
+        nome = (row.get('responsavel') or '').strip()
+        att_id = _lookup_attendant_id(nome, ATTENDANT_MAP)
+        if not att_id:
+            continue
+        if att_id in carga:
+            matched += 1
+        real = int(carga.get(att_id, 0))
+        atual = int(row.get('fila') or 0)
+        if real != atual:
+            plano.append((row.get('id'), nome, atual, real))
+
+    # Se a coleta nao bateu com NENHUM consultor ativo, provavelmente veio
+    # parcial/estranha — nao arrisca zerar todo mundo.
+    if matched == 0:
+        p(f"  [FILA-SYNC] coleta nao casou com consultor ativo — skip (protecao)")
+        return
+
+    ajustes = []
+    for cid, nome, atual, real in plano:
+        try:
+            r2 = requests.patch(
+                f'{SUPABASE_URL}/rest/v1/{DISTRIBUICAO_TABLE}?id=eq.{cid}',
+                headers=SUPABASE_HEADERS, json={'fila': real}, timeout=10)
+            if r2.status_code in (200, 204):
+                ajustes.append(f"{(nome.split()[0] if nome else cid)}:{atual}->{real}")
+        except Exception as e:
+            p(f"  [FILA-SYNC] erro patch {nome}: {e}")
+    if ajustes:
+        p(f"  [FILA-SYNC] carga real sincronizada -> {' '.join(ajustes)}")
 
 
 def _read_chat_attendant_ids(conv_id):
