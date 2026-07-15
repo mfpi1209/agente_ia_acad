@@ -291,8 +291,26 @@ body.dark-mode .wa-bubble.wa-bot .wa-meta{color:#6b7085;}
 
 <!-- ===== DASHBOARD ===== -->
 <div id="tab-dashboard" class="tc fade">
+  <!-- Faixa de saúde operacional (controle geral num relance) -->
+  <div class="card p-3 mt-5" id="op-saude-card">
+    <div class="flex items-center justify-between mb-2">
+      <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider"><i class="fas fa-heart-pulse text-rose-400 mr-1.5"></i>Saúde da operação</h3>
+      <span class="text-[10px] text-gray-400" id="op-saude-ts">agora</span>
+    </div>
+    <div id="op-saude" class="flex flex-wrap gap-2">
+      <span class="text-xs text-gray-400">Carregando…</span>
+    </div>
+  </div>
+  <!-- Carga da equipe agora (tempo real) -->
+  <div class="card p-3 mt-4" id="dash-carga-card">
+    <div class="flex items-center justify-between mb-2">
+      <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider"><i class="fas fa-scale-balanced text-indigo-400 mr-1.5"></i>Carga da equipe agora</h3>
+      <a href="#" onclick="sw('team');return false;" class="text-[10px] text-indigo-400 hover:underline">ver equipe →</a>
+    </div>
+    <div id="dash-carga" class="flex flex-wrap gap-2"><span class="text-xs text-gray-400">—</span></div>
+  </div>
   <!-- KPIs operacionais -->
-  <div class="grid grid-cols-2 xl:grid-cols-4 gap-4 mt-5">
+  <div class="grid grid-cols-2 xl:grid-cols-4 gap-4 mt-4">
     <div class="card p-5">
       <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider"><i class="fas fa-bolt text-indigo-400 mr-1.5"></i>Interações hoje</div>
       <div class="flex items-end justify-between mt-1">
@@ -343,7 +361,7 @@ body.dark-mode .wa-bubble.wa-bot .wa-meta{color:#6b7085;}
   <!-- escalacoes + custo -->
   <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
     <div class="card p-5 lg:col-span-2"><h3 class="text-sm font-bold text-gray-500 mb-3">Top escalações recentes</h3><div id="top-esc" class="space-y-2"></div></div>
-    <div class="card p-5"><h3 class="text-sm font-bold text-gray-500 mb-3">Custo real <span class="text-[10px] font-normal text-gray-400">· produção</span></h3><div id="cost-info"></div></div>
+    <div class="card p-5"><h3 class="text-sm font-bold text-gray-500 mb-3">Custo OpenAI <span class="text-[10px] font-normal text-gray-400">· estimado</span></h3><div id="cost-info"></div></div>
   </div>
 </div>
 
@@ -425,6 +443,28 @@ body.dark-mode .wa-bubble.wa-bot .wa-meta{color:#6b7085;}
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
       <div class="card p-5"><h3 class="text-sm font-bold text-gray-700 mb-3">Retenção (tag RET-IA): tempo até a tag</h3><div id="dz-ret" class="text-sm"></div></div>
       <div class="card p-5"><h3 class="text-sm font-bold text-gray-700 mb-3">Funil de disparo</h3><div id="dz-funil"></div></div>
+    </div>
+
+    <!-- carga por consultor + fallback/lacunas -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+      <div class="card p-5">
+        <h3 class="text-sm font-bold text-gray-700 mb-1"><i class="fas fa-people-arrows text-indigo-400 mr-1.5"></i>Carga por consultor</h3>
+        <p class="text-[11px] text-gray-400 mb-3">Quantas conversas cada atendente foi o 1º a assumir (era agente) e o tempo mediano de resposta.</p>
+        <div id="dz-carga" class="space-y-2 text-sm"></div>
+      </div>
+      <div class="card p-5">
+        <div class="flex items-center justify-between mb-1">
+          <h3 class="text-sm font-bold text-gray-700"><i class="fas fa-triangle-exclamation text-amber-400 mr-1.5"></i>Fallback / lacunas da base</h3>
+          <span class="text-[11px] font-semibold text-green-500"><i class="fas fa-arrow-trend-down mr-1"></i>menor = melhor</span>
+        </div>
+        <p class="text-[11px] text-gray-400 mb-3">Interações em que a IA não respondeu com confiança (escalou ou confiança baixa). Os temas revelam onde treinar a base.</p>
+        <div class="flex items-end gap-4 mb-2">
+          <div><div class="text-3xl font-extrabold text-amber-600" id="dz-fb-taxa">-</div><div class="text-[11px] text-gray-400" id="dz-fb-sub"></div></div>
+          <div class="flex-1" style="height:70px;"><canvas id="cv-dz-fb"></canvas></div>
+        </div>
+        <div class="text-xs font-bold text-gray-600 mt-3 mb-1">Temas com mais fallback</div>
+        <div id="dz-fb-temas" class="space-y-1.5 text-sm"></div>
+      </div>
     </div>
 
     <!-- QUALIDADE: auditoria automatica do supervisor OpenAI -->
@@ -2203,7 +2243,53 @@ function dashGroupActions(actions){
   DEF.forEach(([k,c])=>{ if(b[k]>0){labels.push(k);data.push(b[k]);colors.push(c);} });
   return {labels,data,colors};
 }
+function opChip(icon,label,val,cls,tip){
+  return `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs ${cls||'bg-gray-100 text-gray-600'}" ${tip?`title="${tip}"`:''}><i class="fas ${icon}"></i><span class="text-gray-400 font-normal">${label}</span><b>${val}</b></span>`;
+}
+async function loadOpSaude(){
+  const el=document.getElementById('op-saude');
+  if(!el)return;
+  let s;
+  try{ s=await (await fetch(A+'/api/operacao/saude')).json(); }
+  catch(e){ el.innerHTML='<span class="text-xs text-red-400">Erro ao carregar saúde da operação</span>'; return; }
+  const chips=[];
+  // Agente (heartbeat/watchdog)
+  const wd=s.watchdog||{};
+  const age=wd.heartbeat_age_min;
+  let agCls='bg-green-100 text-green-700', agTxt='online';
+  if(age==null){agCls='bg-gray-100 text-gray-500';agTxt='sem dado';}
+  else if(age>10){agCls='bg-red-100 text-red-700';agTxt=`parado ${age}min`;}
+  else if(age>3){agCls='bg-amber-100 text-amber-700';agTxt=`${age}min atrás`;}
+  else{agTxt=`ok (${age}min)`;}
+  chips.push(opChip('fa-robot','Agente',agTxt,agCls, wd.last_auto_restart?('último auto-restart: '+JSON.stringify(wd.last_auto_restart)):'heartbeat do processo do agente'));
+  // Supervisor IA
+  const sup=s.supervisor;
+  if(sup){
+    let spCls='bg-green-100 text-green-700', spTxt=`${sup.cycles} ciclos`;
+    if(sup.errors>0){spCls='bg-red-100 text-red-700';spTxt=`${sup.errors} erros`;}
+    else if(sup.last_cycle_age_min!=null && sup.last_cycle_age_min>30){spCls='bg-amber-100 text-amber-700';spTxt=`ocioso ${sup.last_cycle_age_min}min`;}
+    chips.push(opChip('fa-user-shield','Supervisor',spTxt,spCls, (sup.last_error?('último erro: '+sup.last_error):`${sup.audited_total} auditadas · ${sup.problems_found} problemas`)));
+  }else{
+    chips.push(opChip('fa-user-shield','Supervisor','—','bg-gray-100 text-gray-500','supervisor ainda não rodou'));
+  }
+  // Fila (backlog)
+  const fila=s.fila||{};
+  const back=(fila.pending||0)+(fila.in_progress||0);
+  const flCls=back>200?'bg-amber-100 text-amber-700':'bg-gray-100 text-gray-600';
+  chips.push(opChip('fa-layer-group','Fila',`${(fila.pending||0).toLocaleString()} a atender · ${(fila.in_progress||0).toLocaleString()} em atend.`,flCls,'backlog atual em Fora do Horário'));
+  // Hoje: interações + custo
+  const h=s.hoje||{};
+  chips.push(opChip('fa-bolt','Hoje',`${(h.interacoes||0).toLocaleString()} interações`,'bg-indigo-100 text-indigo-700','interações registradas hoje'));
+  if(h.custo_usd!=null && (h.tokens||0)>0){
+    chips.push(opChip('fa-dollar-sign','Custo hoje',`$${(h.custo_usd||0).toFixed(2)} · ${(h.tokens||0).toLocaleString()} tok`,'bg-gray-100 text-gray-600','custo real de produção hoje'));
+  }
+  el.innerHTML=chips.join('');
+  const ts=document.getElementById('op-saude-ts');
+  if(ts)ts.textContent=new Date().toLocaleTimeString('pt-BR');
+}
 async function loadDash(){
+  loadOpSaude();
+  fetch(A+'/api/agents/status').then(r=>r.json()).then(d=>renderTeamCarga(d.agents||[])).catch(()=>{});
   const[st,an,pu]=await Promise.all([
     fetch(A+'/api/stats').then(r=>r.json()),
     fetch(A+'/api/analytics').then(r=>r.json()),
@@ -2242,15 +2328,28 @@ async function loadDash(){
   if(etot>0){charts.evals=new Chart(document.getElementById('cv-evals'),{type:'doughnut',data:{labels:['Aprovadas','Corrigidas','Rejeitadas'],datasets:[{data:[es.approved||0,es.corrected||0,es.rejected||0],backgroundColor:['#22c55e','#3b82f6','#ef4444'],borderWidth:2,borderColor:'#fff'}]},options:{responsive:true,maintainAspectRatio:false,cutout:'62%',plugins:dLeg}});}
   // top escalacoes
   document.getElementById('top-esc').innerHTML=(an.top_escalations&&an.top_escalations.length)?an.top_escalations.map(e=>`<div class="flex items-center gap-2 py-2 px-3 rounded-lg" style="background:rgba(148,163,184,.08)"><span class="badge b-red">${(e.confianca||0).toFixed(1)}</span><span class="flex-1 text-xs trunc2">${esc(e.pergunta)}</span><span class="badge b-gray">${e.acao}</span></div>`).join(''):'<div class="text-sm text-gray-400 text-center py-4">Nenhuma escalação</div>';
-  // custo REAL de producao (Item 0). Sem dados ate o deploy do agente instrumentado.
-  const temCusto=(pu.respostas_com_custo_7d||0)>0;
-  document.getElementById('cost-info').innerHTML = temCusto ? (
-    `<div class="flex items-baseline gap-2"><span class="text-4xl font-extrabold">$${(pu.custo_7d||0).toFixed(2)}</span><span class="text-sm text-gray-400">USD · 7 dias</span></div>`+
-    `<div class="text-sm text-gray-500 mt-2"><i class="fas fa-coins text-amber-400 mr-1"></i>${(pu.tokens_7d||0).toLocaleString()} tokens · ${(pu.respostas_com_custo_7d||0).toLocaleString()} respostas</div>`+
-    `<div class="text-[11px] text-gray-400 mt-2">custo real de produção (últimos 7 dias)</div>`
+  // custo OpenAI ESTIMADO = agente (gpt-4o-mini, 7d) + supervisor (gpt-5.1, acumulado).
+  // tokens reais x preco do modelo. Nao inclui embeddings/resumos (custo menor).
+  const temAg=(pu.respostas_com_custo_7d||0)>0;
+  const temSup=pu.custo_supervisor!=null;
+  const custoAg=pu.custo_7d||0;
+  const dias=pu.supervisor_dias||0;
+  // equivalente 7 dias do supervisor (p/ um total comparavel)
+  const supEq=(temSup&&dias>0)?(pu.custo_supervisor/dias*7):(pu.custo_supervisor||0);
+  const total=custoAg+(temSup?supEq:0);
+  const linhaAg = temAg
+    ? `<div class="flex items-baseline justify-between text-sm"><span class="text-gray-500"><i class="fas fa-robot text-indigo-300 mr-1.5"></i>Agente <span class="text-gray-400">gpt-4o-mini · 7d</span></span><span class="font-bold">$${custoAg.toFixed(2)}</span></div><div class="text-[11px] text-gray-400 mb-2 pl-5">${(pu.tokens_7d||0).toLocaleString()} tokens · ${(pu.respostas_com_custo_7d||0).toLocaleString()} respostas</div>`
+    : `<div class="text-sm text-gray-400"><i class="fas fa-robot text-gray-300 mr-1.5"></i>Agente — sem dados ainda</div>`;
+  const linhaSup = temSup
+    ? `<div class="flex items-baseline justify-between text-sm"><span class="text-gray-500"><i class="fas fa-user-shield text-purple-300 mr-1.5"></i>Supervisor <span class="text-gray-400">${esc(pu.supervisor_modelo||'gpt-5.1')}${dias?' · '+dias+'d':''}</span></span><span class="font-bold">$${(pu.custo_supervisor||0).toFixed(2)}</span></div><div class="text-[11px] text-gray-400 mb-2 pl-5">${(pu.tokens_supervisor||0).toLocaleString()} tokens · ${(pu.supervisor_auditadas||0).toLocaleString()} auditorias</div>`
+    : `<div class="text-sm text-amber-600 bg-amber-50 rounded px-2 py-1 mt-1"><i class="fas fa-triangle-exclamation mr-1.5"></i>Supervisor (gpt-5.1) ainda não instrumentado — <b>entra após o próximo deploy do agente</b></div>`;
+  document.getElementById('cost-info').innerHTML = (temAg||temSup) ? (
+    `<div class="flex items-baseline gap-2 mb-3"><span class="text-4xl font-extrabold">$${total.toFixed(2)}</span><span class="text-sm text-gray-400">USD · ~7 dias</span></div>`+
+    linhaAg+linhaSup+
+    `<div class="text-[11px] text-gray-400 mt-2 flex items-start gap-1.5"><i class="fas fa-circle-info mt-0.5"></i><span>Tokens reais × preço do modelo. Supervisor é acumulado desde que o agente subiu (extrapolado p/ 7d no total). Não inclui embeddings nem resumos (custo menor).</span></div>`
   ) : (
     `<div class="text-2xl font-extrabold text-gray-400">— <span class="text-sm font-normal">sem dados ainda</span></div>`+
-    `<div class="text-[11px] text-gray-400 mt-2 flex items-start gap-1.5"><i class="fas fa-circle-info mt-0.5"></i><span>O custo real começa a ser medido <b>após o deploy</b> do agente instrumentado. O número antigo (Playground) foi removido por não refletir a produção.</span></div>`
+    `<div class="text-[11px] text-gray-400 mt-2 flex items-start gap-1.5"><i class="fas fa-circle-info mt-0.5"></i><span>O custo começa a ser medido <b>após o deploy</b> do agente instrumentado.</span></div>`
   );
 }
 
@@ -2330,7 +2429,35 @@ async function loadDesempenho(force){
     '<div class="flex items-baseline justify-between"><span class="text-sm text-gray-500"><i class="fas fa-reply text-indigo-300 mr-2"></i>Respostas recebidas</span><span class="text-2xl font-extrabold text-indigo-600">'+(f.respostas||0).toLocaleString()+'</span></div>'+
     '<div class="flex items-baseline justify-between pt-2 border-t"><span class="text-sm text-gray-500"><i class="fas fa-percent text-green-300 mr-2"></i>Taxa de resposta</span><span class="text-2xl font-extrabold text-green-600">'+(f.pct_resposta||0)+'%</span></div>'+
     '</div>');
+  // carga por consultor
+  const cc=d.carga_consultor||[];
+  const maxcc=Math.max(1,...cc.map(x=>x.convs||0));
+  document.getElementById('dz-carga').innerHTML = cc.length ? cc.slice(0,12).map(x=>{
+    const w=Math.round(100*(x.convs||0)/maxcc);
+    return `<div><div class="flex items-center justify-between mb-0.5"><span class="trunc font-medium text-gray-600">${esc(x.atendente)}</span><span class="text-xs text-gray-400 shrink-0 ml-2">${(x.convs||0).toLocaleString()} · ${x.pct}% · ${dzDur(x.mediana_s)}</span></div><div class="h-2 rounded-full bg-gray-100 overflow-hidden"><div class="h-full bg-indigo-400" style="width:${w}%"></div></div></div>`;
+  }).join('') : '<div class="text-gray-400 text-sm py-4 text-center">sem dados no período</div>';
   loadDesempenhoQualidade();
+  loadDesempenhoFallback();
+}
+
+async function loadDesempenhoFallback(){
+  let d;
+  try{ d=await (await fetch(A+'/api/desempenho/fallback?days=30')).json(); }
+  catch(e){ return; }
+  const taxaEl=document.getElementById('dz-fb-taxa');
+  taxaEl.textContent=(d.taxa!=null?d.taxa+'%':'-');
+  document.getElementById('dz-fb-sub').textContent=(d.fallback||0).toLocaleString()+' de '+(d.total||0).toLocaleString()+' interações (30d)';
+  // sparkline da taxa (14d)
+  const se=d.serie||[];
+  if(charts.dzFb)charts.dzFb.destroy();
+  charts.dzFb=new Chart(document.getElementById('cv-dz-fb'),{type:'line',data:{labels:se.map(x=>x.d),datasets:[{data:se.map(x=>x.taxa),borderColor:'#f59e0b',backgroundColor:'rgba(245,158,11,.15)',fill:true,tension:.35,pointRadius:0,borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.parsed.y+'% fallback'}}},scales:{x:{display:false},y:{display:false,beginAtZero:true}}}});
+  // temas
+  const tm=d.temas||[];
+  const maxt=Math.max(1,...tm.map(x=>x.n||0));
+  document.getElementById('dz-fb-temas').innerHTML = tm.length ? tm.map(x=>{
+    const w=Math.round(100*(x.n||0)/maxt);
+    return `<div><div class="flex items-center justify-between mb-0.5"><span class="trunc font-medium text-gray-600">${esc(x.tema)}</span><span class="text-xs text-gray-400 shrink-0 ml-2">${(x.n||0).toLocaleString()}</span></div><div class="h-2 rounded-full bg-gray-100 overflow-hidden"><div class="h-full bg-amber-400" style="width:${w}%"></div></div></div>`;
+  }).join('') : '<div class="text-gray-400 text-sm py-3 text-center">sem temas classificados no período</div>';
 }
 
 async function loadDesempenhoQualidade(){
@@ -3609,6 +3736,20 @@ async function loadTeam(){
       return`<div class="card p-4 ${sc.bg} border"><div class="flex items-center gap-3 mb-3"><div class="w-10 h-10 rounded-full ${isActive?'bg-indigo-100':'bg-gray-200'} flex items-center justify-center ${isActive?'text-indigo-600':'text-gray-400'} font-bold">${(a.nome||'?')[0]}</div><div class="flex-1 min-w-0"><div class="text-sm font-semibold trunc">${esc(a.nome)}</div><div class="flex items-center gap-1.5 mt-0.5"><span class="w-2 h-2 rounded-full ${sc.dot}"></span><span class="text-xs text-gray-500">${sc.label}</span><span class="ml-1">${sfBadge}</span></div></div></div><div class="grid grid-cols-2 gap-2 text-xs"><div class="bg-white bg-opacity-60 rounded p-2"><span class="text-gray-400">Fila</span><div class="font-bold text-lg">${a.fila||0}</div></div><div class="bg-white bg-opacity-60 rounded p-2"><span class="text-gray-400">Volume</span><div class="font-bold text-lg">${a.volume_distribuicao||0}</div></div><div class="bg-white bg-opacity-60 rounded p-2"><span class="text-gray-400">Almoço</span><div class="font-medium">${a.almoco||'-'}${a.almoco_real?' ~ '+a.almoco_real:''}</div></div><div class="bg-white bg-opacity-60 rounded p-2"><span class="text-gray-400">Fim Exp.</span><div class="font-medium">${a.final_expediente||'-'}</div></div></div>${a.ultima_execucao?'<div class="mt-2 text-xs text-gray-400"><i class="fas fa-clock mr-1"></i>'+esc(a.ultima_execucao)+'</div>':''}</div>`;
     }).join('')||'<div class="col-span-full text-center text-gray-400 py-10">Nenhum atendente encontrado</div>';
   }catch(e){console.error('Erro loadTeam',e);document.getElementById('team-grid').innerHTML='<div class="col-span-full text-center text-red-500 py-10"><i class="fas fa-exclamation-triangle mr-2"></i>Erro ao carregar equipe</div>';}
+}
+function renderTeamCarga(agents){
+  const el=document.getElementById('dash-carga');
+  if(!el)return;
+  const ativos=agents.filter(a=>a.status==='ativo'||a.status==='encerrando'||a.status==='almoco');
+  const total=agents.length;
+  const filaTot=agents.reduce((s,a)=>s+(+a.fila||0),0);
+  const volTot=agents.reduce((s,a)=>s+(+a.volume_distribuicao||0),0);
+  const chips=[];
+  const chip=(icon,label,val,cls)=>`<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs ${cls||'bg-gray-100 text-gray-600'}"><i class="fas ${icon}"></i><span class="text-gray-400 font-normal">${label}</span><b>${val}</b></span>`;
+  chips.push(chip('fa-users','Consultores',`${ativos.length} online de ${total}`,ativos.length?'bg-green-100 text-green-700':'bg-gray-100 text-gray-500'));
+  chips.push(chip('fa-layer-group','Fila total',filaTot.toLocaleString(),'bg-indigo-100 text-indigo-700'));
+  chips.push(chip('fa-share-nodes','Distribuído hoje',volTot.toLocaleString(),'bg-gray-100 text-gray-600'));
+  el.innerHTML=chips.join('');
 }
 
 // ==== STUDENTS PANEL ====

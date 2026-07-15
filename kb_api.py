@@ -768,7 +768,10 @@ async def dashboard_pulse():
     if cached and cached[1] > time.time():
         return cached[0]
     out = {'hoje': 0, 'ontem': 0, 'd7': 0, 'taxa_automacao': None, 'sparkline': [],
-           'custo_7d': None, 'tokens_7d': None, 'respostas_com_custo_7d': 0}
+           'custo_7d': None, 'tokens_7d': None, 'respostas_com_custo_7d': 0,
+           'custo_supervisor': None, 'tokens_supervisor': None,
+           'supervisor_auditadas': 0, 'supervisor_dias': None,
+           'supervisor_modelo': None}
     try:
         with get_db() as conn:
             cur = conn.cursor()
@@ -801,6 +804,26 @@ async def dashboard_pulse():
                 out['custo_7d'] = float(c7 or 0)
                 out['tokens_7d'] = int(t7 or 0)
                 out['respostas_com_custo_7d'] = int(n7 or 0)
+            except Exception:
+                conn.rollback()
+            # CUSTO DO SUPERVISOR (gpt-5.1 — bem mais caro que o mini). Acumulado
+            # desde que o agente subiu; persistido em agent_config pelo supervisor.
+            try:
+                cur.execute("SELECT value FROM agent_config WHERE key='openai_supervisor_stats'")
+                row = cur.fetchone()
+                if row and row[0]:
+                    st = json.loads(row[0])
+                    ct = st.get('custo_usd_total')
+                    if ct is not None:
+                        out['custo_supervisor'] = float(ct or 0)
+                        out['tokens_supervisor'] = int((st.get('tokens_in_total') or 0)
+                                                        + (st.get('tokens_out_total') or 0))
+                        out['supervisor_auditadas'] = int(st.get('audited_total') or 0)
+                        out['supervisor_modelo'] = st.get('model')
+                        started = st.get('started_at') or 0
+                        if started:
+                            dias = (time.time() - float(started)) / 86400.0
+                            out['supervisor_dias'] = round(dias, 1) if dias > 0 else None
             except Exception:
                 conn.rollback()
     except Exception as e:
@@ -2824,6 +2847,78 @@ async def audit_supervisor_status():
         return {'ok': False, 'error': str(e)}
 
 
+@app.get("/api/operacao/saude")
+async def operacao_saude():
+    """(2026-07) Faixa de saúde operacional para o Dashboard. Consolida numa
+    única chamada: heartbeat/watchdog do agente, telemetria do supervisor IA,
+    backlog atual da fila (Fora do Horário) e custo/tokens/interações de HOJE.
+    Objetivo: dar 'controle geral' num relance, sem espalhar a informação por
+    várias abas."""
+    out = {
+        'ok': True,
+        'watchdog': _load_agent_watchdog_info(),
+        'supervisor': None,
+        'fila': {'pending': 0, 'in_progress': 0},
+        'hoje': {'interacoes': 0, 'custo_usd': None, 'tokens': None},
+    }
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            # Supervisor IA (telemetria persistida pelo agente)
+            try:
+                cur.execute("SELECT value FROM agent_config WHERE key = 'openai_supervisor_stats'")
+                row = cur.fetchone()
+                if row and row[0]:
+                    st = json.loads(row[0])
+                    last_at = st.get('last_cycle_at') or 0
+                    age_min = None
+                    if last_at:
+                        age_min = round((time.time() - float(last_at)) / 60.0, 1)
+                    out['supervisor'] = {
+                        'cycles': st.get('cycles', 0),
+                        'audited_total': st.get('audited_total', 0),
+                        'problems_found': st.get('problems_found', 0),
+                        'errors': st.get('errors', 0),
+                        'last_error': (st.get('last_error') or '')[:200],
+                        'last_cycle_age_min': age_min,
+                        'last_cycle_audited': st.get('last_cycle_audited', 0),
+                        'last_cycle_problems': st.get('last_cycle_problems', 0),
+                    }
+            except Exception:
+                conn.rollback()
+            # Backlog atual da fila
+            try:
+                cur.execute("""SELECT
+                        count(*) FILTER (WHERE status='pending'),
+                        count(*) FILTER (WHERE status='in_progress')
+                    FROM pending_escalation""")
+                r = cur.fetchone()
+                out['fila'] = {'pending': int(r[0] or 0), 'in_progress': int(r[1] or 0)}
+            except Exception:
+                conn.rollback()
+            # Atividade + custo de HOJE
+            try:
+                cur.execute("SELECT count(*) FROM ia_interaction_log WHERE created_at::date = current_date")
+                out['hoje']['interacoes'] = int(cur.fetchone()[0] or 0)
+            except Exception:
+                conn.rollback()
+            try:
+                cur.execute("""SELECT
+                        coalesce(sum(custo_usd),0),
+                        coalesce(sum(coalesce(tokens_in,0)+coalesce(tokens_out,0)),0)
+                    FROM ia_interaction_log WHERE created_at::date = current_date""")
+                c, t = cur.fetchone()
+                out['hoje']['custo_usd'] = float(c or 0)
+                out['hoje']['tokens'] = int(t or 0)
+            except Exception:
+                conn.rollback()
+            cur.close()
+    except Exception as e:
+        out['ok'] = False
+        out['error'] = str(e)
+    return out
+
+
 @app.get("/api/audit/findings/{finding_id}/conversation")
 async def audit_finding_conversation(finding_id: int, limit: int = Query(30, ge=5, le=100)):
     """Retorna o trecho da conversa associada a um finding, lendo de
@@ -3792,6 +3887,36 @@ async def desempenho():
             'pct_normal': float(dpct) if dpct is not None else None,
         }
 
+        # ---- carga por consultor (era agente): quantas conversas cada humano
+        #      foi o 1o a atender + tempo mediano de resposta. Mostra distribuicao
+        #      de carga real e responsividade individual. ----
+        cur.execute(f"""
+            WITH firsts AS (
+              SELECT conversation_id, MIN(message_at) fc FROM log_conversa
+              WHERE message_at >= %s AND sender_type='CLIENTE' GROUP BY conversation_id
+            ),
+            fh AS (
+              SELECT DISTINCT ON (l.conversation_id)
+                COALESCE(NULLIF(TRIM(l.atendente_nome),''),'Suporte') atendente,
+                EXTRACT(EPOCH FROM (l.message_at - f.fc)) gap
+              FROM firsts f JOIN log_conversa l ON l.conversation_id=f.conversation_id
+               AND l.sender_type='SUPORTE' AND l.message_at > f.fc
+               AND COALESCE(NULLIF(TRIM(l.atendente_nome),''),'Suporte') NOT IN {_NOT_HUMAN}
+              ORDER BY l.conversation_id, l.message_at
+            )
+            SELECT atendente, count(*) n,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY gap) FILTER (WHERE gap >= 0) med
+            FROM fh GROUP BY atendente ORDER BY n DESC
+        """, (_DESEMP_CUTOFF,))
+        rows_cc = cur.fetchall()
+        tot_cc = sum((r[1] or 0) for r in rows_cc) or 0
+        out['carga_consultor'] = [
+            {'atendente': a, 'convs': int(n or 0),
+             'pct': round(100.0 * (n or 0) / tot_cc, 1) if tot_cc else 0,
+             'mediana_s': round(med) if med is not None else None}
+            for a, n, med in rows_cc
+        ]
+
     # ---- funil de disparo (banco disparos) ----
     try:
         with get_other_db('disparos') as dconn:
@@ -3806,6 +3931,67 @@ async def desempenho():
         out['funil_disparo'] = {'erro': str(e)}
 
     _DESEMPENHO_CACHE['d'] = (out, time.time() + 600)  # cache 10 min
+    return out
+
+
+_FALLBACK_CACHE = {}
+
+@app.get("/api/desempenho/fallback")
+async def desempenho_fallback(days: int = Query(30, ge=7, le=180)):
+    """(2026-07) Taxa de fallback / lacunas da base.
+
+    Fallback = interação em que o agente NÃO conseguiu responder com confiança:
+    ação de escalonamento (escalate/transfer) OU confiança < 0.4. A taxa mostra
+    quanto da demanda a IA não fechou sozinha; o ranking de temas revela onde a
+    base de conhecimento tem buracos (o que priorizar para treinar)."""
+    ckey = f'fb_{days}'
+    cached = _FALLBACK_CACHE.get(ckey)
+    if cached and cached[1] > time.time():
+        return cached[0]
+    out = {'days': days, 'total': 0, 'fallback': 0, 'taxa': None,
+           'serie': [], 'temas': []}
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cond_fb = "(acao LIKE 'escalate%' OR acao LIKE '%transfer' OR confianca < 0.4)"
+            cur.execute(f"""
+                SELECT count(*) tot, count(*) FILTER (WHERE {cond_fb}) fb
+                FROM ia_interaction_log
+                WHERE created_at > now() - interval '{days} days'
+            """)
+            tot, fb = cur.fetchone()
+            out['total'] = int(tot or 0)
+            out['fallback'] = int(fb or 0)
+            out['taxa'] = round(100.0 * (fb or 0) / tot, 1) if tot else None
+            # série diária da taxa (últimos 14 dias, independente de days p/ o gráfico)
+            cur.execute(f"""
+                SELECT to_char(created_at::date,'DD/MM') d,
+                       count(*) FILTER (WHERE {cond_fb}) fb, count(*) tot
+                FROM ia_interaction_log WHERE created_at > now() - interval '14 days'
+                GROUP BY created_at::date ORDER BY created_at::date
+            """)
+            out['serie'] = [
+                {'d': d, 'taxa': round(100.0 * (f or 0) / t, 1) if t else 0}
+                for d, f, t in cur.fetchall()
+            ]
+            # temas com mais fallback (cruza log de fallback x resumo por conversa)
+            try:
+                cur.execute(f"""
+                    SELECT s.tema, count(*) n
+                    FROM ia_interaction_log il
+                    JOIN interaction_summary s ON s.conv_id = il.conversation_id::text
+                    WHERE il.created_at > now() - interval '{days} days'
+                      AND {cond_fb.replace('acao','il.acao').replace('confianca','il.confianca')}
+                      AND s.tema IS NOT NULL AND TRIM(s.tema) <> ''
+                    GROUP BY s.tema ORDER BY n DESC LIMIT 10
+                """)
+                out['temas'] = [{'tema': t, 'n': int(n or 0)} for t, n in cur.fetchall()]
+            except Exception:
+                conn.rollback()
+            cur.close()
+    except Exception as e:
+        out['error'] = str(e)
+    _FALLBACK_CACHE[ckey] = (out, time.time() + 300)
     return out
 
 
