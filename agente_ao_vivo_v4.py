@@ -7370,6 +7370,33 @@ _HANDOFF_FULFILL_RECENT = {}
 HANDOFF_FULFILL_COOLDOWN_S = 120
 
 
+def _requeue_orphan_pending(conv_id, phone, name='', reason='handoff_requeue'):
+    """Garante uma linha pending_escalation 'pending' (sem preferred) p/ a conversa,
+    se ainda nao houver uma viva. Evita abandonar promessa de handoff que nao pode ser
+    cumprida (alvo inativo/offline): a distribuicao normal encaminha a um consultor
+    ATIVO. Retorna True se inseriu."""
+    if not conv_id or not phone:
+        return False
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM pending_escalation WHERE conv_id=%s AND status='pending' LIMIT 1", (conv_id,))
+        if cur.fetchone():
+            cur.close()
+            conn.close()
+            return False
+        cur.execute("""INSERT INTO pending_escalation
+            (conv_id, phone, student_name, reason, tier, retorno_label, pergunta, status, preferred_attendant)
+            VALUES (%s,%s,%s,%s,'first',NULL,'','pending',NULL)""", (conv_id, phone, name, reason))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        p(f"  [REQUEUE] erro conv {str(conv_id)[:12]}: {e}")
+        return False
+
+
 # ===================== INACTIVE ATTENDANT RESCUE — REMOVIDO (2026-06-01) =====================
 # Tentativa anterior foi agressiva demais: varria TODAS as conversas e tirava
 # dos atendentes inativos, mesmo quando o atendimento estava em andamento
@@ -7426,9 +7453,16 @@ def process_handoff_fulfillment_sweep(open_convs):
 
             target_first = ho_target.split()[0].lower()
             if not is_attendant_active_now(target_first):
-                p(f"  [HANDOFF-FULFILL] {cid[:12]} target={ho_target} offline — limpando handoff stale")
+                # (2026-07-15) Antes so limpava o handoff e ABANDONAVA a promessa
+                # (aluno ficava orfao em "Nao iniciados", sem ninguem). Agora reenfileira
+                # como pending geral (sem preferred) p/ a distribuicao rotear a um
+                # consultor ATIVO, e so entao limpa o lock do alvo offline.
+                ct_off = c.get('contact', {}) or {}
+                phone_off = ''.join(ch for ch in str(ct_off.get('phoneNumber', '') or ct_off.get('contactId', '') or '') if ch.isdigit())
+                did_rq = _requeue_orphan_pending(cid, phone_off, (ct_off.get('name', '') or '').strip(), reason='handoff_target_offline')
+                p(f"  [HANDOFF-FULFILL] {cid[:12]} target={ho_target} offline — {'reenfileirado p/ distribuicao geral' if did_rq else 'ja na fila'}")
                 try:
-                    _clear_handoff_active(cid, reason='target_offline_fulfill')
+                    _clear_handoff_active(cid, reason='target_offline_requeued')
                 except Exception:
                     pass
                 continue
@@ -7478,6 +7512,100 @@ def process_handoff_fulfillment_sweep(open_convs):
 
     if fulfilled:
         p(f"  [HANDOFF-FULFILL] Total transferencias forcadas: {fulfilled}")
+
+
+# ===================== HANDOFF ORPHAN RESCUE (reenfileira promessas nao cumpridas) =====================
+# (2026-07-15) Conversas que tiveram promessa de handoff (dispatch/preferred/
+# human_unavailable) mas ficaram "Nao iniciadas" sem atendente e perderam o lugar
+# na fila (lock expirou, pending virou closed_no_engagement/resolved, ou nunca teve
+# linha). Sem isso, a promessa morria silenciosamente e alguem tinha que criar na mao.
+# Esta varredura recoloca o caso como pending (sem preferred) p/ a distribuicao normal
+# rotear a um consultor ATIVO.
+_HANDOFF_RESCUE_RECENT = {}
+HANDOFF_RESCUE_COOLDOWN_S = 1800   # 30 min por conversa (evita reinsercao em loop)
+_HANDOFF_RESCUE_LAST_RUN = 0.0
+HANDOFF_RESCUE_INTERVAL_S = 300    # roda no maximo a cada 5 min
+
+
+def rescue_stuck_handoff_orphans(open_convs):
+    """Reenfileira conversas nao-iniciadas sem atendente que tiveram promessa de
+    handoff mas nunca foram distribuidas. Cria pending_escalation 'pending' (sem
+    preferred) p/ a distribuicao normal encaminhar a um consultor ATIVO."""
+    global _HANDOFF_RESCUE_LAST_RUN
+    if not is_within_business_hours() or not open_convs:
+        return
+    now_ts = time.time()
+    if (now_ts - _HANDOFF_RESCUE_LAST_RUN) < HANDOFF_RESCUE_INTERVAL_S:
+        return
+    _HANDOFF_RESCUE_LAST_RUN = now_ts
+
+    cand = []
+    for c in open_convs:
+        try:
+            if c.get('finished') or c.get('attendants'):
+                continue
+            if 'unstarted' not in (c.get('statuses') or []) and not c.get('isPending'):
+                continue
+            if (c.get('currentThread') or {}).get('attendants'):
+                continue
+            cid = c.get('id')
+            if not cid:
+                continue
+            last = _HANDOFF_RESCUE_RECENT.get(cid, 0)
+            if last and (now_ts - last) < HANDOFF_RESCUE_COOLDOWN_S:
+                continue
+            cand.append(c)
+        except Exception:
+            continue
+    if not cand:
+        return
+
+    ids = [c.get('id') for c in cand]
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        # teve promessa de humano (lock, mesmo expirado)
+        cur.execute("""SELECT DISTINCT conv_id FROM handoff_active
+                       WHERE conv_id = ANY(%s)
+                         AND motivo IN ('dispatch','preferred','human_unavailable')""", (ids,))
+        prometidos = {r[0] for r in cur.fetchall()}
+        # holds ativos que NAO devem ser mexidos (bot/supervisor ainda no caso)
+        cur.execute("""SELECT DISTINCT conv_id FROM handoff_active
+                       WHERE conv_id = ANY(%s)
+                         AND motivo IN ('retention','retention_after_hours','supervisor_block','polo_visit')
+                         AND (expires_at IS NULL OR expires_at > now())""", (ids,))
+        holds = {r[0] for r in cur.fetchall()}
+        # ja tem pending vivo? (nao reinserir)
+        cur.execute("""SELECT conv_id, bool_or(status = 'pending')
+                       FROM pending_escalation WHERE conv_id = ANY(%s)
+                       GROUP BY conv_id""", (ids,))
+        has_pending = {r[0]: bool(r[1]) for r in cur.fetchall()}
+        cur.close()
+        conn.close()
+
+        rescued = 0
+        _MAX = 40
+        for c in cand:
+            if rescued >= _MAX:
+                break
+            cid = c.get('id')
+            if cid not in prometidos or cid in holds:
+                continue
+            if has_pending.get(cid):
+                _HANDOFF_RESCUE_RECENT[cid] = now_ts
+                continue
+            ct = c.get('contact', {}) or {}
+            phone = ''.join(ch for ch in str(ct.get('phoneNumber', '') or ct.get('contactId', '') or '') if ch.isdigit())
+            if not phone:
+                continue
+            name = (ct.get('name', '') or '').strip()
+            if _requeue_orphan_pending(cid, phone, name, reason='handoff_orfao_resgatado'):
+                rescued += 1
+            _HANDOFF_RESCUE_RECENT[cid] = now_ts
+        if rescued:
+            p(f"  [HANDOFF-RESCUE] {rescued} conversas orfas c/ promessa de handoff reenfileiradas p/ distribuicao")
+    except Exception as e:
+        p(f"  [HANDOFF-RESCUE] erro: {e}")
 
 
 # ===================== POST-CLOSE RESCUE (reabertura apos encerramento) =====================
@@ -16194,6 +16322,10 @@ def main():
                 process_handoff_fulfillment_sweep(_convs_queue_source)
             except Exception as e_hff:
                 p(f"  [HANDOFF-FULFILL] Erro: {e_hff}")
+            try:
+                rescue_stuck_handoff_orphans(_convs_queue_source)
+            except Exception as e_hro:
+                p(f"  [HANDOFF-RESCUE] Erro: {e_hro}")
 
             # === MONITORAR FOLLOW-UP: conversas onde agente respondeu E aluno NÃO respondeu ===
             _fu_candidates = list(convs_opened) + [c for c in rest if (c.get('lastSendedMessageDate','') or '') > (c.get('lastReceivedMessageDate','') or '')]
