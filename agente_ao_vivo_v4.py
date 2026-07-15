@@ -1155,6 +1155,7 @@ ATTENDANT_MAP = {
     'wesley':  '69024605706ac6e207a35209',
     'felipe':  '696fcd21767a0bfa800d1034',
     'beatriz': '6989ef9a6ae58a6435bd2438',
+    'breno':   '6a579e130892b9d9e0759db6',
 }
 
 CRM_ATTENDANT_MAP = {
@@ -1171,6 +1172,7 @@ CRM_ATTENDANT_MAP = {
     'wesley':  'dd6cbed7-7666-45d1-bd90-368c8b97e217',
     'felipe':  '59039319-9f52-4ec8-8e12-e554bcd7a9ef',
     'beatriz': 'ab65b480-1761-42d8-815f-c7e3c8a7b6b4',
+    'breno':   '62fdb880-f840-4c0e-a528-fe26f9d991b0',
 }
 
 
@@ -10850,12 +10852,23 @@ def get_available_consultant(exclude_attendants=None):
             p(f"  [DIST] {nome}: SKIP (status_expediente={status_expediente})")
             continue
 
+        # (2026-07-15) GUARD: consultor Ativo no painel precisa existir nos maps do
+        # codigo (chat E crm). Sem isso, o dispatch marca in_progress mas a
+        # transferencia nunca cola -> conversa vira ORFA em "nao iniciados".
+        _chat_id_map = _lookup_attendant_id(nome, ATTENDANT_MAP)
+        _crm_id_map = _lookup_attendant_id(nome, CRM_ATTENDANT_MAP)
+        if not _chat_id_map or not _crm_id_map:
+            p(f"  [DIST] ALERTA: '{nome}' Ativo no painel mas NAO mapeado no codigo "
+              f"(chat={'ok' if _chat_id_map else 'FALTA'}, crm={'ok' if _crm_id_map else 'FALTA'}) "
+              f"- PULANDO p/ nao criar orfa. Mapeie em ATTENDANT_MAP/CRM_ATTENDANT_MAP.")
+            continue
+
         # (2026-07-15) Carga por NAO INICIADOS (com fallback p/ regra antiga).
         # Libera quem esta ocioso — poucos leads NAO respondidos — mesmo que
         # tenha muitas abertas dormentes. So decide pelo cache do DataCrazy se
         # ele estiver fresco; senao usa a regra classica de teto (nunca fica
         # sem criterio e nunca sobredistribui as cegas).
-        att_id_cons = _lookup_attendant_id(nome, ATTENDANT_MAP)
+        att_id_cons = _chat_id_map
         load = _consultant_load.get(att_id_cons) if att_id_cons else None
         cache_fresco = (time.time() - _consultant_load_ts) < CONSULTANT_LOAD_FRESH_S
         nao_inic_cons = None
