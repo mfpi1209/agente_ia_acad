@@ -7763,6 +7763,99 @@ def rescue_stuck_transfer_promises(open_convs):
         p(f"  [PROMISE-RESCUE] {rescued} conversas com promessa presa reenfileiradas p/ distribuicao")
 
 
+# ===================== RETENCAO ORFA (rede de seguranca da automacao RET-IA) =====================
+# (2026-07-16) Quando a automacao RET-IA dispara (tag) mas deixa o aluno ORFAO
+# (sem atendente) por muito tempo, o agente assume e distribui para o time de
+# retencao (Wesley/Danubia). Caso Debora: RET-IA acionada, Wesley removido,
+# negocio 'Sem atendente' -> aluno preso em "Nao iniciados" sem ninguem.
+_RETENTION_ORPHAN_RESCUE_RECENT = {}
+RETENTION_ORPHAN_RESCUE_COOLDOWN_S = 30 * 60   # 30 min por conversa (evita loop)
+_RETENTION_ORPHAN_RESCUE_LAST_RUN = 0.0
+RETENTION_ORPHAN_RESCUE_INTERVAL_S = 300       # roda no maximo a cada 5 min
+RETENTION_ORPHAN_MIN_AGE_S = 15 * 60           # espera 15 min apos o disparo da tag
+
+
+def rescue_orphaned_retention(open_convs):
+    """Rede de seguranca da retencao: RET-IA acionada mas aluno ficou sem
+    atendente por >15min -> assume e distribui p/ o time de retencao.
+    Idempotente/cooldown. So dentro do horario comercial e apos dar tempo p/ a
+    automacao agir (RETENTION_ORPHAN_MIN_AGE_S)."""
+    global _RETENTION_ORPHAN_RESCUE_LAST_RUN
+    if not is_within_business_hours() or not open_convs:
+        return
+    now_ts = time.time()
+    if (now_ts - _RETENTION_ORPHAN_RESCUE_LAST_RUN) < RETENTION_ORPHAN_RESCUE_INTERVAL_S:
+        return
+    _RETENTION_ORPHAN_RESCUE_LAST_RUN = now_ts
+
+    rescued = 0
+    _MAX = 15
+    for c in open_convs:
+        if rescued >= _MAX:
+            break
+        try:
+            if c.get('finished') or c.get('attendants'):
+                continue
+            if (c.get('currentThread') or {}).get('attendants'):
+                continue
+            if not ({'unstarted', 'opened', 'hidden'} & set(c.get('statuses') or [])):
+                continue
+            cid = c.get('id')
+            if not cid:
+                continue
+            last = _RETENTION_ORPHAN_RESCUE_RECENT.get(cid, 0)
+            if last and (now_ts - last) < RETENTION_ORPHAN_RESCUE_COOLDOWN_S:
+                continue
+
+            # precisa estar em retencao (handoff marcado) e sem atendente
+            try:
+                mot, _ = _is_handoff_active(cid)
+            except Exception:
+                mot = None
+            if mot not in ('retention', 'retention_after_hours'):
+                continue
+
+            # RET-IA precisa ter disparado ha >= RETENTION_ORPHAN_MIN_AGE_S (deu
+            # tempo p/ a automacao) mas dentro das ultimas 24h (caso recente).
+            try:
+                fired_recent = _signature_recently_sent(cid, 'ret_ia', window_s=24 * 3600)
+                fired_just_now = _signature_recently_sent(cid, 'ret_ia', window_s=RETENTION_ORPHAN_MIN_AGE_S)
+            except Exception:
+                fired_recent, fired_just_now = False, True
+            if not fired_recent or fired_just_now:
+                continue
+
+            ct = c.get('contact', {}) or {}
+            phone = ''.join(ch for ch in str(ct.get('phoneNumber', '') or ct.get('contactId', '') or '') if ch.isdigit())
+            if not phone:
+                continue
+            name = (ct.get('name', '') or '').strip()
+
+            # Regra: garante o lead antes de distribuir.
+            try:
+                _ensure_lead_for_conv(phone=phone, name=name)
+            except Exception:
+                pass
+
+            _q = 'Retenção — aluno sem atendente após automação RET-IA (resgate automático).'
+            try:
+                alvo = trigger_retention(cid, None, _q, phone=phone, force_distribute=True)
+            except Exception as e_tr:
+                p(f"  [RET-ORPHAN] erro trigger_retention {cid[:12]}: {e_tr}")
+                alvo = None
+            if alvo:
+                rescued += 1
+                _RETENTION_ORPHAN_RESCUE_RECENT[cid] = now_ts
+                p(f"  [RET-ORPHAN] {cid[:12]} ...{phone[-4:]} RET-IA orfa -> distribuida p/ {alvo}")
+            else:
+                p(f"  [RET-ORPHAN] {cid[:12]} sem membro de retencao ativo — segura p/ proximo ciclo")
+        except Exception as e_one:
+            p(f"  [RET-ORPHAN] erro conv {str(c.get('id', '?'))[:12]}: {e_one}")
+
+    if rescued:
+        p(f"  [RET-ORPHAN] {rescued} conversas de retencao orfas resgatadas p/ o time")
+
+
 # ===================== STARTUP CATCH-UP (aplica regras atuais ao backlog no boot) =====================
 # (2026-07-16) Toda vez que o agente sobe (rebuild/restart), aplica IMEDIATAMENTE
 # as regras atuais ao backlog que ja esta na fila — sem esperar a cadencia normal.
@@ -7834,6 +7927,7 @@ def startup_catch_up_new_rules():
             ('handoff_fulfillment', process_handoff_fulfillment_sweep),
             ('handoff_orphans', rescue_stuck_handoff_orphans),
             ('transfer_promises', rescue_stuck_transfer_promises),
+            ('retention_orphans', rescue_orphaned_retention),
         ):
             try:
                 _fn(backlog)
@@ -13062,9 +13156,14 @@ def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
         return None
 
 
-def trigger_retention(conv_id, lead_id, question, phone=None, target_name=None):
+def trigger_retention(conv_id, lead_id, question, phone=None, target_name=None,
+                      force_distribute=False):
     """Aciona Retenção: tag + responsável (Wesley OU Danúbia) no lead + business
     -> ATENDIMENTO + nota interna + transfere o chat. STICKY e por disponibilidade.
+
+    force_distribute: se True, IGNORA o modo RET-IA (tag/automação) e distribui
+    para um humano do time de retenção. Usado pela rede de segurança
+    (rescue_orphaned_retention) quando a automação deixou o aluno órfão.
 
     target_name: se informado, usa esse membro do time; senão escolhe via
     choose_retention_target (sticky + menor fila entre ativos).
@@ -13083,7 +13182,9 @@ def trigger_retention(conv_id, lead_id, question, phone=None, target_name=None):
 
     # (2026-06-25) TESTE: só para o(s) telefone(s) de teste, aciona a automação
     # RET-IA (tag) em vez de distribuir. Demais alunos seguem o fluxo normal abaixo.
-    if _use_ret_ia_automation(phone or _current_phone):
+    # (2026-07-16) force_distribute pula o modo RET-IA — usado pela rede de
+    # segurança quando a automação deixou o aluno órfão (sem atendente).
+    if not force_distribute and _use_ret_ia_automation(phone or _current_phone):
         p(f"  [RETENÇÃO] telefone de TESTE -> fluxo RET-IA (tag/automação), sem distribuir")
         return _trigger_retention_tag_only(conv_id, lead_id, question, phone=phone)
 
@@ -16665,6 +16766,10 @@ def main():
                 rescue_stuck_transfer_promises(_convs_queue_source)
             except Exception as e_tpr:
                 p(f"  [PROMISE-RESCUE] Erro: {e_tpr}")
+            try:
+                rescue_orphaned_retention(_convs_queue_source)
+            except Exception as e_ror:
+                p(f"  [RET-ORPHAN] Erro: {e_ror}")
 
             # === MONITORAR FOLLOW-UP: conversas onde agente respondeu E aluno NÃO respondeu ===
             _fu_candidates = list(convs_opened) + [c for c in rest if (c.get('lastSendedMessageDate','') or '') > (c.get('lastReceivedMessageDate','') or '')]
