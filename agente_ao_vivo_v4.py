@@ -11987,8 +11987,26 @@ def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude
                 except Exception:
                     pass
             else:
-                p(f"  [DIST] {conv_id[:12]} ja distribuido para {ho_target} (handoff_active) - skip idempotente")
-                return True
+                # (2026-07-16) NAO basta existir o lock de dispatch: a promessa
+                # "Vou te transferir para X" pode ter marcado o lock mas a
+                # atribuicao no DCZ NAO ter colado (chat/negocio sem atendente,
+                # negocio preso em Perdido/Encerramento). Antes o skip idempotente
+                # cego deixava a conversa presa em "Nao iniciados" para sempre.
+                # Agora so e idempotente se o DCZ REALMENTE tem um humano atribuido;
+                # senao limpamos o lock preso e seguimos p/ (re)distribuir.
+                _has_h_idem = False
+                try:
+                    _has_h_idem, _ = _dcz_conv_has_human(conv_id)
+                except Exception:
+                    _has_h_idem = False
+                if _has_h_idem:
+                    p(f"  [DIST] {conv_id[:12]} ja distribuido para {ho_target} (lock+atendente DCZ) - skip idempotente")
+                    return True
+                p(f"  [DIST] {conv_id[:12]} lock dispatch p/ {ho_target} SEM atendente no DCZ — lock preso, vai redistribuir")
+                try:
+                    _clear_handoff_active(conv_id, reason='dispatch_sem_atendente')
+                except Exception:
+                    pass
     except Exception:
         pass
     # Fallback: estado em memoria
@@ -12016,8 +12034,21 @@ def distribute_to_attendant(conv_id, reason='', silent_after_hours=True, exclude
         try:
             ho_motivo2, ho_target2 = _is_handoff_active(conv_id)
             if ho_motivo2 == 'dispatch':
-                p(f"  [DIST] {conv_id[:12]} re-check pos-lock: ja distribuido para {ho_target2} - skip")
-                return True
+                # (2026-07-16) Mesmo criterio do check rapido: so eh idempotente se
+                # o DCZ realmente tem atendente. Lock preso sem atendente NAO bloqueia.
+                _has_h2 = False
+                try:
+                    _has_h2, _ = _dcz_conv_has_human(conv_id)
+                except Exception:
+                    _has_h2 = False
+                if _has_h2:
+                    p(f"  [DIST] {conv_id[:12]} re-check pos-lock: ja distribuido para {ho_target2} (lock+atendente) - skip")
+                    return True
+                p(f"  [DIST] {conv_id[:12]} re-check pos-lock: lock dispatch SEM atendente — segue p/ redistribuir")
+                try:
+                    _clear_handoff_active(conv_id, reason='dispatch_sem_atendente_poslock')
+                except Exception:
+                    pass
         except Exception:
             pass
 
