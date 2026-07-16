@@ -7921,6 +7921,13 @@ def startup_catch_up_new_rules():
 
     p(f"  [STARTUP-CATCHUP] leads: scanned={scanned} garantidos={leads_ok} (backlog={len(backlog)})")
 
+    # (2026-07-16) Vincula lead<->contato em TODAS as convs academicas (inclui as
+    # com atendente / distribuidas por automacao) — resolve 'Lead nao encontrado'.
+    try:
+        ensure_leads_for_convs(convs)
+    except Exception as e_ell:
+        p(f"  [STARTUP-CATCHUP] erro lead-link: {e_ell}")
+
     # Redistribuicao imediata dos orfaos via varreduras ja existentes (seguras).
     if is_within_business_hours():
         for _fn_name, _fn in (
@@ -13002,6 +13009,113 @@ def _guarantee_lead(conv_id=None, phone=None, name='', action=''):
         return None
 
 
+def _dcz_contact_e164(phone):
+    """Normaliza p/ o formato do CONTATO do DataCrazy (dígitos com DDI 55, ex.:
+    '5511987654321'). O vínculo lead<->contato só cola quando o telefone do lead
+    casa com o contactId (que tem 55). Bug corrigido: leads criados em formato
+    NACIONAL (11...) não vinculavam ao contato -> painel 'Lead não encontrado'."""
+    d = re.sub(r'\D', '', str(phone or ''))
+    if not d:
+        return ''
+    if d.startswith('55') and len(d) in (12, 13):
+        return d
+    if len(d) in (10, 11):
+        return '55' + d
+    return d
+
+
+def _link_lead_to_contact(contact_id, lead_id, contact_phone=''):
+    """Vincula um lead EXISTENTE ao contato da conversa (define contact.externalId),
+    resolvendo o 'Lead não encontrado' mesmo quando a conversa foi distribuída por
+    AUTOMAÇÃO (sem passar pela distribuição do agente). Se o telefone do lead não
+    casar com o do contato (lead nacional x contato com 55), corrige o telefone do
+    lead ANTES — senão o vínculo não cola (PATCH retorna 200 sem vincular).
+    Retorna True se o PATCH de vínculo foi aceito."""
+    if not contact_id or not lead_id:
+        return False
+    e164 = _dcz_contact_e164(contact_phone)
+    try:
+        if e164:
+            try:
+                rl = requests.get(f'{DCZ_CRM}/leads/{lead_id}', headers=H, timeout=10)
+                if rl.status_code == 200:
+                    ld = rl.json() or {}
+                    lph = re.sub(r'\D', '', str(ld.get('rawPhone') or ld.get('phone') or ''))
+                    if lph != e164:
+                        requests.patch(f'{DCZ_CRM}/leads/{lead_id}', headers=H,
+                                       json={'phone': e164}, timeout=10)
+                        p(f"  [LEAD-LINK] telefone do lead ajustado p/ {e164} (casar c/ contato)")
+            except Exception:
+                pass
+        r = requests.patch(f'{DCZ_MSG}/messaging/contacts/{contact_id}', headers=H,
+                           json={'leadId': lead_id}, timeout=12)
+        return r.status_code in (200, 201, 204)
+    except Exception as e:
+        p(f"  [LEAD-LINK] erro vinculando lead ao contato: {e}")
+        return False
+
+
+_ENSURE_LEAD_LINK_RECENT = {}
+ENSURE_LEAD_LINK_COOLDOWN_S = 30 * 60      # 30 min por conversa
+_ENSURE_LEAD_LINK_LAST_RUN = 0.0
+ENSURE_LEAD_LINK_INTERVAL_S = 120          # roda no máximo a cada 2 min
+
+
+def ensure_leads_for_convs(convs):
+    """(2026-07-16) REGRA: toda conversa acadêmica deve ter LEAD criado e VINCULADO
+    ao contato — inclusive as distribuídas por AUTOMAÇÃO (com atendente), que não
+    passam pela distribuição do agente e ficam 'Lead não encontrado'. Para cada
+    conversa sem lead vinculado (contact.externalId/leadId vazio): garante o lead
+    (busca/cria) e vincula ao contato. Idempotente, com cooldown por conversa."""
+    global _ENSURE_LEAD_LINK_LAST_RUN
+    if not convs:
+        return
+    now_ts = time.time()
+    if (now_ts - _ENSURE_LEAD_LINK_LAST_RUN) < ENSURE_LEAD_LINK_INTERVAL_S:
+        return
+    _ENSURE_LEAD_LINK_LAST_RUN = now_ts
+
+    done = 0
+    _MAX = 40
+    for c in convs:
+        if done >= _MAX:
+            break
+        try:
+            inst = c.get('instance', {}) or {}
+            iid = inst.get('id', '') if isinstance(inst, dict) else str(inst)
+            if iid != INSTANCE_ACADEMICO_ID:
+                continue
+            if 'finished' in (c.get('statuses') or []):
+                continue
+            ct = c.get('contact', {}) or {}
+            # já vinculado? (externalId/leadId apontando p/ um lead) -> pula
+            if ct.get('externalId') or ct.get('leadId'):
+                continue
+            contact_id = ct.get('id')
+            cid = c.get('id')
+            if not contact_id or not cid:
+                continue
+            last = _ENSURE_LEAD_LINK_RECENT.get(cid, 0)
+            if last and (now_ts - last) < ENSURE_LEAD_LINK_COOLDOWN_S:
+                continue
+            phone = ''.join(ch for ch in str(ct.get('phoneNumber', '') or ct.get('contactId', '') or '') if ch.isdigit())
+            if not phone:
+                continue
+            name = (ct.get('name', '') or '').strip()
+            _ENSURE_LEAD_LINK_RECENT[cid] = now_ts
+            lead_id = _ensure_lead_for_conv(phone=phone, name=name)
+            if lead_id and _link_lead_to_contact(contact_id, lead_id, contact_phone=phone):
+                done += 1
+                _atts = c.get('attendants') or []
+                _via = 'automacao' if _atts else 'fila'
+                p(f"  [LEAD-LINK] {str(cid)[:12]} ...{phone[-4:]} lead {str(lead_id)[:12]} vinculado ao contato ({_via})")
+        except Exception as e_one:
+            p(f"  [LEAD-LINK] erro conv {str(c.get('id', '?'))[:12]}: {e_one}")
+
+    if done:
+        p(f"  [LEAD-LINK] {done} leads vinculados aos contatos (inclui distribuídas por automação)")
+
+
 def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
     """(2026-06-25) Fluxo de TESTE da automação "Retenção IA": em vez de distribuir,
     apenas:
@@ -16770,6 +16884,13 @@ def main():
                 rescue_orphaned_retention(_convs_queue_source)
             except Exception as e_ror:
                 p(f"  [RET-ORPHAN] Erro: {e_ror}")
+            # (2026-07-16) Garante lead criado+vinculado em TODAS as convs (inclui
+            # as distribuidas por automacao, com atendente) -> resolve 'Lead nao
+            # encontrado'. Usa convs_raw (nao so a fila) para pegar as com atendente.
+            try:
+                ensure_leads_for_convs(convs_raw)
+            except Exception as e_ell:
+                p(f"  [LEAD-LINK] Erro: {e_ell}")
 
             # === MONITORAR FOLLOW-UP: conversas onde agente respondeu E aluno NÃO respondeu ===
             _fu_candidates = list(convs_opened) + [c for c in rest if (c.get('lastSendedMessageDate','') or '') > (c.get('lastReceivedMessageDate','') or '')]
