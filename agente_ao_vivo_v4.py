@@ -12027,28 +12027,31 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
         except Exception as e:
             p(f"  [DIST] Erro garantindo lead: {e}")
 
-    # (2026-05-25) ALERTA visivel se transferimos sem lead — caso Larissa:
-    # painel DCZ mostrava 'Lead nao encontrado' mesmo apos resgate. Aqui
-    # registramos nota interna laranja na conv para o consultor saber que
-    # precisa criar lead manual ou tentar de novo.
+    # Não transfere a conversa sem um lead vinculável: a fila fará nova
+    # tentativa de cadastro antes de escolher/atribuir um consultor.
     if not lead_id:
+        # A distribuicao so e valida quando existe um lead para vincular ao
+        # consultor. Antes este caso ainda transferia o chat e gravava o lock
+        # "dispatch" por 4h: a conversa ficava com humano, sem lead, e sem
+        # possibilidade de a fila tentar criar novamente.
+        p(f"  [DIST] {conv_id[:12]} lead indisponivel — adiando distribuicao para nova tentativa")
         try:
-            requests.post(
-                f'{DCZ_API}/api/v1/conversations/{conv_id}/messages',
-                headers=H,
-                json={
-                    'body': (
-                        '⚠️ *Atencao* — distribuicao sem lead vinculado. '
-                        'Tentei criar (3x) mas API CRM nao retornou ID. '
-                        'Cria/atribui o lead manualmente, por favor.'
-                    ),
-                    'isInternal': True,
-                },
-                timeout=10,
+            # Substitui o lock de dispatch adquirido acima. Assim a rotina de
+            # fila pode voltar a tentar criar o lead e distribuir normalmente.
+            _mark_handoff_active(
+                conv_id, 'human_unavailable', target='', ttl_s=5 * 60,
+                body='lead_creation_retry', protect_human=False,
             )
-        except Exception:
-            pass
-        p(f"  [DIST] {conv_id[:12]} ATENCAO: distribuindo SEM lead criado (apos 3 tentativas)")
+            record_pending_escalation(
+                conv_id,
+                reason='lead_creation_failed',
+                tier='pending',
+                retorno_label='assim que o cadastro for concluído',
+                question=(reason or 'Distribuição aguardando criação do lead')[:500],
+            )
+        except Exception as e_lead_pending:
+            p(f"  [DIST] erro ao agendar nova tentativa de lead: {e_lead_pending}")
+        return False
 
     lead_ok = _dcz_transfer_lead(lead_id, nome)
     biz_ok = _dcz_transfer_business(phone, nome, lead_id=lead_id)
