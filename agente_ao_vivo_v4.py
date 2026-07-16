@@ -5433,6 +5433,11 @@ def _handle_outro_polo(conv_id, phone, student_profile, polo_real):
 
 def transfer_to_human(conv_id, reason=''):
     """Sinaliza transferência para atendente humano via nota interna."""
+    # (2026-07-16) REGRA: garante o lead ANTES de adicionar a nota interna.
+    try:
+        _guarantee_lead(conv_id=conv_id, action='transfer_to_human/nota')
+    except Exception:
+        pass
     try:
         note = f"🔔 *Transferência solicitada pelo agente IA*"
         if reason:
@@ -7756,6 +7761,91 @@ def rescue_stuck_transfer_promises(open_convs):
 
     if rescued:
         p(f"  [PROMISE-RESCUE] {rescued} conversas com promessa presa reenfileiradas p/ distribuicao")
+
+
+# ===================== STARTUP CATCH-UP (aplica regras atuais ao backlog no boot) =====================
+# (2026-07-16) Toda vez que o agente sobe (rebuild/restart), aplica IMEDIATAMENTE
+# as regras atuais ao backlog que ja esta na fila — sem esperar a cadencia normal.
+# Objetivo: quando ajustamos uma regra e existem casos reais parados (ex.: criacao
+# de lead), basta rebuildar que o agente ja processa esses casos, permitindo
+# validar rapido em producao se a regra nova funciona.
+_STARTUP_CATCHUP_MAX = 200
+
+
+def startup_catch_up_new_rules():
+    """Passada UNICA no boot. Idempotente e conservadora:
+      1) GARANTE o lead de todo aluno preso na fila (regra: lead antes de tudo);
+      2) roda as varreduras de resgate/distribuicao ja testadas (handoff-fulfill,
+         handoff-orfao, promessa-presa) e o auto-dispatch, para os casos orfaos
+         serem redistribuidos imediatamente.
+    NAO mexe em conversa com atendente, finished ou em retencao. A criacao de
+    lead ocorre sempre; a redistribuicao respeita o horario comercial."""
+    p("  [STARTUP-CATCHUP] aplicando regras atuais ao backlog da fila...")
+    try:
+        convs = _fetch_active_conversations(limit_per_status=300, timeout=30) or []
+    except Exception as e:
+        p(f"  [STARTUP-CATCHUP] erro ao listar conversas: {e}")
+        return
+
+    backlog = []
+    for c in convs:
+        try:
+            inst = c.get('instance', {}) or {}
+            iid = inst.get('id', '') if isinstance(inst, dict) else str(inst)
+            if iid != INSTANCE_ACADEMICO_ID:
+                continue
+            statuses = c.get('statuses', []) or []
+            if 'finished' in statuses:
+                continue
+            if c.get('attendants'):
+                continue
+            if not ({'unstarted', 'opened', 'hidden'} & set(statuses)):
+                continue
+            backlog.append(c)
+        except Exception:
+            continue
+
+    leads_ok = 0
+    scanned = 0
+    for c in backlog[:_STARTUP_CATCHUP_MAX]:
+        try:
+            cid = c.get('id', '')
+            ct = c.get('contact', {}) or {}
+            phone = ''.join(ch for ch in str(ct.get('phoneNumber', '') or ct.get('contactId', '') or '') if ch.isdigit())
+            if not phone:
+                continue
+            name = (ct.get('name', '') or '').strip()
+            scanned += 1
+            # Regra: garante o lead SEMPRE (independe de horario). Usa o helper
+            # base (_ensure_lead_for_conv) p/ NAO mexer no student_profile global.
+            try:
+                if _ensure_lead_for_conv(phone=phone, name=name):
+                    leads_ok += 1
+            except Exception as e_ld:
+                p(f"  [STARTUP-CATCHUP] erro lead conv {str(cid)[:12]}: {e_ld}")
+        except Exception as e_one:
+            p(f"  [STARTUP-CATCHUP] erro conv {str(c.get('id', '?'))[:12]}: {e_one}")
+
+    p(f"  [STARTUP-CATCHUP] leads: scanned={scanned} garantidos={leads_ok} (backlog={len(backlog)})")
+
+    # Redistribuicao imediata dos orfaos via varreduras ja existentes (seguras).
+    if is_within_business_hours():
+        for _fn_name, _fn in (
+            ('handoff_fulfillment', process_handoff_fulfillment_sweep),
+            ('handoff_orphans', rescue_stuck_handoff_orphans),
+            ('transfer_promises', rescue_stuck_transfer_promises),
+        ):
+            try:
+                _fn(backlog)
+            except Exception as e_sw:
+                p(f"  [STARTUP-CATCHUP] erro varredura {_fn_name}: {e_sw}")
+        try:
+            process_pending_escalation_auto_dispatch()
+        except Exception as e_ad:
+            p(f"  [STARTUP-CATCHUP] erro auto-dispatch: {e_ad}")
+        p("  [STARTUP-CATCHUP] varreduras de redistribuicao concluidas")
+    else:
+        p("  [STARTUP-CATCHUP] fora do horario — leads garantidos; redistribuicao no horario comercial")
 
 
 # ===================== POST-CLOSE RESCUE (reabertura apos encerramento) =====================
@@ -12186,10 +12276,13 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
     lead_id = student_profile.get('lead_id', '') if student_profile else ''
     phone = _current_phone or PHONE_TO_MONITOR
 
-    if not lead_id and phone:
-        # (2026-06-30) Resolve/cria o lead com telefone NORMALIZADO (nacional),
-        # casando com o contato da conversa — evita o bug do DDI 55 em que o lead
-        # criado/encontrado não vinculava ('Lead não encontrado' no painel).
+    if phone:
+        # (2026-07-16) REGRA: SEMPRE valida/cria o lead antes de transferir — não
+        # basta o lead_id em cache (student_profile) existir: ele pode ter sido
+        # removido/mesclado no CRM e o painel mostra 'Lead não encontrado' mesmo
+        # após a distribuição. _ensure_lead_for_conv valida o lead_id recebido via
+        # _lead_exists e, se inválido, busca por telefone (normalizando DDI 55) ou
+        # cria um novo — casando com o contato da conversa.
         contact_name = ''
         if student_profile and student_profile.get('name'):
             contact_name = student_profile['name']
@@ -12201,7 +12294,7 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
                     contact_name = cn
                     break
         try:
-            ensured = _ensure_lead_for_conv(phone=phone, name=contact_name)
+            ensured = _ensure_lead_for_conv(lead_id=lead_id, phone=phone, name=contact_name)
             if ensured:
                 lead_id = ensured
                 p(f"  [DIST] Lead garantido para distribuição: {lead_id[:16]}")
@@ -12781,6 +12874,40 @@ def _ensure_lead_for_conv(lead_id=None, phone=None, name=''):
     return None
 
 
+def _guarantee_lead(conv_id=None, phone=None, name='', action=''):
+    """(2026-07-16) REGRA GERAL: o lead do aluno DEVE existir ANTES de qualquer
+    ação do agente — distribuir, adicionar nota interna ou adicionar a tag que
+    inicia a automação. Centraliza a criação (via _ensure_lead_for_conv) para que
+    nenhum fluxo (low-conf, transfer_to_human, retenção, etc.) escale sem um lead
+    vinculável ('Lead não encontrado' no painel). Idempotente: se já existe,
+    apenas retorna o id. Atualiza student_profile['lead_id'] quando possível.
+    Retorna lead_id válido ou None."""
+    try:
+        ph = phone or _current_phone or PHONE_TO_MONITOR
+        nm = name
+        if not nm:
+            try:
+                if student_profile and student_profile.get('name'):
+                    nm = student_profile.get('name') or ''
+            except Exception:
+                nm = ''
+        lead_id = _ensure_lead_for_conv(phone=ph, name=nm)
+        _tail = re.sub(r'\D', '', str(ph or ''))[-4:]
+        if lead_id:
+            try:
+                if student_profile is not None:
+                    student_profile['lead_id'] = lead_id
+            except Exception:
+                pass
+            p(f"  [LEAD-RULE] lead garantido antes de '{action or 'acao'}' (...{_tail}): {str(lead_id)[:16]}")
+        else:
+            p(f"  [LEAD-RULE] NAO foi possivel garantir lead antes de '{action or 'acao'}' (...{_tail})")
+        return lead_id
+    except Exception as e:
+        p(f"  [LEAD-RULE] erro garantindo lead p/ '{action or 'acao'}': {e}")
+        return None
+
+
 def _trigger_retention_tag_only(conv_id, lead_id, question, phone=None):
     """(2026-06-25) Fluxo de TESTE da automação "Retenção IA": em vez de distribuir,
     apenas:
@@ -12948,6 +13075,12 @@ def trigger_retention(conv_id, lead_id, question, phone=None, target_name=None):
     (2026-05-27) Se lead_id=None, tenta resolver via telefone (identify_student)
     e, se ainda assim falhar, cria lead+business novos.
     """
+    # (2026-07-16) REGRA: garante o lead ANTES de qualquer coisa (tag/automação,
+    # nota ou distribuição de retenção). Resolve uma vez e reaproveita nos dois
+    # fluxos (RET-IA por tag e distribuição p/ o time de retenção).
+    if not lead_id:
+        lead_id = _guarantee_lead(conv_id=conv_id, phone=phone, action='retencao') or lead_id
+
     # (2026-06-25) TESTE: só para o(s) telefone(s) de teste, aciona a automação
     # RET-IA (tag) em vez de distribuir. Demais alunos seguem o fluxo normal abaixo.
     if _use_ret_ia_automation(phone or _current_phone):
@@ -15905,6 +16038,12 @@ def handle_message(conv_id, msg_id, msg_body, is_button_click=False, image_info=
             p(f"  [LOW-CONF-D4] erro guard pre-escala: {e_guard}")
 
         p(f"  [LOW-CONF-D4] conf={confidence:.2f} < 0.40 -> escalando direto")
+        # (2026-07-16) REGRA: cria/garante o lead ANTES de prometer a transferência
+        # ao aluno e de distribuir — evita "Vou te conectar..." sem lead vinculado.
+        try:
+            _guarantee_lead(conv_id=conv_id, action='low_conf_escalate')
+        except Exception:
+            pass
         # FRASE NEUTRA — NUNCA usar "informacao errada" (decisao do time).
         # A mensagem antiga ("Pra eu nao te passar nenhuma informacao errada...")
         # ficava ruim e era usada em situacoes que tinham rota propria.
@@ -16208,6 +16347,18 @@ def main():
         _oneshot_fix_vanessa_barra_funda()
     except Exception as e_one:
         p(f"  [ONESHOT-VANESSA] erro: {e_one}")
+
+    # === STARTUP CATCH-UP: aplica as regras atuais ao backlog imediatamente ===
+    # (2026-07-16) Sempre que o agente sobe (rebuild), ja processa os casos reais
+    # que estao parados na fila com as regras vigentes (ex.: criacao de lead),
+    # permitindo validar rapido em producao. So roda se o agente estiver ligado.
+    try:
+        if _agent_runtime_enabled():
+            startup_catch_up_new_rules()
+        else:
+            p("  [STARTUP-CATCHUP] agente desligado via cockpit — catch-up adiado")
+    except Exception as e_cu:
+        p(f"  [STARTUP-CATCHUP] erro: {e_cu}")
 
     _paused_logged_at = 0
     while True:
