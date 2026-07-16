@@ -7256,11 +7256,25 @@ def process_queue_fast_sweep(waiting_convs, all_open_convs=None):
                 continue
 
             # --- RETENCAO / CANCELAMENTO -> TIME DE RETENÇÃO (Wesley/Danúbia) ---
-            if is_retention_intent(user_text):
+            # (2026-07-16) Conversa JÁ em retenção (tag RET-IA / handoff retention)
+            # que recebe NOVA mensagem do aluno re-aciona a automação MESMO que o
+            # texto não seja uma frase clara de cancelamento (ex.: follow-up "e aí?").
+            # Caso Débora: voltou a escrever, ficou presa e a automação por tag não
+            # re-disparou. O dedup de 6h continua sendo respeitado dentro de
+            # _trigger_retention_tag_only (toggle da tag).
+            _already_ret_conv = False
+            if not is_retention_intent(user_text):
+                try:
+                    _mot_r, _ = _is_handoff_active(cid)
+                    _already_ret_conv = _mot_r in ('retention', 'retention_after_hours')
+                except Exception:
+                    _already_ret_conv = False
+            if is_retention_intent(user_text) or (_already_ret_conv and _use_ret_ia_automation(phone)):
                 # (2026-06-25) TESTE: telefone de teste -> só tag RET-IA, silencio
                 if _use_ret_ia_automation(phone):
                     _trigger_retention_tag_only(cid, None, user_text, phone=phone)
-                    p(f"  [QUEUE-SWEEP] [RET-IA] tag acionada, sem distribuir/mensagem")
+                    _re = 're-' if _already_ret_conv else ''
+                    p(f"  [QUEUE-SWEEP] [RET-IA] tag {_re}acionada (nova msg em conv de retenção), sem distribuir/mensagem")
                     if last_msg and last_msg.get('id'):
                         processed_msg_ids.add(last_msg['id'])
                     _QUEUE_SWEEP_RECENT[cid] = now_ts
@@ -7606,6 +7620,142 @@ def rescue_stuck_handoff_orphans(open_convs):
             p(f"  [HANDOFF-RESCUE] {rescued} conversas orfas c/ promessa de handoff reenfileiradas p/ distribuicao")
     except Exception as e:
         p(f"  [HANDOFF-RESCUE] erro: {e}")
+
+
+# ===================== TRANSFER-PROMISE RESCUE (promessa feita, sem atendente) =====================
+# (2026-07-16) Caso reportado: dezenas de conversas presas em "Nao iniciados" com
+# a promessa do bot ("Vou te transferir para X"), nota de "Handoff fulfillment" ou
+# "Resgate pos-encerramento" — mas SEM consultor de fato atribuido. O
+# rescue_stuck_handoff_orphans so age quando existe linha em handoff_active
+# (dispatch/preferred/human_unavailable) e status 'unstarted'. Quando o lock de
+# dispatch expirou/nao existe, ou o transfer de chat nao colou, a conversa some de
+# todos os sweeps. Esta varredura pega QUALQUER conversa sem atendente cuja ultima
+# interacao do bot foi uma promessa de transferencia e a reenfileira p/ um
+# consultor ATIVO — limpando locks de dispatch/human_unavailable presos. NAO toca
+# conversas em retencao (RET-IA/Wesley/Danubia).
+_TRANSFER_PROMISE_RESCUE_RECENT = {}
+TRANSFER_PROMISE_RESCUE_COOLDOWN_S = 1800   # 30 min por conversa (evita loop)
+_TRANSFER_PROMISE_RESCUE_LAST_RUN = 0.0
+TRANSFER_PROMISE_RESCUE_INTERVAL_S = 300    # roda no maximo a cada 5 min
+TRANSFER_PROMISE_MIN_AGE_MIN = 5            # da chance ao fluxo normal antes de resgatar
+_TRANSFER_PROMISE_PATTERNS = (
+    'vou te transferir para',
+    'distribuição automática pelo agente ia',
+    'distribuicao automatica pelo agente ia',
+    'handoff fulfillment',
+    'resgate pos-encerramento',
+    'resgate pós-encerramento',
+    'redistribuicao automatica',
+    'redistribuição automática',
+    'vou te conectar agora com',
+    'em breve um de nossos consultores',
+)
+
+
+def rescue_stuck_transfer_promises(open_convs):
+    """Reenfileira conversas sem atendente cuja ultima interacao do bot foi uma
+    promessa de transferencia nao cumprida (independente de handoff_active vivo ou
+    do status). Roteia a um consultor ATIVO via pending (preferred=NULL)."""
+    global _TRANSFER_PROMISE_RESCUE_LAST_RUN
+    if not is_within_business_hours() or not open_convs:
+        return
+    now_ts = time.time()
+    if (now_ts - _TRANSFER_PROMISE_RESCUE_LAST_RUN) < TRANSFER_PROMISE_RESCUE_INTERVAL_S:
+        return
+    _TRANSFER_PROMISE_RESCUE_LAST_RUN = now_ts
+
+    rescued = 0
+    _MAX = 25
+    _scanned = 0
+    for c in open_convs:
+        if rescued >= _MAX or _scanned >= _MAX * 3:
+            break
+        try:
+            if c.get('finished') or c.get('attendants'):
+                continue
+            if (c.get('currentThread') or {}).get('attendants'):
+                continue
+            cid = c.get('id')
+            if not cid:
+                continue
+            last = _TRANSFER_PROMISE_RESCUE_RECENT.get(cid, 0)
+            if last and (now_ts - last) < TRANSFER_PROMISE_RESCUE_COOLDOWN_S:
+                continue
+
+            # Idade minima: nao resgata promessa recem-feita (fluxo normal ainda pode colar)
+            _sent = c.get('lastSendedMessageDate', '') or c.get('lastMessageDate', '') or ''
+            if _sent:
+                try:
+                    from datetime import datetime as _dtp
+                    _age_min = (now_ts - _dtp.fromisoformat(str(_sent).replace('Z', '+00:00')).timestamp()) / 60
+                    if _age_min < TRANSFER_PROMISE_MIN_AGE_MIN:
+                        continue
+                except Exception:
+                    pass
+
+            _scanned += 1
+            try:
+                msgs = get_conversation_messages_api(cid, limit=15) or []
+            except Exception:
+                msgs = []
+            if not msgs:
+                continue
+
+            # A ultima interacao do bot foi uma promessa de transferencia?
+            _has_promise = False
+            for m in msgs:
+                if m.get('received', False):
+                    continue
+                body = (m.get('body') or m.get('text') or '').strip().lower()
+                if body and any(pat in body for pat in _TRANSFER_PROMISE_PATTERNS):
+                    _has_promise = True
+                    break
+            if not _has_promise:
+                continue
+
+            # NAO mexe em retencao (RET-IA / Wesley / Danubia) — a automacao cuida
+            try:
+                if _is_in_retention(cid, msgs=msgs):
+                    continue
+            except Exception:
+                pass
+
+            # Se o aluno encerrou (despedida/agradecimento), nao reenfileira p/ atendente
+            _last_aluno = ''
+            for m in msgs:
+                if m.get('received', False):
+                    _last_aluno = (m.get('body') or m.get('text') or '').strip()
+                    break
+            if _last_aluno and not _is_pure_greeting(_last_aluno) and (
+                _is_farewell_message(_last_aluno) or _is_resolution_confirmation(_last_aluno)
+            ):
+                _TRANSFER_PROMISE_RESCUE_RECENT[cid] = now_ts
+                continue
+
+            ct = c.get('contact', {}) or {}
+            phone = ''.join(ch for ch in str(ct.get('phoneNumber', '') or ct.get('contactId', '') or '') if ch.isdigit())
+            if not phone:
+                continue
+            name = (ct.get('name', '') or '').strip()
+
+            # Limpa lock de dispatch/human_unavailable preso, para a distribuicao
+            # nao pular por idempotencia. (Retencao ja foi excluida acima.)
+            try:
+                _mot_stuck, _ = _is_handoff_active(cid)
+                if _mot_stuck in ('dispatch', 'human_unavailable', 'preferred'):
+                    _clear_handoff_active(cid, reason='transfer_promise_requeue')
+            except Exception:
+                pass
+
+            if _requeue_orphan_pending(cid, phone, name, reason='promessa_transferencia_presa'):
+                rescued += 1
+                p(f"  [PROMISE-RESCUE] {cid[:12]} ...{phone[-4:]} promessa sem atendente — reenfileirado p/ consultor ativo")
+            _TRANSFER_PROMISE_RESCUE_RECENT[cid] = now_ts
+        except Exception as e_one:
+            p(f"  [PROMISE-RESCUE] erro conv {str(c.get('id','?'))[:12]}: {e_one}")
+
+    if rescued:
+        p(f"  [PROMISE-RESCUE] {rescued} conversas com promessa presa reenfileiradas p/ distribuicao")
 
 
 # ===================== POST-CLOSE RESCUE (reabertura apos encerramento) =====================
@@ -16329,6 +16479,10 @@ def main():
                 rescue_stuck_handoff_orphans(_convs_queue_source)
             except Exception as e_hro:
                 p(f"  [HANDOFF-RESCUE] Erro: {e_hro}")
+            try:
+                rescue_stuck_transfer_promises(_convs_queue_source)
+            except Exception as e_tpr:
+                p(f"  [PROMISE-RESCUE] Erro: {e_tpr}")
 
             # === MONITORAR FOLLOW-UP: conversas onde agente respondeu E aluno NÃO respondeu ===
             _fu_candidates = list(convs_opened) + [c for c in rest if (c.get('lastSendedMessageDate','') or '') > (c.get('lastReceivedMessageDate','') or '')]
