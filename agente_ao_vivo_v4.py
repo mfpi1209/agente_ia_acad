@@ -6436,6 +6436,37 @@ IN_HOURS_RESCUE_COOLDOWN_S = 30 * 60  # nao re-resgata mesma conv em 30min (suce
 # Usado pelas varreduras de handoff (fulfillment e orphan-rescue) para nao
 # ressuscitar conversas antigas/finalizadas.
 REACTIVATION_MAX_AGE_S = 24 * 3600
+
+
+def _conv_outside_reactivation_window(c):
+    """True quando a conversa NAO deve ser reativada/forcada num handoff pelas
+    varreduras (fulfillment, orphan-rescue, transfer-promise). Regra unica:
+      - conversa finalizada; ou
+      - ultima mensagem DO ALUNO mais antiga que a janela (24h); ou
+      - nunca houve inbound do aluno E a ultima atividade (envio/mensagem) ja
+        passou da janela -> disparo/promessa antiga que so gera 'Falha'.
+    (2026-07-22) A guarda anterior olhava so lastReceivedMessageDate; contato de
+    disparo que nunca respondeu tem esse campo vazio -> _iso_age_seconds=None e a
+    guarda era ignorada, reativando gente antiga. O fallback abaixo fecha o furo.
+    """
+    try:
+        if c.get('finished') or ('finished' in (c.get('statuses') or [])):
+            return True
+        recv_age = _iso_age_seconds(c.get('lastReceivedMessageDate', '') or '')
+        if recv_age is not None:
+            return recv_age > REACTIVATION_MAX_AGE_S
+        # Sem inbound conhecido: usa a ultima atividade de saida como referencia.
+        # Se nem isso existe, deixa o fluxo normal decidir (nao bloqueia).
+        act_age = _iso_age_seconds(
+            c.get('lastSendedMessageDate', '') or c.get('lastMessageDate', '') or ''
+        )
+        if act_age is not None:
+            return act_age > REACTIVATION_MAX_AGE_S
+        return False
+    except Exception:
+        return False
+
+
 # (2026-05-27) Para casos de falha (sem consultor, sem lead, transfer falhou),
 # usar cooldown curto para que o proximo ciclo tente novamente em minutos.
 _IN_HOURS_RESCUE_RETRY_S = 2 * 60  # retry em 2 min apos falha temporaria
@@ -7473,12 +7504,11 @@ def process_handoff_fulfillment_sweep(open_convs):
                 except Exception:
                     pass
                 continue
-            # (2026-07-22) Guarda de janela: nao forca handoff em conversa cuja
-            # ultima mensagem DO ALUNO seja mais antiga que a janela (24h). Fora
-            # dela o envio falha e nao se deve reativar gente antiga. Limpa o
-            # lock velho pra promessa morrer em vez de ficar em loop.
-            _recv_age = _iso_age_seconds(c.get('lastReceivedMessageDate', '') or '')
-            if _recv_age is not None and _recv_age > REACTIVATION_MAX_AGE_S:
+            # (2026-07-22) Guarda de janela: nao forca handoff em conversa fora da
+            # janela do WhatsApp (24h) — inclui contato de disparo que nunca
+            # respondeu. Fora dela o envio falha (aba 'Falha') e nao se deve
+            # reativar gente antiga. Limpa o lock velho pra promessa morrer.
+            if _conv_outside_reactivation_window(c):
                 try:
                     _clear_handoff_active(cid, reason='conv_too_old')
                 except Exception:
@@ -7594,11 +7624,10 @@ def rescue_stuck_handoff_orphans(open_convs):
         try:
             if c.get('finished') or c.get('attendants'):
                 continue
-            # (2026-07-22) Nao reenfileira handoff de conversa antiga (>24h):
-            # fora da janela do WhatsApp o atendimento nao chega e so gera
-            # falha/ruido. Deixa a promessa velha morrer em vez de reativar.
-            _recv_age = _iso_age_seconds(c.get('lastReceivedMessageDate', '') or '')
-            if _recv_age is not None and _recv_age > REACTIVATION_MAX_AGE_S:
+            # (2026-07-22) Nao reenfileira handoff de conversa fora da janela do
+            # WhatsApp (24h ou sem inbound do aluno): o atendimento nao chega e so
+            # gera falha/ruido. Deixa a promessa velha morrer em vez de reativar.
+            if _conv_outside_reactivation_window(c):
                 continue
             if 'unstarted' not in (c.get('statuses') or []) and not c.get('isPending'):
                 continue
@@ -7716,6 +7745,14 @@ def rescue_stuck_transfer_promises(open_convs):
             if c.get('finished') or c.get('attendants'):
                 continue
             if (c.get('currentThread') or {}).get('attendants'):
+                continue
+            # (2026-07-22) Guarda de janela: NAO reenfileira promessa de transfer
+            # em conversa fora da janela do WhatsApp (24h ou disparo sem inbound).
+            # Faltava aqui: esta varredura pega QUALQUER conversa cuja ultima fala
+            # do bot foi 'Vou te transferir para X', entao reativava contatos
+            # antigos de disparo (2502/080/Acolhimento) -> atendente re-adicionado
+            # -> automacao 'sem retorno' freeform -> aba 'Falha' lotada.
+            if _conv_outside_reactivation_window(c):
                 continue
             cid = c.get('id')
             if not cid:
