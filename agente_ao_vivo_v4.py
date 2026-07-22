@@ -4370,6 +4370,17 @@ def send_and_track(conv_id, text, buttons=None, force=False):
         lock.acquire()
     try:
         # ============================================================
+        # GUARDA DE JANELA DO WHATSAPP (2026-07-22)
+        # ============================================================
+        # Fora da janela de 24h (aluno sem responder ha >24h ou nunca respondeu)
+        # QUALQUER freeform falha e cai na aba "Falha". Vale ATE p/ force=True —
+        # a mensagem de distribuicao "Vou te transferir para X" usa force e era
+        # justamente ela chegando a gente antiga. Nao bloqueia quando a janela e
+        # desconhecida (sem mensagens) para nao suprimir conversa legitima.
+        if conv_id and _wa_window_closed(conv_id):
+            p(f"  [WA-WINDOW] {conv_id[:12]} janela 24h fechada — freeform SUPRIMIDO (evita 'Falha' em gente antiga)")
+            return 'suppressed'
+        # ============================================================
         # CAMADAS D1 / D2 / D5 (2026-05-25): hard-stop humano + anti-burst
         # ============================================================
         # Caso Debora (11975717913): apos atendente finalizar as 12:49,
@@ -9254,6 +9265,52 @@ def _iso_age_seconds(iso_ts):
         return None
 
 
+# (2026-07-22) Janela freeform do WhatsApp. Fora dela (aluno sem enviar msg
+# ha >24h, ou nunca respondeu — so recebeu disparo) QUALQUER envio livre falha
+# e cai na aba "Falha". Alem disso, atribuir atendente dispara a automacao
+# "sem retorno" da DataCrazy, que tambem tenta um freeform e falha. Esta e a
+# guarda CENTRAL usada por send_and_track (envio ao cliente) e pela
+# distribuicao (atribuicao de atendente) p/ nao reativar/enviar a gente antiga.
+WA_WINDOW_S = 24 * 3600
+
+
+def _wa_window_closed(conv_id, msgs=None):
+    """True quando a janela de 24h do WhatsApp esta FECHADA para a conversa:
+    o aluno nao enviou mensagem nas ultimas 24h (ou nunca enviou, so recebeu
+    disparo). Baseia-se nas mensagens (campo 'received' + 'createdAt'), usando
+    o cache _cached_msgs e, em ultimo caso, a API.
+
+    Retorna False (nao bloqueia) quando NAO ha como saber (sem mensagens), para
+    nao suprimir conversas legitimas por falta de dado. Se ha mensagens mas
+    nenhuma recebida do aluno, a janela nunca abriu -> True.
+    """
+    if not conv_id:
+        return False
+    try:
+        if msgs is None:
+            msgs = _cached_msgs.get(conv_id)
+        if not msgs:
+            msgs = get_conversation_messages_api(conv_id, limit=30) or []
+            if msgs:
+                _cached_msgs[conv_id] = msgs
+        if not msgs:
+            return False
+        last_inbound_age = None
+        for m in msgs:
+            if not isinstance(m, dict):
+                continue
+            if m.get('isInternal') or not m.get('received', False):
+                continue
+            age = _iso_age_seconds(m.get('createdAt') or m.get('updatedAt') or '')
+            if age is not None and (last_inbound_age is None or age < last_inbound_age):
+                last_inbound_age = age
+        if last_inbound_age is None:
+            return True
+        return last_inbound_age > WA_WINDOW_S
+    except Exception:
+        return False
+
+
 # ============== DEDUP PERSISTENTE E HANDOFF ATIVO ==============
 # Sobrevive a restart do agente. Centraliza:
 #   - signatures: assinaturas de mensagens enviadas (motivo+conv) p/ evitar duplicar
@@ -12393,6 +12450,19 @@ def _distribute_to_attendant_locked(conv_id, reason='', silent_after_hours=True,
             return True
     except Exception as e_prot2:
         p(f"  [DIST] erro check handoff (segue mesmo assim): {e_prot2}")
+
+    # (2026-07-22) GUARDA DE JANELA: fora da janela de 24h do WhatsApp NAO
+    # distribui/atribui atendente. Atribuir dispara a automacao "sem retorno" da
+    # DataCrazy (freeform) que falha, e a msg "Vou te transferir" tambem falha —
+    # era o loop que enchia a aba "Falha" com gente antiga de disparo
+    # (2502/080/Acolhimento). Deixa a promessa morrer em vez de reativar.
+    if _wa_window_closed(conv_id):
+        p(f"  [DIST] {conv_id[:12]} janela 24h fechada — NAO distribui (evita 'Falha'/automacao em gente antiga). motivo='{reason}'")
+        try:
+            _clear_handoff_active(conv_id, reason='wa_window_closed')
+        except Exception:
+            pass
+        return True
 
     consultant = get_available_consultant(exclude_attendants=exclude_attendants)
     if not consultant:
