@@ -3668,6 +3668,8 @@ _OPENAI_PRICES = {
     'gpt-5-mini': (0.25, 2.00),
     'gpt-4.1': (2.00, 8.00),
     'gpt-4.1-mini': (0.40, 1.60),
+    'gpt-5-nano': (0.05, 0.40),
+    'gpt-4.1-nano': (0.10, 0.40),
     'o4-mini': (1.10, 4.40),
     'o3-mini': (1.10, 4.40),
 }
@@ -6427,6 +6429,13 @@ _IN_HOURS_RESCUE_RECENT = {}  # conv_id -> last_rescue_ts
 IN_HOURS_RESCUE_AGE_MIN = 5
 IN_HOURS_RESCUE_MAX_AGE_MIN = 6 * 60  # ignora alem disso (provavelmente foi resolvido manualmente)
 IN_HOURS_RESCUE_COOLDOWN_S = 30 * 60  # nao re-resgata mesma conv em 30min (sucesso)
+
+# (2026-07-22) Janela maxima para REATIVAR / forcar handoff em conversa parada.
+# Fora da janela do WhatsApp (24h) qualquer envio freeform falha (cai na aba
+# "Falha") e nao faz sentido re-adicionar atendente a forca em gente antiga.
+# Usado pelas varreduras de handoff (fulfillment e orphan-rescue) para nao
+# ressuscitar conversas antigas/finalizadas.
+REACTIVATION_MAX_AGE_S = 24 * 3600
 # (2026-05-27) Para casos de falha (sem consultor, sem lead, transfer falhou),
 # usar cooldown curto para que o proximo ciclo tente novamente em minutos.
 _IN_HOURS_RESCUE_RETRY_S = 2 * 60  # retry em 2 min apos falha temporaria
@@ -7453,6 +7462,28 @@ def process_handoff_fulfillment_sweep(open_convs):
             cid = c.get('id', '')
             if not cid or c.get('attendants'):
                 continue
+            # (2026-07-22) NAO ressuscitar conversa finalizada. Caso reportado
+            # (Yago/Breno): admin finalizou e removeu o atendente, mas o lock de
+            # handoff ficou preso -> esta varredura re-adicionava o atendente a
+            # forca a cada 2min (e re-disparava a automacao "sem retorno 60min").
+            # Limpa o lock e pula.
+            if c.get('finished') or ('finished' in (c.get('statuses') or [])):
+                try:
+                    _clear_handoff_active(cid, reason='conv_finished')
+                except Exception:
+                    pass
+                continue
+            # (2026-07-22) Guarda de janela: nao forca handoff em conversa cuja
+            # ultima mensagem DO ALUNO seja mais antiga que a janela (24h). Fora
+            # dela o envio falha e nao se deve reativar gente antiga. Limpa o
+            # lock velho pra promessa morrer em vez de ficar em loop.
+            _recv_age = _iso_age_seconds(c.get('lastReceivedMessageDate', '') or '')
+            if _recv_age is not None and _recv_age > REACTIVATION_MAX_AGE_S:
+                try:
+                    _clear_handoff_active(cid, reason='conv_too_old')
+                except Exception:
+                    pass
+                continue
             last_done = _HANDOFF_FULFILL_RECENT.get(cid, 0)
             if last_done and (now_ts - last_done) < HANDOFF_FULFILL_COOLDOWN_S:
                 continue
@@ -7562,6 +7593,12 @@ def rescue_stuck_handoff_orphans(open_convs):
     for c in open_convs:
         try:
             if c.get('finished') or c.get('attendants'):
+                continue
+            # (2026-07-22) Nao reenfileira handoff de conversa antiga (>24h):
+            # fora da janela do WhatsApp o atendimento nao chega e so gera
+            # falha/ruido. Deixa a promessa velha morrer em vez de reativar.
+            _recv_age = _iso_age_seconds(c.get('lastReceivedMessageDate', '') or '')
+            if _recv_age is not None and _recv_age > REACTIVATION_MAX_AGE_S:
                 continue
             if 'unstarted' not in (c.get('statuses') or []) and not c.get('isPending'):
                 continue
