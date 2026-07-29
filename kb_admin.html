@@ -3,30 +3,31 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Cockpit IA - Cruzeiro do Sul</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<title>Cockpit IA · EduIT CRM</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
-<script>tailwind.config={theme:{extend:{fontFamily:{sans:['Inter','sans-serif']}}}}</script>
-<!-- tw-safelist -->
-<div class="hidden text-indigo-500 text-amber-500 text-emerald-500 text-gray-500 bg-indigo-100 bg-amber-100 bg-emerald-100 bg-gray-100 text-indigo-700 text-amber-700 text-emerald-700 text-gray-700 ring-2 ring-indigo-400 bg-indigo-50"></div>
+<script>tailwind.config={theme:{extend:{fontFamily:{sans:['DM Sans','system-ui','sans-serif'],display:['Plus Jakarta Sans','DM Sans','sans-serif']},colors:{brand:{DEFAULT:'#5b6ff5',light:'#7b8df7',dark:'#3d52e8'}}}}}</script>
+<!-- tw-safelist — brand CRM (#5b6ff5) -->
+<div class="hidden text-indigo-500 text-amber-500 text-emerald-500 text-gray-500 bg-indigo-100 bg-amber-100 bg-emerald-100 bg-gray-100 text-indigo-700 text-amber-700 text-emerald-700 text-gray-700 ring-2 ring-indigo-400 bg-indigo-50 text-brand bg-brand/10"></div>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
-:root{--p:#4f46e5;--p2:#4338ca;--p3:#e0e7ff;--bg:#f8fafc;--card:#fff;--border:#e5e7eb;--t1:#111827;--t2:#4b5563;--t3:#9ca3af;--r:12px;--sh:0 1px 3px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);}
-body{background:var(--bg);font-family:'Inter',sans-serif;color:var(--t1);font-size:14px;-webkit-font-smoothing:antialiased;}
-.card{background:var(--card);border-radius:var(--r);box-shadow:var(--sh);border:1px solid var(--border);transition:box-shadow .15s;}
-.card:hover{box-shadow:0 4px 12px rgba(0,0,0,.07);}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border-radius:8px;padding:8px 16px;font-weight:500;font-size:13px;transition:all .15s;cursor:pointer;border:none;font-family:inherit;}
-.btn-p{background:var(--p);color:#fff;} .btn-p:hover{background:var(--p2);transform:translateY(-1px);box-shadow:0 4px 12px rgba(79,70,229,.3);}
+/* Tokens alinhados ao CRM v2 (globals-v2 / brand-primary) */
+:root{--p:#5b6ff5;--p2:#3d52e8;--p3:rgba(91,111,245,.14);--bg:#dde8f5;--card:rgba(255,255,255,.92);--border:rgba(15,23,42,.08);--t1:#0f172a;--t2:#374151;--t3:#4b5563;--r:14px;--sh:0 4px 14px rgba(91,111,245,.12),0 1px 3px rgba(15,23,42,.06);--glass:rgba(255,255,255,.72);}
+body{background:var(--bg);background-image:radial-gradient(1200px 600px at 10% -10%,rgba(91,111,245,.18),transparent 55%),radial-gradient(900px 500px at 90% 0%,rgba(167,139,250,.14),transparent 50%);font-family:'DM Sans',system-ui,sans-serif;color:var(--t1);font-size:14px;-webkit-font-smoothing:antialiased;min-height:100vh;}
+.card{background:var(--card);backdrop-filter:blur(12px);border-radius:var(--r);box-shadow:var(--sh);border:1px solid var(--border);transition:box-shadow .15s,transform .15s;}
+.card:hover{box-shadow:0 8px 24px rgba(91,111,245,.14);}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border-radius:10px;padding:8px 16px;font-weight:600;font-size:13px;transition:all .15s;cursor:pointer;border:none;font-family:inherit;}
+.btn-p{background:linear-gradient(135deg,#5b6ff5,#3d52e8);color:#fff;box-shadow:0 4px 14px rgba(91,111,245,.35);} .btn-p:hover{background:linear-gradient(135deg,#7b8df7,#5b6ff5);transform:translateY(-1px);box-shadow:0 6px 18px rgba(91,111,245,.4);}
 .btn-d{background:#fee2e2;color:#dc2626;} .btn-d:hover{background:#fecaca;}
-.btn-g{background:var(--card);color:var(--t2);border:1px solid var(--border);} .btn-g:hover{background:#f9fafb;border-color:#d1d5db;}
+.btn-g{background:var(--glass);color:var(--t2);border:1px solid var(--border);} .btn-g:hover{background:#fff;border-color:rgba(91,111,245,.35);}
 .btn-s{background:#f0fdf4;color:#16a34a;} .btn-s:hover{background:#dcfce7;}
 .btn-w{background:#fefce8;color:#ca8a04;} .btn-w:hover{background:#fef9c3;}
-.btn-sm{padding:5px 10px;font-size:12px;border-radius:6px;}
-.inp{border:1.5px solid var(--border);border-radius:8px;padding:9px 12px;width:100%;font-size:13px;font-family:inherit;transition:all .15s;background:#fff;}
-.inp:focus{outline:none;border-color:var(--p);box-shadow:0 0 0 3px rgba(79,70,229,.1);}
+.btn-sm{padding:5px 10px;font-size:12px;border-radius:8px;}
+.inp{border:1.5px solid var(--border);border-radius:10px;padding:9px 12px;width:100%;font-size:13px;font-family:inherit;transition:all .15s;background:#fff;}
+.inp:focus{outline:none;border-color:var(--p);box-shadow:0 0 0 3px rgba(91,111,245,.18);}
 .inp:disabled{background:#f3f4f6;color:#9ca3af;}
 textarea.inp{resize:vertical;min-height:60px;}
 select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%236b7280' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;}
@@ -45,13 +46,14 @@ select.inp{cursor:pointer;-webkit-appearance:none;background-image:url("data:ima
 .modal-bg{background:rgba(15,23,42,.5);backdrop-filter:blur(8px);}
 .sortable-ghost{opacity:.4;background:#e0e7ff;border-radius:8px;}
 .sortable-drag{background:#fff;border-radius:8px;box-shadow:0 8px 25px rgba(0,0,0,.15);z-index:999;}
-.drag-handle{cursor:grab;color:#cbd5e1;transition:color .15s;} .drag-handle:hover{color:#6366f1;}
+.drag-handle{cursor:grab;color:#cbd5e1;transition:color .15s;} .drag-handle:hover{color:#5b6ff5;}
 .drag-handle:active{cursor:grabbing;}
 .sortable-list{min-height:8px;}
 .conf-h{color:#16a34a;}.conf-m{color:#ca8a04;}.conf-l{color:#dc2626;}
 .stat-card{position:relative;overflow:hidden;}
-.stat-card::after{content:'';position:absolute;top:-20px;right:-20px;width:80px;height:80px;border-radius:50%;opacity:.06;}
-.stat-card.blue::after{background:#4f46e5;}.stat-card.green::after{background:#16a34a;}.stat-card.yellow::after{background:#eab308;}.stat-card.purple::after{background:#9333ea;}.stat-card.red::after{background:#dc2626;}
+.stat-card::after{content:'';position:absolute;top:-20px;right:-20px;width:80px;height:80px;border-radius:50%;opacity:.08;}
+.stat-card.blue::after{background:#5b6ff5;}.stat-card.green::after{background:#16a34a;}.stat-card.yellow::after{background:#eab308;}.stat-card.purple::after{background:#a78bfa;}.stat-card.red::after{background:#dc2626;}
+h1,h2,h3,.font-display{font-family:'Plus Jakarta Sans','DM Sans',sans-serif;}
 /* WhatsApp Chat */
 .wa-bg{background:#efeae2;background-image:url("data:image/svg+xml,%3Csvg width='400' height='400' xmlns='http://www.w3.org/2000/svg'%3E%3Cdefs%3E%3Cpattern id='a' width='40' height='40' patternUnits='userSpaceOnUse'%3E%3Cpath d='M0 20h40M20 0v40' stroke='%23d5cfc6' stroke-width='.3' fill='none'/%3E%3C/pattern%3E%3C/defs%3E%3Crect width='400' height='400' fill='url(%23a)'/%3E%3C/svg%3E");}
 .wa-header{background:linear-gradient(135deg,#075e54,#128c7e);color:#fff;padding:12px 16px;display:flex;align-items:center;gap:10px;}
@@ -254,11 +256,11 @@ body.dark-mode .wa-bubble.wa-bot .wa-meta{color:#6b7085;}
 <body>
 
 <!-- HEADER -->
-<header class="sticky top-0 z-50" style="background:linear-gradient(135deg,#4f46e5 0%,#7c3aed 100%);box-shadow:0 2px 12px rgba(79,70,229,.25);">
+<header class="sticky top-0 z-50" style="background:linear-gradient(135deg,#5b6ff5 0%,#3d52e8 55%,#1e3a8a 100%);box-shadow:0 4px 14px rgba(91,111,245,.35);">
 <div class="max-w-screen-2xl mx-auto px-5 py-3 flex items-center justify-between">
   <div class="flex items-center gap-3">
     <div class="w-10 h-10 rounded-xl bg-white bg-opacity-20 flex items-center justify-center backdrop-blur"><i class="fas fa-brain text-white text-lg"></i></div>
-    <div><h1 class="text-base font-bold text-white tracking-tight">Cockpit IA</h1><p class="text-xs text-indigo-200">Cruzeiro do Sul Educacional</p></div>
+    <div><h1 class="text-base font-bold text-white tracking-tight" style="font-family:'Plus Jakarta Sans',sans-serif">Cockpit IA</h1><p class="text-xs text-white/70">EduIT CRM · Cruzeiro do Sul</p></div>
   </div>
   <div class="flex items-center gap-3">
     <button id="theme-toggle" onclick="toggleDarkMode()" title="Alternar tema claro/escuro"><i class="fas fa-moon" id="theme-icon"></i></button>
@@ -269,7 +271,7 @@ body.dark-mode .wa-bubble.wa-bot .wa-meta{color:#6b7085;}
 
 <!-- TABS -->
 <div class="max-w-screen-2xl mx-auto px-5">
-<div class="flex bg-white mt-4 rounded-xl border border-gray-100 px-2 overflow-x-auto" style="box-shadow:0 1px 3px rgba(0,0,0,.03);">
+<div class="flex mt-4 rounded-xl px-2 overflow-x-auto" style="background:rgba(255,255,255,.82);backdrop-filter:blur(12px);border:1px solid rgba(15,23,42,.08);box-shadow:0 4px 14px rgba(91,111,245,.1);">
   <div class="tab active" data-tab="dashboard" onclick="sw('dashboard')"><i class="fas fa-chart-pie mr-1.5"></i>Dashboard</div>
   <div class="tab" data-tab="desempenho" onclick="sw('desempenho')"><i class="fas fa-gauge-high mr-1.5"></i>Desempenho</div>
   <div class="tab" data-tab="qa" onclick="sw('qa')"><i class="fas fa-database mr-1.5"></i>Base Q&A</div>
@@ -527,10 +529,10 @@ body.dark-mode .wa-bubble.wa-bot .wa-meta{color:#6b7085;}
 <!-- ===== AGENTE IA (dashboard integrado) ===== -->
 <div id="tab-agentia" class="tc hidden fade">
 <style>
-#tab-agentia{--aia-bg:#f5f6fa;--aia-card:#ffffff;--aia-card-hover:#f0f1f5;--aia-border:#e2e4ea;--aia-text:#1e1e2e;--aia-muted:#6b7085;--aia-primary:#6366f1;--aia-primary-l:#818cf8;--aia-green:#22c55e;--aia-green-bg:rgba(34,197,94,.12);--aia-yellow:#eab308;--aia-yellow-bg:rgba(234,179,8,.12);--aia-red:#ef4444;--aia-red-bg:rgba(239,68,68,.12);--aia-blue:#3b82f6;--aia-blue-bg:rgba(59,130,246,.12);--aia-purple:#a855f7;--aia-orange:#f97316;}
+#tab-agentia{--aia-bg:#e8eef8;--aia-card:rgba(255,255,255,.92);--aia-card-hover:#f0f4fc;--aia-border:rgba(15,23,42,.08);--aia-text:#0f172a;--aia-muted:#4b5563;--aia-primary:#5b6ff5;--aia-primary-l:#7b8df7;--aia-green:#22c55e;--aia-green-bg:rgba(34,197,94,.12);--aia-yellow:#eab308;--aia-yellow-bg:rgba(234,179,8,.12);--aia-red:#ef4444;--aia-red-bg:rgba(239,68,68,.12);--aia-blue:#3b82f6;--aia-blue-bg:rgba(59,130,246,.12);--aia-purple:#a78bfa;--aia-orange:#f97316;}
 body.dark-mode #tab-agentia{--aia-bg:#0f1117;--aia-card:#1a1d27;--aia-card-hover:#22263a;--aia-border:#2a2e3f;--aia-text:#e4e6ed;--aia-muted:#8b8fa3;}
 #tab-agentia .aia-wrap{background:var(--aia-bg);border-radius:12px;padding:0;min-height:600px;color:var(--aia-text);font-family:'Inter',system-ui,sans-serif;}
-#tab-agentia .aia-topbar{background:linear-gradient(135deg,#4f46e5 0%,#6366f1 50%,#4f46e5 100%);padding:18px 28px;display:flex;align-items:center;justify-content:space-between;border-radius:12px 12px 0 0;border-bottom:1px solid var(--aia-border);}
+#tab-agentia .aia-topbar{background:linear-gradient(135deg,#5b6ff5 0%,#3d52e8 55%,#1e3a8a 100%);padding:18px 28px;display:flex;align-items:center;justify-content:space-between;border-radius:14px 14px 0 0;border-bottom:1px solid var(--aia-border);box-shadow:0 4px 14px rgba(91,111,245,.25);}
 body.dark-mode #tab-agentia .aia-topbar{background:linear-gradient(135deg,#1e1b4b 0%,#312e81 50%,#1e1b4b 100%);}
 #tab-agentia .aia-topbar h2{font-size:20px;font-weight:700;letter-spacing:-.5px;color:#fff;}
 #tab-agentia .aia-topbar h2 span{color:var(--aia-primary-l);}
